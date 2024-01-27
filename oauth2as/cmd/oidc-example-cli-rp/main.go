@@ -5,9 +5,9 @@ import (
 	"flag"
 	"log"
 
-	"github.com/pardot/oidc"
-	"github.com/pardot/oidc/clitoken"
-	"github.com/pardot/oidc/tokencache"
+	"github.com/lstoll/oidc"
+	"github.com/lstoll/oidc/clitoken"
+	"github.com/lstoll/oidc/tokencache"
 )
 
 func main() {

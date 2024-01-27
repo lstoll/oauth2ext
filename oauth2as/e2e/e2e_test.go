@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v3"
-	"github.com/pardot/oidc"
-	"github.com/pardot/oidc/core"
-	"github.com/pardot/oidc/discovery"
-	"github.com/pardot/oidc/signer"
+	"github.com/lstoll/oidc"
+	"github.com/lstoll/oidc/core"
+	"github.com/lstoll/oidc/discovery"
+	"github.com/lstoll/oidc/signer"
 )
 
 func TestE2E(t *testing.T) {

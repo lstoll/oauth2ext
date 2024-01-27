@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v3/jwt"
-	"github.com/pardot/oidc/discovery"
+	"github.com/lstoll/oidc/discovery"
 )
 
 type Verifier struct {

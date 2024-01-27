@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pardot/oidc"
-	"github.com/pardot/oidc/clitoken"
-	"github.com/pardot/oidc/tokencache"
+	"github.com/lstoll/oidc"
+	"github.com/lstoll/oidc/clitoken"
+	"github.com/lstoll/oidc/tokencache"
 	"golang.org/x/net/context"
 )
 

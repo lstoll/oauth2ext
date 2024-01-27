@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/pardot/oidc/core"
+	"github.com/lstoll/oidc/core"
 )
 
 type metadata struct {

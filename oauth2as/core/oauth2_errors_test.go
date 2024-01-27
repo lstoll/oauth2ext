@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/pardot/oidc/oauth2"
+	"github.com/lstoll/oidc/oauth2"
 	"golang.org/x/text/language"
 	"golang.org/x/text/search"
 )

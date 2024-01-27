@@ -10,7 +10,7 @@ import (
 
 	"net/http"
 
-	"github.com/pardot/oidc"
+	"github.com/lstoll/oidc"
 )
 
 const (

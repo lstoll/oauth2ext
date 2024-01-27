@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pardot/oidc/oauth2"
+	"github.com/lstoll/oidc/oauth2"
 )
 
 type GrantType string

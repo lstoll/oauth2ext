@@ -11,7 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/pardot/oidc"
+	"github.com/lstoll/oidc"
 	"github.com/pkg/errors"
 )
 

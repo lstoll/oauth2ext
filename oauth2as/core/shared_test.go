@@ -9,7 +9,7 @@ import (
 	"fmt"
 
 	"github.com/go-jose/go-jose/v3"
-	"github.com/pardot/oidc/signer"
+	"github.com/lstoll/oidc/signer"
 )
 
 // contains helpers used by multiple tests

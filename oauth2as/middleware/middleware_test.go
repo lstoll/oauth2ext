@@ -18,7 +18,7 @@ import (
 
 	"github.com/go-jose/go-jose/v3"
 	"github.com/gorilla/sessions"
-	"github.com/pardot/oidc"
+	"github.com/lstoll/oidc"
 )
 
 // mockOIDCServer mocks out just enough of an OIDC server for tests. It accepts

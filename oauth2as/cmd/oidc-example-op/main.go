@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/pardot/oidc/core"
-	"github.com/pardot/oidc/discovery"
+	"github.com/lstoll/oidc/core"
+	"github.com/lstoll/oidc/discovery"
 )
 
 func main() {

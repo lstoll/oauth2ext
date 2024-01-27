@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/pardot/oidc"
+	"github.com/lstoll/oidc"
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/nacl/secretbox"
 	"golang.org/x/crypto/scrypt"

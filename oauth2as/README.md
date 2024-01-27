@@ -1,3 +1,3 @@
 # oidc
 
-Experimental OIDC/Webauthn server
+Experimental OIDC library, for server and client use.

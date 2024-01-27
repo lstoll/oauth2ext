@@ -10,7 +10,7 @@ import (
 	"sync"
 
 	"github.com/gorilla/sessions"
-	"github.com/pardot/oidc"
+	"github.com/lstoll/oidc"
 )
 
 type tokenContextKey struct{}

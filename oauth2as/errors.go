@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/pardot/oidc/oauth2"
+	"github.com/lstoll/oidc/oauth2"
 	xoauth2 "golang.org/x/oauth2"
 )
 

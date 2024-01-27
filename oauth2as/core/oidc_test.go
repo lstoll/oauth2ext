@@ -13,9 +13,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/pardot/oidc"
-	"github.com/pardot/oidc/oauth2"
-	corev1 "github.com/pardot/oidc/proto/core/v1"
+	"github.com/lstoll/oidc"
+	"github.com/lstoll/oidc/oauth2"
+	corev1 "github.com/lstoll/oidc/proto/core/v1"
 )
 
 func TestStartAuthorization(t *testing.T) {

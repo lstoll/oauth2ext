@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/pardot/oidc"
+	"github.com/lstoll/oidc"
 )
 
 func TestKeychainCredentialCache(t *testing.T) {

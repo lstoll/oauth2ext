@@ -5,7 +5,7 @@ import (
 	"crypto/rsa"
 
 	"github.com/go-jose/go-jose/v3"
-	"github.com/pardot/oidc/signer"
+	"github.com/lstoll/oidc/signer"
 )
 
 func mustInitSigner() *signer.StaticSigner {

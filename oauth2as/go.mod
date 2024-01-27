@@ -1,4 +1,4 @@
-module github.com/pardot/oidc
+module github.com/lstoll/oidc
 
 go 1.21
 

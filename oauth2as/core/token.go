@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	corev1 "github.com/pardot/oidc/proto/core/v1"
+	corev1 "github.com/lstoll/oidc/proto/core/v1"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/protobuf/proto"
 )

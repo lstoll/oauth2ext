@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/pardot/oidc"
+	"github.com/lstoll/oidc"
 )
 
 type cachingTokenSource struct {

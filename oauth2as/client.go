@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v3"
-	"github.com/pardot/oidc/discovery"
+	"github.com/lstoll/oidc/discovery"
 	"golang.org/x/oauth2"
 )
 

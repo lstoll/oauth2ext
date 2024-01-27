@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/pardot/oidc/oauth2"
+	"github.com/lstoll/oidc/oauth2"
 )
 
 func TestParseToken(t *testing.T) {
