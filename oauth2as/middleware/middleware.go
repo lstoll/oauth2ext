@@ -21,7 +21,8 @@ var baseLogAttr = slog.String("component", "oidc-middleware")
 func errAttr(err error) slog.Attr { return slog.String("err", err.Error()) }
 
 // SessionData contains the data this middleware needs to save/restore across
-// requests.
+// requests. This should be stored using a method that does not reveal the
+// contents to the end user in any way.
 type SessionData struct {
 	// State for an in-progress auth flow.
 	State string `json:"oidc_state"`
