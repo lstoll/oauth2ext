@@ -28,7 +28,7 @@ type GorillaSessions struct {
 	SessionName string
 }
 
-func (g *GorillaSessions) GetSession(r *http.Request) (*SessionData, error) {
+func (g *GorillaSessions) GetSession(r *http.Request) (*SessionDataV2, error) {
 	if g.Store == nil {
 		return nil, fmt.Errorf("store must be set")
 	}
@@ -46,7 +46,7 @@ func (g *GorillaSessions) GetSession(r *http.Request) (*SessionData, error) {
 	rawIDToken, _ := session.Values[sessionKeyOIDCIDToken].(string)
 	refreshToken, _ := session.Values[sessionKeyOIDCRefreshToken].(string)
 
-	return &SessionData{
+	return &SessionDataV2{
 		State:        state,
 		ReturnTo:     returnTo,
 		IDToken:      rawIDToken,
@@ -55,7 +55,7 @@ func (g *GorillaSessions) GetSession(r *http.Request) (*SessionData, error) {
 
 }
 
-func (g *GorillaSessions) SaveSession(w http.ResponseWriter, r *http.Request, d *SessionData) error {
+func (g *GorillaSessions) SaveSession(w http.ResponseWriter, r *http.Request, d *SessionDataV2) error {
 	if g.Store == nil {
 		return fmt.Errorf("store must be set")
 	}

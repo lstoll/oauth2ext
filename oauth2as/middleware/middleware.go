@@ -35,8 +35,8 @@ type SessionData struct {
 	RefreshToken string `json:"oidc_refresh_token"`
 }
 
-// Sessions are used for managing state across requests.
-type Sessions interface {
+// SessionStoreV2 are used for managing state across requests.
+type SessionStoreV2 interface {
 	GetSession(*http.Request) (*SessionData, error)
 	SaveSession(http.ResponseWriter, *http.Request, *SessionData) error
 }
@@ -78,10 +78,10 @@ type Handler struct {
 	// Deprecated: Use Sessions
 	SessionName string
 
-	// Sessions are used for managing state that we need to persist across
+	// SessionStoreV2 are used for managing state that we need to persist across
 	// requests. It needs to be able to store ID and refresh tokens, plus a
 	// small amount of additional data. Required.
-	Sessions Sessions
+	SessionStoreV2 SessionStoreV2
 
 	oidcClient     *oidc.Client
 	oidcClientInit sync.Once
@@ -91,18 +91,18 @@ type Handler struct {
 // provides OIDC authentication.
 func (h *Handler) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.Sessions == nil {
+		if h.SessionStoreV2 == nil {
 			if h.SessionStore == nil {
 				slog.ErrorContext(r.Context(), "Uninitialized session store", baseLogAttr)
 				http.Error(w, "Uninitialized session store", http.StatusInternalServerError)
 				return
 			}
-			h.Sessions = &GorillaSessions{
+			h.SessionStoreV2 = &GorillaSessions{
 				Store:       h.SessionStore,
 				SessionName: h.SessionName,
 			}
 		}
-		session, err := h.Sessions.GetSession(r)
+		session, err := h.SessionStoreV2.GetSession(r)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "Failed to get session", baseLogAttr, errAttr(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -115,7 +115,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		} else if tok != nil {
-			if err := h.Sessions.SaveSession(w, r, session); err != nil {
+			if err := h.SessionStoreV2.SaveSession(w, r, session); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -132,7 +132,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		} else if returnTo != "" {
-			if err := h.Sessions.SaveSession(w, r, session); err != nil {
+			if err := h.SessionStoreV2.SaveSession(w, r, session); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -148,7 +148,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		if err := h.Sessions.SaveSession(w, r, session); err != nil {
+		if err := h.SessionStoreV2.SaveSession(w, r, session); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
