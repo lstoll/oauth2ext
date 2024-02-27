@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +35,10 @@ type ClientSource interface {
 	// IsUnauthenticatedClient is used to check if the client should be required
 	// to pass a client secret. If not, this will not be checked
 	IsUnauthenticatedClient(clientID string) (ok bool, err error)
+	// IsPublicClient indicates if this client is a "public" client. If the
+	// server is set to require PKCE, it will be required on any client where
+	// this is true.
+	IsPublicClient(clientID string) (ok bool, err error)
 	// ValidateClientSecret should confirm if the passed secret is valid for the
 	// given client
 	ValidateClientSecret(clientID, clientSecret string) (ok bool, err error)
@@ -64,6 +70,17 @@ type Config struct {
 	CodeValidityTime time.Duration
 }
 
+type OIDCOpt func(*OIDC)
+
+// RequirePKCEForPublicClients requires all clients that are marked as public in
+// the client manager to have a PKCE challenge. By default we verify it if it's
+// presented, but it's not required to be presented.
+func RequirePKCEForPublicClients() OIDCOpt {
+	return func(o *OIDC) {
+		o.requirePKCEForPublicClients = true
+	}
+}
+
 // OIDC can be used to handle the various parts of the OIDC auth flow.
 type OIDC struct {
 	smgr    SessionManager
@@ -74,9 +91,11 @@ type OIDC struct {
 	codeValidityTime time.Duration
 
 	now func() time.Time
+
+	requirePKCEForPublicClients bool
 }
 
-func New(cfg *Config, smgr SessionManager, clientSource ClientSource, signer Signer) (*OIDC, error) {
+func New(cfg *Config, smgr SessionManager, clientSource ClientSource, signer Signer, opts ...OIDCOpt) (*OIDC, error) {
 	o := &OIDC{
 		smgr:    smgr,
 		clients: clientSource,
@@ -86,6 +105,10 @@ func New(cfg *Config, smgr SessionManager, clientSource ClientSource, signer Sig
 		codeValidityTime: cfg.CodeValidityTime,
 
 		now: time.Now,
+	}
+
+	for _, opt := range opts {
+		opt(o)
 	}
 
 	if o.authValidityTime == time.Duration(0) {
@@ -159,10 +182,11 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) (*Au
 	}
 
 	ar := &sessAuthRequest{
-		RedirectURI: redir.String(),
-		State:       authreq.State,
-		Scopes:      authreq.Scopes,
-		Nonce:       authreq.Raw.Get("nonce"),
+		RedirectURI:   redir.String(),
+		State:         authreq.State,
+		Scopes:        authreq.Scopes,
+		Nonce:         authreq.Raw.Get("nonce"),
+		CodeChallenge: authreq.CodeChallenge,
 	}
 
 	switch authreq.ResponseType {
@@ -451,6 +475,26 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "Invalid client secret"}
 	}
 
+	// PKCE only applies on the authorization code grant type
+	if req.GrantType == GrantTypeAuthorizationCode {
+		// If the client is public and we require pkce, reject it if there's no
+		// verifier.
+		pubcl, err := o.clients.IsPublicClient(req.ClientID)
+		if err != nil {
+			return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check if client is public", Cause: err}
+		}
+		if o.requirePKCEForPublicClients && pubcl && req.CodeVerifier == "" {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
+		}
+
+		// Verify the code verifier against the session data
+		if req.CodeVerifier != "" {
+			if !verifyCodeChallenge(req.CodeVerifier, sess.Request.CodeChallenge) {
+				return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE verification failed"}
+			}
+		}
+	}
+
 	// Call the handler with information about the request, and get the response.
 	if sess.Authorization == nil {
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "session authorization is nil"}
@@ -727,4 +771,12 @@ func strsContains(strs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
+	h := sha256.New()
+	h.Write([]byte(codeVerifier))
+	hashedVerifier := h.Sum(nil)
+	computedChallenge := base64.RawURLEncoding.EncodeToString(hashedVerifier)
+	return computedChallenge == storedCodeChallenge
 }

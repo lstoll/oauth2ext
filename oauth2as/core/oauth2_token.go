@@ -25,6 +25,9 @@ type tokenRequest struct {
 	RedirectURI  string
 	ClientID     string
 	ClientSecret string
+	// CodeVerifier is the PKCE code verifier, if it was submitted with this
+	// request.
+	CodeVerifier string
 }
 
 // parseTokenRequest parses the information from a request for an access token.
@@ -39,6 +42,7 @@ func parseTokenRequest(req *http.Request) (*tokenRequest, error) {
 		RedirectURI:  req.FormValue("redirect_uri"),
 		Code:         req.FormValue("code"),
 		RefreshToken: req.FormValue("refresh_token"),
+		CodeVerifier: req.FormValue("code_verifier"),
 	}
 
 	// Auth the request

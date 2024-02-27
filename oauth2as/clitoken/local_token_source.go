@@ -215,7 +215,10 @@ func (s *LocalOIDCTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
 	go func() { _ = httpSrv.Serve(ln) }()
 	defer func() { _ = httpSrv.Shutdown(ctx) }()
 
-	authCodeOpts := []oidc.AuthCodeOption{}
+	var codeVerifier string
+	authCodeOpts := []oidc.AuthCodeOption{
+		oidc.AuthCodeWithPKCE(&codeVerifier),
+	}
 	if s.nonceGenerator != nil {
 		nonce, err := s.nonceGenerator(ctx)
 		if err != nil {
@@ -246,7 +249,7 @@ func (s *LocalOIDCTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
 		return nil, res.err
 	}
 
-	return s.client.Exchange(ctx, res.code)
+	return s.client.Exchange(ctx, res.code, oidc.ExchangeWithPKCE(codeVerifier))
 }
 
 func newLocalTCPListenerInRange(portLow int, portHigh int) (net.Listener, error) {

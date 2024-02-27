@@ -2,8 +2,12 @@ package oidc
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -96,8 +100,9 @@ func NewClient(md *discovery.ProviderMetadata, ks KeySource, clientID, clientSec
 }
 
 type authCodeCfg struct {
-	nonce      string
-	addlScopes []string
+	nonce         string
+	addlScopes    []string
+	codeChallenge string
 }
 
 // AuthCodeOption can be used to modify the auth code URL that is generated.
@@ -117,6 +122,17 @@ func AddScopes(scopes []string) AuthCodeOption {
 	}
 }
 
+// AuthCodeWithPKCE generates a PKCE S256 challenge, and writes the verifier to the
+// string passed in as codeVerifier. This verifier must be used when the code is
+// Exchanged.
+func AuthCodeWithPKCE(codeVerifier *string) AuthCodeOption {
+	return func(cfg *authCodeCfg) {
+		v := generateCodeVerifier()
+		cfg.codeChallenge = generateCodeChallenge(v)
+		*codeVerifier = v
+	}
+}
+
 // AuthCodeURL returns the URL the user should be directed to to initiate the
 // code auth flow.
 func (c *Client) AuthCodeURL(state string, opts ...AuthCodeOption) string {
@@ -133,6 +149,13 @@ func (c *Client) AuthCodeURL(state string, opts ...AuthCodeOption) string {
 
 	if accfg.nonce != "" {
 		aopts = append(aopts, oauth2.SetAuthURLParam("nonce", accfg.nonce))
+	}
+
+	if accfg.codeChallenge != "" {
+		aopts = append(aopts,
+			oauth2.SetAuthURLParam("code_challenge", accfg.codeChallenge),
+			oauth2.SetAuthURLParam("code_challenge_method", "S256"),
+		)
 	}
 
 	// copy to avoid modifying the original
@@ -175,12 +198,39 @@ func (c *Client) SetClientSecret(secret string) {
 	c.o2cfg.ClientSecret = secret
 }
 
+type exchangeCfg struct {
+	codeVerifier string
+}
+
+// ExchangeOptions can be used to customize the code exchange.
+type ExchangeOptions func(*exchangeCfg)
+
+// ExchangeWithPKCE performs the code exchange, with the given code verifier.
+// The verifier should have been set with the AuthCodeWithPKCE option when
+// generating the auth code URL.
+func ExchangeWithPKCE(codeVerifier string) ExchangeOptions {
+	return func(cfg *exchangeCfg) {
+		cfg.codeVerifier = codeVerifier
+	}
+}
+
 // Exchange the returned code for a set of tokens. If the exchange fails and
 // returns an oauth2 error response, the returned error will be an
 // `*github.com/parot/oidc/oauth2.TokenError`. If a HTTP error occurs, a
 // *HTTPError will be returned.
-func (c *Client) Exchange(ctx context.Context, code string) (*Token, error) {
-	t, err := c.o2cfg.Exchange(ctx, code)
+func (c *Client) Exchange(ctx context.Context, code string, opts ...ExchangeOptions) (*Token, error) {
+	ecfg := &exchangeCfg{}
+	for _, o := range opts {
+		o(ecfg)
+	}
+
+	var eopts []oauth2.AuthCodeOption
+
+	if ecfg.codeVerifier != "" {
+		eopts = append(eopts, oauth2.SetAuthURLParam("code_verifier", ecfg.codeVerifier))
+	}
+
+	t, err := c.o2cfg.Exchange(ctx, code, eopts...)
 	if err != nil {
 		return nil, parseExchangeError(err)
 	}
@@ -351,4 +401,19 @@ func (c *captureTS) Token() (*oauth2.Token, error) {
 	}
 	c.notify(t)
 	return t, nil
+}
+
+func generateCodeVerifier() string {
+	randomBytes := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, randomBytes); err != nil {
+		panic(err) // this should never fail in a recoverable way
+	}
+	return base64.RawURLEncoding.EncodeToString(randomBytes)
+}
+
+func generateCodeChallenge(verifier string) string {
+	h := sha256.New()
+	h.Write([]byte(verifier))
+	hashed := h.Sum(nil)
+	return base64.RawURLEncoding.EncodeToString(hashed)
 }
