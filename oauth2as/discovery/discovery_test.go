@@ -2,46 +2,44 @@ package discovery
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/go-jose/go-jose/v3"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
 type mockKeysource struct {
-	keys []jose.JSONWebKey
+	handle *keyset.Handle
 }
 
-func (m *mockKeysource) PublicKeys(ctx context.Context) (*jose.JSONWebKeySet, error) {
-	return &jose.JSONWebKeySet{Keys: m.keys}, nil
+func (m *mockKeysource) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
+	if m.handle == nil {
+		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
+		if err != nil {
+			return nil, fmt.Errorf("creating handle: %v", err)
+		}
+		h, err = h.Public()
+		if err != nil {
+			return nil, fmt.Errorf("getting public handle: %w", err)
+		}
+		m.handle = h
+	}
+
+	return m.handle, nil
 }
 
 func TestDiscovery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	key, err := rsa.GenerateKey(rand.Reader, 512)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	m := http.NewServeMux()
 	ts := httptest.NewServer(m)
 
-	ks := &mockKeysource{
-		keys: []jose.JSONWebKey{
-			{
-				Key:       key.Public(),
-				KeyID:     "testkey",
-				Algorithm: "RS256",
-				Use:       "sig",
-			},
-		},
-	}
+	ks := &mockKeysource{}
 
 	kh := NewKeysHandler(ks, 1*time.Nanosecond)
 	m.Handle("/jwks.json", kh)
@@ -64,13 +62,8 @@ func TestDiscovery(t *testing.T) {
 		t.Fatalf("failed to create discovery client: %v", err)
 	}
 
-	_, err = cli.GetKey(ctx, "testkey")
+	_, err = cli.PublicHandle(ctx)
 	if err != nil {
-		t.Errorf("wanted no error getting testkey, got: %v", err)
-	}
-
-	_, err = cli.GetKey(ctx, "badkey")
-	if err == nil {
-		t.Errorf("wanted error getting non-existent key, but got none")
+		t.Fatalf("getting public handle: %v", err)
 	}
 }

@@ -2,28 +2,22 @@ package oidc
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/go-jose/go-jose/v3"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
-var _ KeySource = (*StaticKeysource)(nil)
+var _ KeysetSource = (*StaticKeysource)(nil)
 
 type StaticKeysource struct {
-	keys jose.JSONWebKeySet
+	handle *keyset.Handle
 }
 
-func NewStaticKeysource(keys jose.JSONWebKeySet) *StaticKeysource {
+func NewStaticKeysource(handle *keyset.Handle) *StaticKeysource {
 	return &StaticKeysource{
-		keys: keys,
+		handle: handle,
 	}
 }
 
-func (s *StaticKeysource) GetKey(_ context.Context, kid string) (*jose.JSONWebKey, error) {
-	for _, k := range s.keys.Keys {
-		if k.KeyID == kid {
-			return &k, nil
-		}
-	}
-	return nil, fmt.Errorf("key %s not found", kid)
+func (s *StaticKeysource) PublicHandle(_ context.Context) (*keyset.Handle, error) {
+	return s.handle, nil
 }

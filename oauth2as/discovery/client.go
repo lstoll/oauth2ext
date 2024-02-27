@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"sync"
 
-	"github.com/go-jose/go-jose/v3"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
 const oidcwk = "/.well-known/openid-configuration"
@@ -23,9 +24,6 @@ type Client struct {
 	md *ProviderMetadata
 
 	hc *http.Client
-
-	jwks   *jose.JSONWebKeySet
-	jwksMu sync.Mutex
 }
 
 // ClientOpt is an option that can configure a client
@@ -69,9 +67,11 @@ func (c *Client) Metadata() *ProviderMetadata {
 	return c.md
 }
 
-// PublicKeys will fetch and return the JWKS endpoint for this metadata. each
-// request will perform a new HTTP request to the endpoint.
-func (c *Client) PublicKeys(ctx context.Context) (*jose.JSONWebKeySet, error) {
+// PublicHandle returns a keyset handle for the issuer's JWKS. THis will make a
+// HTTP request.
+//
+// TODO(lstoll) cache this response
+func (c *Client) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
 	if c.md.JWKSURI == "" {
 		return nil, fmt.Errorf("metadata has no JWKS endpoint, cannot fetch keys")
 	}
@@ -80,44 +80,18 @@ func (c *Client) PublicKeys(ctx context.Context) (*jose.JSONWebKeySet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get keys from %s: %v", c.md.JWKSURI, err)
 	}
-
-	ks := &jose.JSONWebKeySet{}
-	err = json.NewDecoder(res.Body).Decode(ks)
-	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("expected status %d, got: %d", http.StatusOK, res.StatusCode)
+	}
+	jwksb, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed decoding JWKS response: %v", err)
+		return nil, fmt.Errorf("reading JWKS body: %w", err)
 	}
 
-	return ks, nil
-}
-
-// GetKey will return the key for the given kid. If the key has already
-// been fetched, no network request will be made - the cached version will be
-// returned. Otherwise, a call to the keys endpoint will be made.
-func (c *Client) GetKey(ctx context.Context, kid string) (*jose.JSONWebKey, error) {
-	c.jwksMu.Lock()
-	defer c.jwksMu.Unlock()
-
-	if c.jwks != nil {
-		for _, k := range c.jwks.Keys {
-			if k.KeyID == kid {
-				return &k, nil
-			}
-		}
-	}
-
-	ks, err := c.PublicKeys(ctx)
+	h, err := jwt.JWKSetToPublicKeysetHandle(jwksb)
 	if err != nil {
-		return nil, err
-	}
-	c.jwks = ks
-
-	// try again, with the fresh set
-	for _, k := range c.jwks.Keys {
-		if k.KeyID == kid {
-			return &k, nil
-		}
+		return nil, fmt.Errorf("creating handle from response: %w", err)
 	}
 
-	return nil, fmt.Errorf("key %s not found", kid)
+	return h, nil
 }

@@ -2,18 +2,19 @@ package discovery
 
 import (
 	"context"
-	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/go-jose/go-jose/v3"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
 // KeySource is used to retrieve the public keys this provider is signing with
 type KeySource interface {
-	// PublicKeys should return the current signing key set
-	PublicKeys(ctx context.Context) (*jose.JSONWebKeySet, error)
+	// PublicKeys should return the current signing key set handle, with public keys only
+	PublicHandle(ctx context.Context) (*keyset.Handle, error)
 }
 
 // KeysHandler is a http.Handler that correctly serves the "keys" endpoint from a keysource
@@ -21,8 +22,8 @@ type KeysHandler struct {
 	ks       KeySource
 	cacheFor time.Duration
 
-	currKeys   *jose.JSONWebKeySet
-	currKeysMu sync.Mutex
+	currJWKS   []byte
+	currJWKSMu sync.Mutex
 
 	lastKeysUpdate time.Time
 }
@@ -37,23 +38,31 @@ func NewKeysHandler(s KeySource, cacheFor time.Duration) *KeysHandler {
 }
 
 func (h *KeysHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	h.currKeysMu.Lock()
-	defer h.currKeysMu.Unlock()
+	h.currJWKSMu.Lock()
+	defer h.currJWKSMu.Unlock()
 
-	if h.currKeys == nil || time.Now().After(h.lastKeysUpdate) {
-		ks, err := h.ks.PublicKeys(req.Context())
+	if h.currJWKS == nil || time.Now().After(h.lastKeysUpdate) {
+		ph, err := h.ks.PublicHandle(req.Context())
 		if err != nil {
+			slog.ErrorContext(req.Context(), "failed to get public key handle", "err", err.Error())
 			http.Error(w, "Internal Error", http.StatusInternalServerError)
 			return
 		}
 
-		h.currKeys = ks
+		publicJWKset, err := jwt.JWKSetFromPublicKeysetHandle(ph)
+		if err != nil {
+			slog.ErrorContext(req.Context(), "failed to get public key handle", "err", err.Error())
+			http.Error(w, "Internal Error", http.StatusInternalServerError)
+			return
+		}
+
+		h.currJWKS = publicJWKset
 		h.lastKeysUpdate = time.Now()
 	}
 
 	w.Header().Set("Content-Type", "application/jwk-set+json")
-
-	if err := json.NewEncoder(w).Encode(h.currKeys); err != nil {
+	if _, err := w.Write(h.currJWKS); err != nil {
+		slog.ErrorContext(req.Context(), "failed to write jwks", "err", err.Error())
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
 		return
 	}

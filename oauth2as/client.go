@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-jose/go-jose/v3"
 	"github.com/lstoll/oidc/discovery"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 	"golang.org/x/oauth2"
 )
 
@@ -18,15 +18,16 @@ const (
 	ScopeOfflineAccess = "offline_access"
 )
 
-type KeySource interface {
-	GetKey(ctx context.Context, kid string) (*jose.JSONWebKey, error)
+type KeysetSource interface {
+	// PublicHandle returns a handle to the public keys for a set.
+	PublicHandle(ctx context.Context) (*keyset.Handle, error)
 }
 
 type Client struct {
 	Verifier
 
 	md *discovery.ProviderMetadata
-	ks KeySource
+	ks KeysetSource
 
 	o2cfg oauth2.Config
 
@@ -68,7 +69,7 @@ func DiscoverClient(ctx context.Context, issuer, clientID, clientSecret, redirec
 }
 
 // NewClient creates a client directly from the passed in information
-func NewClient(md *discovery.ProviderMetadata, ks KeySource, clientID, clientSecret, redirectURL string, opts ...ClientOpt) *Client {
+func NewClient(md *discovery.ProviderMetadata, ks KeysetSource, clientID, clientSecret, redirectURL string, opts ...ClientOpt) *Client {
 	c := &Client{
 		Verifier: Verifier{
 			md: md,

@@ -1,9 +1,8 @@
 package discovery
 
 import (
+	"encoding/json"
 	"net/http"
-
-	"github.com/go-jose/go-jose/v3/json"
 )
 
 var _ http.Handler = (*ConfigurationHandler)(nil)

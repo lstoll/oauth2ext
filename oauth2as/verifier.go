@@ -2,16 +2,16 @@ package oidc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"time"
 
-	"github.com/go-jose/go-jose/v3/jwt"
 	"github.com/lstoll/oidc/discovery"
+	"github.com/tink-crypto/tink-go/v2/jwt"
 )
 
 type Verifier struct {
 	md *discovery.ProviderMetadata
-	ks KeySource
+	ks KeysetSource
 }
 
 func DiscoverVerifier(ctx context.Context, issuer string) (*Verifier, error) {
@@ -26,7 +26,7 @@ func DiscoverVerifier(ctx context.Context, issuer string) (*Verifier, error) {
 	}, nil
 }
 
-func NewVerifier(issuer string, keySource KeySource) *Verifier {
+func NewVerifier(issuer string, keySource KeysetSource) *Verifier {
 	return &Verifier{
 		md: &discovery.ProviderMetadata{
 			Issuer: issuer,
@@ -40,43 +40,37 @@ type verifyCfg struct{}
 type VerifyOpt func(v *verifyCfg)
 
 func (v *Verifier) VerifyRaw(ctx context.Context, audience string, raw string, opts ...VerifyOpt) (*Claims, error) {
-	tok, err := jwt.ParseSigned(raw)
+	h, err := v.ks.PublicHandle(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed parsing raw: %v", err)
+		return nil, fmt.Errorf("getting public key handle: %w", err)
 	}
-
-	if len(tok.Headers) != 1 {
-		return nil, fmt.Errorf("header must contain 1 header, found %d", len(tok.Headers))
-	}
-
-	kid := tok.Headers[0].KeyID
-	if kid == "" {
-		return nil, fmt.Errorf("token missing kid header")
-	}
-
-	key, err := v.ks.GetKey(ctx, kid)
+	verifier, err := jwt.NewVerifier(h)
 	if err != nil {
-		return nil, fmt.Errorf("fetching key %s: %v", kid, err)
+		return nil, fmt.Errorf("creating jwt verifier: %w", err)
 	}
 
-	// parse it into the library claims so we can use their verification code
-	cl := jwt.Claims{}
-	if err := tok.Claims(key, &cl); err != nil {
-		return nil, fmt.Errorf("verifying token claims: %v", err)
+	validator, err := jwt.NewValidator(&jwt.ValidatorOpts{
+		ExpectedIssuer:   &v.md.Issuer,
+		ExpectedAudience: &audience,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating validator: %w", err)
 	}
 
-	if err := cl.Validate(jwt.Expected{
-		Issuer:   v.md.Issuer,
-		Audience: jwt.Audience([]string{audience}),
-		Time:     time.Now(),
-	}); err != nil {
-		return nil, fmt.Errorf("claim validation: %v", err)
+	verifiedJWT, err := verifier.VerifyAndDecode(raw, validator)
+	if err != nil {
+		return nil, fmt.Errorf("verifying/decoding jwt: %w", err)
+	}
+
+	tb, err := verifiedJWT.JSONPayload()
+	if err != nil {
+		return nil, fmt.Errorf("getting token JSON payload: %w", err)
 	}
 
 	// now parse it in to our type to return
 	idt := Claims{}
-	if err := tok.Claims(key, &idt); err != nil {
-		return nil, fmt.Errorf("verifying token claims: %v", err)
+	if err := json.Unmarshal(tb, &idt); err != nil {
+		return nil, fmt.Errorf("unpacking token claims: %v", err)
 	}
 
 	return &idt, nil
