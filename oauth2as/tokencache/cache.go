@@ -16,7 +16,6 @@ import (
 	"strings"
 
 	"github.com/lstoll/oidc"
-	"github.com/pkg/errors"
 	"golang.org/x/crypto/nacl/secretbox"
 	"golang.org/x/crypto/scrypt"
 	"golang.org/x/term"
@@ -75,12 +74,12 @@ func (k *KeychainCredentialCache) Get(issuer string, clientID string, scopes []s
 			return nil, nil
 		}
 
-		return nil, errors.Wrapf(err, "%s", string(out))
+		return nil, fmt.Errorf("%s: %w", string(out), err)
 	}
 
 	var token oidc.Token
 	if err := json.Unmarshal(out, &token); err != nil {
-		return nil, errors.Wrap(err, "failed to decode token")
+		return nil, fmt.Errorf("failed to decode token: %w", err)
 	}
 
 	return &token, nil
@@ -89,7 +88,7 @@ func (k *KeychainCredentialCache) Get(issuer string, clientID string, scopes []s
 func (k *KeychainCredentialCache) Set(issuer string, clientID string, scopes []string, acrValues []string, token *oidc.Token) error {
 	b, err := json.Marshal(token)
 	if err != nil {
-		return errors.Wrap(err, "failed to encode token")
+		return fmt.Errorf("failed to encode token: %w", err)
 	}
 
 	cmd := exec.Command(
@@ -103,7 +102,7 @@ func (k *KeychainCredentialCache) Set(issuer string, clientID string, scopes []s
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return errors.Wrapf(err, "%s", string(out))
+		return fmt.Errorf("%s: %w", string(out), err)
 	}
 
 	return nil
@@ -154,7 +153,7 @@ func (e *EncryptedFileCredentialCache) Get(issuer string, clientID string, scope
 	}
 
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, errors.Wrap(err, "failed to create directory")
+		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	filename := path.Join(dir, e.cacheFilename(issuer, clientID, scopes, acrValues))
@@ -162,7 +161,7 @@ func (e *EncryptedFileCredentialCache) Get(issuer string, clientID string, scope
 	if os.IsNotExist(err) {
 		return nil, nil
 	} else if err != nil {
-		return nil, errors.Wrapf(err, "failed to read file %q", filename)
+		return nil, fmt.Errorf("failed to read file %q: %w", filename, err)
 	}
 
 	if len(contents) < encryptedFileNonceSize {
@@ -196,7 +195,7 @@ func (e *EncryptedFileCredentialCache) Get(issuer string, clientID string, scope
 
 	token := new(oidc.Token)
 	if err := json.Unmarshal(plaintext, token); err != nil {
-		return nil, errors.Wrap(err, "failed to decode token")
+		return nil, fmt.Errorf("failed to decode token: %w", err)
 	}
 
 	return token, nil
@@ -209,17 +208,17 @@ func (e *EncryptedFileCredentialCache) Set(issuer string, clientID string, scope
 	}
 
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return errors.Wrap(err, "failed to create directory")
+		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	var nonce [encryptedFileNonceSize]byte
 	if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
-		return errors.Wrap(err, "failed to generate nonce")
+		return fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
 	var salt [encryptedFileSaltSize]byte
 	if _, err := io.ReadFull(rand.Reader, salt[:]); err != nil {
-		return errors.Wrap(err, "failed to generate salt")
+		return fmt.Errorf("failed to generate salt: %w", err)
 	}
 
 	passphrase, err := e.promptFuncOrDefault()(fmt.Sprintf("Enter passphrase for encrypting %s token", issuer))
@@ -234,7 +233,7 @@ func (e *EncryptedFileCredentialCache) Set(issuer string, clientID string, scope
 
 	plaintext, err := json.Marshal(token)
 	if err != nil {
-		return errors.Wrap(err, "failed to encode token")
+		return fmt.Errorf("failed to encode token: %w", err)
 	}
 
 	ciphertext := secretbox.Seal(nil, plaintext, &nonce, &key)
@@ -247,7 +246,7 @@ func (e *EncryptedFileCredentialCache) Set(issuer string, clientID string, scope
 
 	filename := path.Join(dir, e.cacheFilename(issuer, clientID, scopes, acrValues))
 	if err := os.WriteFile(filename, buf.Bytes(), 0600); err != nil {
-		return errors.Wrapf(err, "failed to write file %q", filename)
+		return fmt.Errorf("failed to write file %q: %w", filename, err)
 	}
 
 	return nil
@@ -270,7 +269,7 @@ func (e *EncryptedFileCredentialCache) resolveDir() (string, error) {
 	if strings.HasPrefix(dir, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", errors.Wrap(err, "unable to determine home directory")
+			return "", fmt.Errorf("unable to determine home directory: %w", err)
 		}
 
 		dir = path.Join(home, dir[2:])
