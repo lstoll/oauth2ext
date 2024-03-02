@@ -34,15 +34,12 @@ func StaticKeysetHandle(h *keyset.Handle) KeysetHandleFunc {
 type ClientSource interface {
 	// IsValidClientID should return true if the passed client ID is valid
 	IsValidClientID(clientID string) (ok bool, err error)
-	// IsUnauthenticatedClient is used to check if the client should be required
-	// to pass a client secret. If not, this will not be checked
-	IsUnauthenticatedClient(clientID string) (ok bool, err error)
-	// IsPublicClient indicates if this client is a "public" client. If the
-	// server is set to require PKCE, it will be required on any client where
-	// this is true.
-	IsPublicClient(clientID string) (ok bool, err error)
+	// RequiresPKCE indicates if this client is required to use PKCE for token
+	// exchange.
+	RequiresPKCE(clientID string) (ok bool, err error)
 	// ValidateClientSecret should confirm if the passed secret is valid for the
-	// given client
+	// given client. If no secret is provided, clientSecret will be empty but
+	// this will still be called.
 	ValidateClientSecret(clientID, clientSecret string) (ok bool, err error)
 	// ValidateRedirectURI should confirm if the given redirect is valid for the client. It should
 	// compare as per https://tools.ietf.org/html/rfc3986#section-6
@@ -74,15 +71,6 @@ type Config struct {
 
 type OIDCOpt func(*OIDC)
 
-// RequirePKCEForPublicClients requires all clients that are marked as public in
-// the client manager to have a PKCE challenge. By default we verify it if it's
-// presented, but it's not required to be presented.
-func RequirePKCEForPublicClients() OIDCOpt {
-	return func(o *OIDC) {
-		o.requirePKCEForPublicClients = true
-	}
-}
-
 // OIDC can be used to handle the various parts of the OIDC auth flow.
 type OIDC struct {
 	smgr     SessionManager
@@ -93,8 +81,6 @@ type OIDC struct {
 	codeValidityTime time.Duration
 
 	now func() time.Time
-
-	requirePKCEForPublicClients bool
 }
 
 func New(cfg *Config, smgr SessionManager, clientSource ClientSource, signer KeysetHandleFunc, opts ...OIDCOpt) (*OIDC, error) {
@@ -481,11 +467,11 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 	if req.GrantType == GrantTypeAuthorizationCode {
 		// If the client is public and we require pkce, reject it if there's no
 		// verifier.
-		pubcl, err := o.clients.IsPublicClient(req.ClientID)
+		reqPKCE, err := o.clients.RequiresPKCE(req.ClientID)
 		if err != nil {
 			return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check if client is public", Cause: err}
 		}
-		if o.requirePKCEForPublicClients && pubcl && req.CodeVerifier == "" {
+		if reqPKCE && req.CodeVerifier == "" {
 			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
 		}
 

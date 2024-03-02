@@ -15,6 +15,7 @@ import (
 
 	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidc/core"
+	"github.com/lstoll/oidc/core/staticclients"
 	"github.com/lstoll/oidc/discovery"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
@@ -77,12 +78,13 @@ func TestE2E(t *testing.T) {
 				CodeValidityTime: 1 * time.Minute,
 			}
 			smgr := newStubSMGR()
-			clientSource := &stubCS{
-				ValidClients: map[string]csClient{
-					clientID: {
-						Secret:      clientSecret,
-						RedirectURI: cliSvr.URL,
-						Public:      tc.WithPKCE,
+			clientSource := &staticclients.Clients{
+				Clients: []staticclients.Client{
+					{
+						ID:           clientID,
+						Secrets:      []string{clientSecret},
+						RedirectURLs: []string{cliSvr.URL},
+						Public:       tc.WithPKCE,
 					},
 				},
 			}
@@ -247,44 +249,6 @@ func randomStateValue() string {
 }
 
 // contains helpers used by multiple tests
-
-type csClient struct {
-	Secret      string
-	RedirectURI string
-	Public      bool
-}
-
-type stubCS struct {
-	ValidClients map[string]csClient
-}
-
-func (s *stubCS) IsValidClientID(clientID string) (ok bool, err error) {
-	_, ok = s.ValidClients[clientID]
-	return ok, nil
-}
-
-func (s *stubCS) IsUnauthenticatedClient(clientID string) (ok bool, err error) {
-	cl, ok := s.ValidClients[clientID]
-	if !ok {
-		return false, fmt.Errorf("invalid client ID")
-	}
-	return cl.Public, nil
-}
-
-func (s *stubCS) IsPublicClient(clientID string) (ok bool, err error) {
-	// TODO(lstoll) we probably want to have some of these to check
-	return false, nil
-}
-
-func (s *stubCS) ValidateClientSecret(clientID, clientSecret string) (ok bool, err error) {
-	cl, ok := s.ValidClients[clientID]
-	return ok && clientSecret == cl.Secret, nil
-}
-
-func (s *stubCS) ValidateClientRedirectURI(clientID, redirectURI string) (ok bool, err error) {
-	cl, ok := s.ValidClients[clientID]
-	return ok && redirectURI == cl.RedirectURI, nil
-}
 
 type stubSMGR struct {
 	// sessions maps JSON session objects by their ID
