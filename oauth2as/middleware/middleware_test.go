@@ -3,11 +3,10 @@ package middleware
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -16,8 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-jose/go-jose/v3"
 	"github.com/lstoll/oidc"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
 // mockOIDCServer mocks out just enough of an OIDC server for tests. It accepts
@@ -30,7 +30,7 @@ type mockOIDCServer struct {
 	validRedirectURL  string
 	claims            map[string]interface{}
 
-	key *rsa.PrivateKey
+	keyset *keyset.Handle
 
 	mux *http.ServeMux
 }
@@ -82,7 +82,7 @@ func newMockOIDCServer() *mockOIDCServer {
 	s.mux = mux
 
 	// Very short key. Used only for testing so generation time is quick.
-	s.key = mustGenRSAKey(512)
+	s.keyset = mustGenHandle()
 
 	return s
 }
@@ -186,44 +186,39 @@ func (s *mockOIDCServer) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jwk := jose.JSONWebKey{
-		Key:       s.key,
-		Algorithm: "RS256",
-		KeyID:     "test",
-	}
-
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: jwk}, nil)
+	signer, err := jwt.NewSigner(s.keyset)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("failed to create signer", "err", err.Error())
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
 	now := time.Now()
-	claims := map[string]interface{}{
-		"iss": s.baseURL,
-		"aud": clientID,
-		"exp": now.Add(60 * time.Second).Unix(),
-		"iat": now.Unix(),
+	sub, _ := s.claims["sub"].(string)
+	rJWTopts := &jwt.RawJWTOptions{
+		Subject:      &sub,
+		Issuer:       &s.baseURL,
+		Audience:     &clientID,
+		ExpiresAt:    ptr(now.Add(time.Minute)),
+		IssuedAt:     &now,
+		CustomClaims: map[string]any{},
 	}
 	for k, v := range s.claims {
-		claims[k] = v
+		if k == "sub" { // we extract this earlier
+			continue
+		}
+		rJWTopts.CustomClaims[k] = v
 	}
-
-	payload, err := json.Marshal(claims)
+	rawJWT, err := jwt.NewRawJWT(rJWTopts)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("failed to create raw JWT", "err", err.Error())
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
-
-	jws, err := signer.Sign(payload)
+	idToken, err := signer.SignAndEncode(rawJWT)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	idToken, err := jws.CompactSerialize()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("failed to sign and encode", "err", err.Error())
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
@@ -245,13 +240,19 @@ func (s *mockOIDCServer) handleToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *mockOIDCServer) handleKeys(w http.ResponseWriter, r *http.Request) {
-	jwk := jose.JSONWebKey{
-		Key:       s.key.Public(),
-		Algorithm: "RS256",
-		KeyID:     "test",
+	ph, err := s.keyset.Public()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
-	if err := json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{jwk}}); err != nil {
+	jwksb, err := jwt.JWKSetFromPublicKeysetHandle(ph)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := w.Write(jwksb); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -389,11 +390,15 @@ func checkResponse(t *testing.T, resp *http.Response) (body []byte) {
 	return body
 }
 
-func mustGenRSAKey(bits int) *rsa.PrivateKey {
-	key, err := rsa.GenerateKey(rand.Reader, bits)
+func mustGenHandle() *keyset.Handle {
+	h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
 	if err != nil {
 		panic(err)
 	}
 
-	return key
+	return h
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }

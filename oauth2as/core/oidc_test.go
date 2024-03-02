@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidc/oauth2"
 	corev1 "github.com/lstoll/oidc/proto/core/v1"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
 func TestStartAuthorization(t *testing.T) {
@@ -336,8 +339,8 @@ func TestToken(t *testing.T) {
 
 	newOIDC := func() *OIDC {
 		return &OIDC{
-			smgr:   newStubSMGR(),
-			signer: testSigner,
+			smgr:     newStubSMGR(),
+			handleFn: KeysetHandle,
 
 			clients: &stubCS{
 				validClients: map[string]csClient{
@@ -388,6 +391,7 @@ func TestToken(t *testing.T) {
 	newHandler := func(t *testing.T) func(req *TokenRequest) (*TokenResponse, error) {
 		return func(req *TokenRequest) (*TokenResponse, error) {
 			return &TokenResponse{
+				IDToken:               req.PrefillIDToken("http://iss", "sub", time.Now().Add(time.Minute)),
 				AccessTokenValidUntil: time.Now().Add(1 * time.Minute),
 			}, nil
 		}
@@ -789,7 +793,7 @@ func TestFetchCodeSession(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &stubCS{}, testSigner)
+			oidc, err := New(&Config{}, smgr, &stubCS{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -862,7 +866,7 @@ func TestFetchRefreshSession(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &stubCS{}, testSigner)
+			oidc, err := New(&Config{}, smgr, &stubCS{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -981,7 +985,7 @@ func TestUserinfo(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &stubCS{}, testSigner)
+			oidc, err := New(&Config{}, smgr, &stubCS{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1067,4 +1071,24 @@ func matchAnyErr() func(error) bool { // nolint:unused,varcheck,deadcode
 	return func(err error) bool {
 		return err != nil
 	}
+}
+
+var (
+	th   *keyset.Handle
+	thMu sync.Mutex
+)
+
+func KeysetHandle(_ context.Context) (*keyset.Handle, error) {
+	thMu.Lock()
+	defer thMu.Unlock()
+	// we only make one, because it's slow
+	if th == nil {
+		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
+		if err != nil {
+			panic(err)
+		}
+		th = h
+	}
+
+	return th, nil
 }

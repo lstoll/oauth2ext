@@ -1,33 +1,19 @@
 package main
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-
-	"github.com/go-jose/go-jose/v3"
-	"github.com/lstoll/oidc/signer"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
-func mustInitSigner() *signer.StaticSigner {
-	key, err := rsa.GenerateKey(rand.Reader, 512)
+func mustInitKeyset() (privHandle *keyset.Handle, pubHandle *keyset.Handle) {
+	h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
+	if err != nil {
+		panic(err)
+	}
+	ph, err := h.Public()
 	if err != nil {
 		panic(err)
 	}
 
-	signingKey := jose.SigningKey{Algorithm: jose.RS256, Key: &jose.JSONWebKey{
-		Key:   key,
-		KeyID: "testkey",
-	}}
-
-	verificationKeys := []jose.JSONWebKey{
-		{
-			Key:       key.Public(),
-			KeyID:     "testkey",
-			Algorithm: "RS256",
-			Use:       "sig",
-		},
-	}
-
-	return signer.NewStatic(signingKey, verificationKeys)
-
+	return h, ph
 }

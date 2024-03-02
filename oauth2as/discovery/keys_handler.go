@@ -2,58 +2,85 @@ package discovery
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/go-jose/go-jose/v3"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
-// KeySource is used to retrieve the public keys this provider is signing with
-type KeySource interface {
-	// PublicKeys should return the current signing key set
-	PublicKeys(ctx context.Context) (*jose.JSONWebKeySet, error)
+// PublicKeysetHandleFunc is used to retrieve a handle to the current public tink
+// keyset handle. The returned handle should not contain private key material.
+// It is called whenever a keyset is required, allowing for implementations to
+// rotate the keyset in use as needed.
+type PublicKeysetHandleFunc func(ctx context.Context) (*keyset.Handle, error)
+
+// StaticPublicKeysetHandle implements PublicKeysetHandleFunc, with a keyset handle
+// that never changes.
+func StaticPublicKeysetHandle(h *keyset.Handle) PublicKeysetHandleFunc {
+	return func(context.Context) (*keyset.Handle, error) { return h, nil }
 }
 
 // KeysHandler is a http.Handler that correctly serves the "keys" endpoint from a keysource
 type KeysHandler struct {
-	ks       KeySource
+	ph       PublicKeysetHandleFunc
 	cacheFor time.Duration
 
-	currKeys   *jose.JSONWebKeySet
-	currKeysMu sync.Mutex
+	currJWKS   []byte
+	currJWKSMu sync.Mutex
 
 	lastKeysUpdate time.Time
 }
 
-// NewKeysHandler returns a KeysHandler configured to serve the keys froom
-// KeySource. It will cache key lookups for the cacheFor duration
-func NewKeysHandler(s KeySource, cacheFor time.Duration) *KeysHandler {
-	return &KeysHandler{
-		ks:       s,
-		cacheFor: cacheFor,
+// NewKeysHandler returns a KeysHandler configured to serve the keys from
+// KeySource. It will cache key lookups for the cacheFor duration.
+func NewKeysHandler(phf PublicKeysetHandleFunc, cacheFor time.Duration) (*KeysHandler, error) {
+	h, err := phf(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("retrieving keyset handle: %w", err)
 	}
+	jwks, err := jwt.JWKSetFromPublicKeysetHandle(h)
+	if err != nil {
+		return nil, fmt.Errorf("creating jwks from keyset handle: %w", err)
+	}
+	return &KeysHandler{
+		ph:       phf,
+		cacheFor: cacheFor,
+
+		currJWKS:       jwks,
+		lastKeysUpdate: time.Now(),
+	}, nil
 }
 
 func (h *KeysHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	h.currKeysMu.Lock()
-	defer h.currKeysMu.Unlock()
+	h.currJWKSMu.Lock()
+	defer h.currJWKSMu.Unlock()
 
-	if h.currKeys == nil || time.Now().After(h.lastKeysUpdate) {
-		ks, err := h.ks.PublicKeys(req.Context())
+	if h.currJWKS == nil || time.Now().After(h.lastKeysUpdate) {
+		ph, err := h.ph(req.Context())
 		if err != nil {
+			slog.ErrorContext(req.Context(), "failed to get public key handle", "err", err.Error())
 			http.Error(w, "Internal Error", http.StatusInternalServerError)
 			return
 		}
 
-		h.currKeys = ks
+		publicJWKset, err := jwt.JWKSetFromPublicKeysetHandle(ph)
+		if err != nil {
+			slog.ErrorContext(req.Context(), "failed to get public key handle", "err", err.Error())
+			http.Error(w, "Internal Error", http.StatusInternalServerError)
+			return
+		}
+
+		h.currJWKS = publicJWKset
 		h.lastKeysUpdate = time.Now()
 	}
 
 	w.Header().Set("Content-Type", "application/jwk-set+json")
-
-	if err := json.NewEncoder(w).Encode(h.currKeys); err != nil {
+	if _, err := w.Write(h.currJWKS); err != nil {
+		slog.ErrorContext(req.Context(), "failed to write jwks", "err", err.Error())
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
 		return
 	}
