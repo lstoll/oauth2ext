@@ -15,6 +15,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/lstoll/oidc"
+	"github.com/lstoll/oidc/core/staticclients"
 	"github.com/lstoll/oidc/oauth2"
 	corev1 "github.com/lstoll/oidc/proto/core/v1"
 	"github.com/tink-crypto/tink-go/v2/jwt"
@@ -28,11 +29,12 @@ func TestStartAuthorization(t *testing.T) {
 		redirectURI  = "https://redirect"
 	)
 
-	clientSource := &stubCS{
-		validClients: map[string]csClient{
-			clientID: csClient{
-				Secret:      clientSecret,
-				RedirectURI: redirectURI,
+	clientSource := &staticclients.Clients{
+		Clients: []staticclients.Client{
+			{
+				ID:           clientID,
+				Secrets:      []string{clientSecret},
+				RedirectURLs: []string{redirectURI},
 			},
 		},
 	}
@@ -342,15 +344,17 @@ func TestToken(t *testing.T) {
 			smgr:     newStubSMGR(),
 			handleFn: KeysetHandle,
 
-			clients: &stubCS{
-				validClients: map[string]csClient{
-					clientID: csClient{
-						Secret:      clientSecret,
-						RedirectURI: redirectURI,
+			clients: &staticclients.Clients{
+				Clients: []staticclients.Client{
+					{
+						ID:           clientID,
+						Secrets:      []string{clientSecret},
+						RedirectURLs: []string{redirectURI},
 					},
-					otherClientID: csClient{
-						Secret:      otherClientSecret,
-						RedirectURI: otherClientRedirect,
+					{
+						ID:           otherClientID,
+						Secrets:      []string{otherClientSecret},
+						RedirectURLs: []string{otherClientRedirect},
 					},
 				},
 			},
@@ -793,7 +797,7 @@ func TestFetchCodeSession(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &stubCS{}, KeysetHandle)
+			oidc, err := New(&Config{}, smgr, &staticclients.Clients{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -866,7 +870,7 @@ func TestFetchRefreshSession(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &stubCS{}, KeysetHandle)
+			oidc, err := New(&Config{}, smgr, &staticclients.Clients{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -985,7 +989,7 @@ func TestUserinfo(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &stubCS{}, KeysetHandle)
+			oidc, err := New(&Config{}, smgr, &staticclients.Clients{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -1,0 +1,33 @@
+{
+  "clients": [
+    {
+      "id": "simple",
+      "clientSecrets": [
+        "secret"
+      ],
+      "redirectURLs": [
+        "http://myserver.com"
+      ]
+    },
+    {
+      "id": "publocalpkce",
+      "public": true,
+      "permitLocalhostRedirect": true
+    },
+    {
+      "id": "envsecret",
+      "clientSecrets": [
+        "${SC_SECRET:-defaultsecret}"
+      ],
+      "redirectURLs": [
+        "http://envsecret.com"
+      ]
+    },
+    {
+      "id": "publocalpkceskip",
+      "public": true,
+      "permitLocalhostRedirect": true,
+      "skipPKCE": true
+    }
+  ]
+}

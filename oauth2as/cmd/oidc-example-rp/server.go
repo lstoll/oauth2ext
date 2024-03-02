@@ -21,6 +21,9 @@ type server struct {
 	oidccli  *oidc.Client
 	mux      *http.ServeMux
 	muxSetup sync.Once
+
+	// pkceChallenges maps the state to the challenge.
+	pkceChallenges map[string]string
 }
 
 const homePage = `<!DOCTYPE html>
@@ -59,7 +62,15 @@ func (s *server) start(w http.ResponseWriter, req *http.Request) {
 	}
 	http.SetCookie(w, sc)
 
-	http.Redirect(w, req, s.oidccli.AuthCodeURL(state), http.StatusSeeOther)
+	var pkceChallenge string
+	url := s.oidccli.AuthCodeURL(state, oidc.AuthCodeWithPKCE(&pkceChallenge))
+
+	// it is not safe to give this to the end user. Associating it with a
+	// secured session would be good, for this app we just track it server side
+	// against the state.
+	s.pkceChallenges[state] = pkceChallenge
+
+	http.Redirect(w, req, url, http.StatusSeeOther)
 }
 
 const callbackPage = `<!DOCTYPE html>
@@ -101,7 +112,13 @@ func (s *server) callback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	token, err := s.oidccli.Exchange(req.Context(), code)
+	chall, ok := s.pkceChallenges[gotState]
+	if !ok {
+		http.Error(w, "no PKCE challenge found for state", http.StatusBadRequest)
+		return
+	}
+
+	token, err := s.oidccli.Exchange(req.Context(), code, oidc.ExchangeWithPKCE(chall))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("error exchanging code %q for token: %v", code, err), http.StatusInternalServerError)
 		return

@@ -43,7 +43,8 @@ func main() {
 	}
 
 	svr := &server{
-		oidccli: cli,
+		oidccli:        cli,
+		pkceChallenges: make(map[string]string),
 	}
 
 	log.Printf("Listening on: %s", "http://localhost:8084")

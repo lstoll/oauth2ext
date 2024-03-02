@@ -1,30 +1,27 @@
 package main
 
 import (
+	_ "embed"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/lstoll/oidc/core"
+	"github.com/lstoll/oidc/core/staticclients"
 	"github.com/lstoll/oidc/discovery"
 )
+
+//go:embed clients.json
+var clientsJSON []byte
 
 func main() {
 	smgr := newStubSMGR()
 	privh, pubh := mustInitKeyset()
 
-	clients := staticClients([]client{
-		{
-			ClientID:     "client-id",
-			ClientSecret: "client-secret",
-			RedirectURL:  "http://localhost:8084/callback",
-		},
-		{
-			ClientID:     "cli",
-			ClientSecret: "cli-client-secret",
-			Public:       true,
-		},
-	})
+	clients, err := staticclients.ExpandUnmarshal(clientsJSON)
+	if err != nil {
+		log.Fatalf("parsing clients: %v", err)
+	}
 
 	oidc, err := core.New(&core.Config{
 		AuthValidityTime: 5 * time.Minute,
