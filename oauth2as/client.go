@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,6 +31,10 @@ type Client struct {
 
 	acrValues  []string
 	enforceAcr bool
+
+	// requirePKCE is set at discovery time. If the server supports the S256
+	// challenge, we force users to use it.
+	requirePKCE bool
 }
 
 // ClientOpt can be used to customize the client
@@ -62,7 +67,16 @@ func DiscoverClient(ctx context.Context, issuer, clientID, clientSecret, redirec
 		return nil, fmt.Errorf("creating discovery client: %v", err)
 	}
 
-	return NewClient(cl.Metadata(), cl.PublicHandle, clientID, clientSecret, redirectURL, opts...)
+	c, err := NewClient(cl.Metadata(), cl.PublicHandle, clientID, clientSecret, redirectURL, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	if slices.Contains(cl.Metadata().CodeChallengeMethodsSupported, discovery.CodeChallengeMethodS256) {
+		c.requirePKCE = true
+	}
+
+	return c, nil
 }
 
 // NewClient creates a client directly from the passed in information
@@ -223,8 +237,16 @@ func (c *Client) Exchange(ctx context.Context, code string, opts ...ExchangeOpti
 
 	var eopts []oauth2.AuthCodeOption
 
+	var usingPKCE bool
 	if ecfg.codeVerifier != "" {
+		usingPKCE = true
 		eopts = append(eopts, oauth2.SetAuthURLParam("code_verifier", ecfg.codeVerifier))
+	}
+
+	if c.requirePKCE && !usingPKCE {
+		// https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics#name-authorization-code-grant
+		// it is RECCOMENDED not REQUIRED, but going to have an opinion here
+		return nil, fmt.Errorf("issuer supports PKCE, but auth flow not made with PKCE")
 	}
 
 	t, err := c.o2cfg.Exchange(ctx, code, eopts...)
