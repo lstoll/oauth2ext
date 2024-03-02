@@ -6,23 +6,44 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 
-	"github.com/gorilla/sessions"
 	"github.com/lstoll/oidc"
 )
 
 type tokenContextKey struct{}
 
-const (
-	defaultSessionName = "oidc-middleware"
+var baseLogAttr = slog.String("component", "oidc-middleware")
 
-	sessionKeyOIDCState        = "oidc-state"
-	sessionKeyOIDCReturnTo     = "oidc-return-to"
-	sessionKeyOIDCIDToken      = "oidc-id-token"
-	sessionKeyOIDCRefreshToken = "oidc-refresh-token"
-)
+func errAttr(err error) slog.Attr { return slog.String("err", err.Error()) }
+
+// SessionData contains the data this middleware needs to save/restore across
+// requests. This should be stored using a method that does not reveal the
+// contents to the end user in any way.
+type SessionData struct {
+	// State for an in-progress auth flow.
+	State string `json:"oidc_state"`
+	// ReturnTo is where we should navigate to at the end of the flow
+	ReturnTo string `json:"oidc_return_to"`
+	// IDToken is the id_token for the current logged in user
+	IDToken string `json:"oidc_id_token"`
+	// RefreshToken is the refresh token for this OIDC session. It is only
+	// persisted if a secure session store is used.
+	RefreshToken string `json:"oidc_refresh_token"`
+}
+
+// SessionStore are used for managing state across requests.
+type SessionStore interface {
+	// Get should always return a valid, usable session. If the session does not
+	// exist, it should be empty. error indicates that there was a failure that
+	// we should not proceed from.
+	Get(*http.Request) (*SessionData, error)
+	// Save should store the updated session. If the session data is nil, the
+	// session should be deleted.
+	Save(http.ResponseWriter, *http.Request, *SessionData) error
+}
 
 // Handler wraps another http.Handler, protecting it with OIDC authentication.
 type Handler struct {
@@ -47,13 +68,10 @@ type Handler struct {
 	// the returned token contains one of these.
 	ACRValues []string
 
-	// SessionStore is used to persist token information across requests. It
-	// must support sufficient storage for the ID and any refresh tokens. This
-	// must be provided.
-	SessionStore sessions.Store
-	// SessionName is a name used for the session. If empty, a default session
-	// name is used.
-	SessionName string
+	// SessionStore are used for managing state that we need to persist across
+	// requests. It needs to be able to store ID and refresh tokens, plus a
+	// small amount of additional data. Required.
+	SessionStore SessionStore
 
 	oidcClient     *oidc.Client
 	oidcClientInit sync.Once
@@ -63,16 +81,14 @@ type Handler struct {
 // provides OIDC authentication.
 func (h *Handler) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sessionName := h.SessionName
-		if sessionName == "" {
-			sessionName = defaultSessionName
-		}
 		if h.SessionStore == nil {
+			slog.ErrorContext(r.Context(), "Uninitialized session store", baseLogAttr)
 			http.Error(w, "Uninitialized session store", http.StatusInternalServerError)
 			return
 		}
-		session, err := h.SessionStore.Get(r, sessionName)
+		session, err := h.SessionStore.Get(r)
 		if err != nil {
+			slog.ErrorContext(r.Context(), "Failed to get session", baseLogAttr, errAttr(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -83,7 +99,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		} else if tok != nil {
-			if err := sessions.Save(r, w); err != nil {
+			if err := h.SessionStore.Save(w, r, session); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -100,7 +116,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		} else if returnTo != "" {
-			if err := sessions.Save(r, w); err != nil {
+			if err := h.SessionStore.Save(w, r, session); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -116,7 +132,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		if err := sessions.Save(r, w); err != nil {
+		if err := h.SessionStore.Save(w, r, session); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -131,11 +147,10 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 //
 // This function may modify the session if a token is refreshed, so it must be
 // saved afterward.
-func (h *Handler) authenticateExisting(r *http.Request, session *sessions.Session) (*oidc.Token, error) {
+func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*oidc.Token, error) {
 	ctx := r.Context()
 
-	rawIDToken, ok := session.Values[sessionKeyOIDCIDToken].(string)
-	if !ok {
+	if session.IDToken == "" {
 		return nil, nil
 	}
 
@@ -144,11 +159,10 @@ func (h *Handler) authenticateExisting(r *http.Request, session *sessions.Sessio
 		return nil, err
 	}
 
-	idToken, err := oidccl.VerifyRaw(ctx, h.ClientID, rawIDToken)
+	idToken, err := oidccl.VerifyRaw(ctx, h.ClientID, session.IDToken)
 	if err != nil {
 		// Attempt to refresh the token
-		refreshToken, ok := session.Values[sessionKeyOIDCRefreshToken].(string)
-		if !ok {
+		if session.RefreshToken == "" {
 			return nil, nil
 		}
 
@@ -157,13 +171,13 @@ func (h *Handler) authenticateExisting(r *http.Request, session *sessions.Sessio
 			return nil, err
 		}
 
-		token, err := oidccl.TokenSource(ctx, &oidc.Token{RefreshToken: refreshToken}).Token(ctx)
+		token, err := oidccl.TokenSource(ctx, &oidc.Token{RefreshToken: session.RefreshToken}).Token(ctx)
 		if err != nil {
 			return nil, nil
 		}
 
-		session.Values[sessionKeyOIDCIDToken] = token.IDToken
-		session.Values[sessionKeyOIDCRefreshToken] = token.RefreshToken
+		session.IDToken = token.IDToken
+		session.RefreshToken = token.RefreshToken
 
 		idToken = &token.Claims
 	}
@@ -172,7 +186,7 @@ func (h *Handler) authenticateExisting(r *http.Request, session *sessions.Sessio
 	// downstream consumers refreshing themselves, as it will likely invalidate
 	// ours. This should mainly be used during a HTTP request lifecycle too, so
 	// we would have done the job of refreshing if needed.
-	return &oidc.Token{IDToken: rawIDToken, Claims: *idToken, Expiry: idToken.Expiry.Time()}, nil
+	return &oidc.Token{IDToken: session.IDToken, Claims: *idToken, Expiry: idToken.Expiry.Time()}, nil
 }
 
 // authenticateCallback returns (returnTo, nil) if the user is authenticated,
@@ -181,7 +195,7 @@ func (h *Handler) authenticateExisting(r *http.Request, session *sessions.Sessio
 //
 // This function may modify the session if a token is authenticated, so it must be
 // saved afterward.
-func (h *Handler) authenticateCallback(r *http.Request, session *sessions.Session) (string, error) {
+func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (string, error) {
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
@@ -204,8 +218,7 @@ func (h *Handler) authenticateCallback(r *http.Request, session *sessions.Sessio
 		return "", nil
 	}
 
-	wantState, _ := session.Values[sessionKeyOIDCState].(string)
-	if wantState == "" || wantState != state {
+	if session.State == "" || session.State != state {
 		return "", fmt.Errorf("state did not match")
 	}
 
@@ -219,34 +232,34 @@ func (h *Handler) authenticateCallback(r *http.Request, session *sessions.Sessio
 		return "", err
 	}
 
-	session.Values[sessionKeyOIDCIDToken] = token.IDToken
-	session.Values[sessionKeyOIDCRefreshToken] = token.RefreshToken
-	delete(session.Values, sessionKeyOIDCState)
+	session.IDToken = token.IDToken
+	session.RefreshToken = token.RefreshToken
+	session.State = ""
 
-	returnTo, ok := session.Values[sessionKeyOIDCReturnTo].(string)
-	if !ok {
+	returnTo := session.ReturnTo
+	if returnTo == "" {
 		returnTo = h.BaseURL
 	}
-	delete(session.Values, sessionKeyOIDCReturnTo)
+	session.ReturnTo = ""
 
 	return returnTo, nil
 }
 
-func (h *Handler) startAuthentication(r *http.Request, session *sessions.Session) (string, error) {
+func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (string, error) {
 	oidccl, err := h.getOIDCClient(r.Context())
 	if err != nil {
 		return "", err
 	}
 
-	delete(session.Values, sessionKeyOIDCIDToken)
-	delete(session.Values, sessionKeyOIDCRefreshToken)
+	session.IDToken = ""
+	session.RefreshToken = ""
 
 	state := randomState()
-	session.Values[sessionKeyOIDCState] = state
+	session.State = state
 
-	delete(session.Values, sessionKeyOIDCReturnTo)
+	session.ReturnTo = ""
 	if r.Method == http.MethodGet {
-		session.Values[sessionKeyOIDCReturnTo] = r.URL.RequestURI()
+		session.ReturnTo = r.URL.RequestURI()
 	}
 
 	return oidccl.AuthCodeURL(state), nil
