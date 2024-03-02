@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/gorilla/sessions"
 	"github.com/lstoll/oidc"
 )
 
@@ -35,10 +34,15 @@ type SessionData struct {
 	RefreshToken string `json:"oidc_refresh_token"`
 }
 
-// SessionStoreV2 are used for managing state across requests.
-type SessionStoreV2 interface {
-	GetSession(*http.Request) (*SessionData, error)
-	SaveSession(http.ResponseWriter, *http.Request, *SessionData) error
+// SessionStore are used for managing state across requests.
+type SessionStore interface {
+	// Get should always return a valid, usable session. If the session does not
+	// exist, it should be empty. error indicates that there was a failure that
+	// we should not proceed from.
+	Get(*http.Request) (*SessionData, error)
+	// Save should store the updated session. If the session data is nil, the
+	// session should be deleted.
+	Save(http.ResponseWriter, *http.Request, *SessionData) error
 }
 
 // Handler wraps another http.Handler, protecting it with OIDC authentication.
@@ -64,24 +68,10 @@ type Handler struct {
 	// the returned token contains one of these.
 	ACRValues []string
 
-	// SessionStore is used to persist token information across requests. It
-	// must support sufficient storage for the ID and any refresh tokens. If
-	// `Sessions` is not provided, this will be used to create a fallback
-	// gorilla sessions.
-	//
-	// Deprecated: Use Sessions instead, this interface is tightly coupled to
-	// gorilla.
-	SessionStore sessions.Store
-	// SessionName is a name used for the session, when using the gorilla
-	// SessionStore. If not set, a default is used.
-	//
-	// Deprecated: Use Sessions
-	SessionName string
-
-	// SessionStoreV2 are used for managing state that we need to persist across
+	// SessionStore are used for managing state that we need to persist across
 	// requests. It needs to be able to store ID and refresh tokens, plus a
 	// small amount of additional data. Required.
-	SessionStoreV2 SessionStoreV2
+	SessionStore SessionStore
 
 	oidcClient     *oidc.Client
 	oidcClientInit sync.Once
@@ -91,18 +81,12 @@ type Handler struct {
 // provides OIDC authentication.
 func (h *Handler) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.SessionStoreV2 == nil {
-			if h.SessionStore == nil {
-				slog.ErrorContext(r.Context(), "Uninitialized session store", baseLogAttr)
-				http.Error(w, "Uninitialized session store", http.StatusInternalServerError)
-				return
-			}
-			h.SessionStoreV2 = &GorillaSessions{
-				Store:       h.SessionStore,
-				SessionName: h.SessionName,
-			}
+		if h.SessionStore == nil {
+			slog.ErrorContext(r.Context(), "Uninitialized session store", baseLogAttr)
+			http.Error(w, "Uninitialized session store", http.StatusInternalServerError)
+			return
 		}
-		session, err := h.SessionStoreV2.GetSession(r)
+		session, err := h.SessionStore.Get(r)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "Failed to get session", baseLogAttr, errAttr(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -115,7 +99,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		} else if tok != nil {
-			if err := h.SessionStoreV2.SaveSession(w, r, session); err != nil {
+			if err := h.SessionStore.Save(w, r, session); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -132,7 +116,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		} else if returnTo != "" {
-			if err := h.SessionStoreV2.SaveSession(w, r, session); err != nil {
+			if err := h.SessionStore.Save(w, r, session); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -148,7 +132,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		if err := h.SessionStoreV2.SaveSession(w, r, session); err != nil {
+		if err := h.SessionStore.Save(w, r, session); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
