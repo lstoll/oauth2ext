@@ -48,10 +48,11 @@ func main() {
 	m.Handle("/", svr)
 
 	md := &discovery.ProviderMetadata{
-		Issuer:                iss,
-		AuthorizationEndpoint: iss + "/auth",
-		TokenEndpoint:         iss + "/token",
-		JWKSURI:               iss + "/jwks.json",
+		Issuer:                        iss,
+		AuthorizationEndpoint:         iss + "/auth",
+		TokenEndpoint:                 iss + "/token",
+		JWKSURI:                       iss + "/jwks.json",
+		CodeChallengeMethodsSupported: []discovery.CodeChallengeMethod{discovery.CodeChallengeMethodS256},
 	}
 
 	discoh, err := discovery.NewConfigurationHandler(md, discovery.WithCoreDefaults())

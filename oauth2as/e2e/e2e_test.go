@@ -27,10 +27,15 @@ func TestE2E(t *testing.T) {
 	)
 
 	for _, tc := range []struct {
-		Name string
+		Name     string
+		WithPKCE bool
 	}{
 		{
 			Name: "Simple authorization",
+		},
+		{
+			Name:     "Authorization with PKCE",
+			WithPKCE: true,
 		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
@@ -74,9 +79,10 @@ func TestE2E(t *testing.T) {
 			smgr := newStubSMGR()
 			clientSource := &stubCS{
 				ValidClients: map[string]csClient{
-					clientID: csClient{
+					clientID: {
 						Secret:      clientSecret,
 						RedirectURI: cliSvr.URL,
+						Public:      tc.WithPKCE,
 					},
 				},
 			}
@@ -164,8 +170,14 @@ func TestE2E(t *testing.T) {
 				t.Fatalf("discovering client: %v", err)
 			}
 
+			var codeVerifier string
+			var acopts []oidc.AuthCodeOption
+			if tc.WithPKCE {
+				acopts = append(acopts, oidc.AuthCodeWithPKCE(&codeVerifier))
+			}
+
 			client := &http.Client{}
-			resp, err := client.Get(cl.AuthCodeURL(state))
+			resp, err := client.Get(cl.AuthCodeURL(state, acopts...))
 			if err != nil {
 				t.Fatalf("error getting auth URL: %v", err)
 			}
@@ -178,7 +190,13 @@ func TestE2E(t *testing.T) {
 				t.Fatal("waiting for callback timed out after 1s")
 			}
 
-			tok, err := cl.Exchange(ctx, callbackCode)
+			var eopts []oidc.ExchangeOptions
+			if tc.WithPKCE {
+				t.Logf("verifier: %v", codeVerifier)
+				eopts = append(eopts, oidc.ExchangeWithPKCE(codeVerifier))
+			}
+
+			tok, err := cl.Exchange(ctx, callbackCode, eopts...)
 			if err != nil {
 				t.Fatalf("error exchanging code %q for token: %v", callbackCode, err)
 			}
@@ -233,6 +251,7 @@ func randomStateValue() string {
 type csClient struct {
 	Secret      string
 	RedirectURI string
+	Public      bool
 }
 
 type stubCS struct {
@@ -245,6 +264,15 @@ func (s *stubCS) IsValidClientID(clientID string) (ok bool, err error) {
 }
 
 func (s *stubCS) IsUnauthenticatedClient(clientID string) (ok bool, err error) {
+	cl, ok := s.ValidClients[clientID]
+	if !ok {
+		return false, fmt.Errorf("invalid client ID")
+	}
+	return cl.Public, nil
+}
+
+func (s *stubCS) IsPublicClient(clientID string) (ok bool, err error) {
+	// TODO(lstoll) we probably want to have some of these to check
 	return false, nil
 }
 

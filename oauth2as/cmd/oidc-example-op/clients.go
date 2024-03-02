@@ -37,6 +37,15 @@ func (s staticClients) IsUnauthenticatedClient(clientID string) (ok bool, err er
 	return false, nil
 }
 
+func (s staticClients) IsPublicClient(clientID string) (ok bool, err error) {
+	for _, c := range s {
+		if c.ClientID == clientID {
+			return c.Public, nil
+		}
+	}
+	return false, fmt.Errorf("invalid client id %s", clientID)
+}
+
 func (s staticClients) ValidateClientSecret(clientID, clientSecret string) (ok bool, err error) {
 	for _, c := range s {
 		if c.ClientID == clientID && c.ClientSecret == clientSecret {

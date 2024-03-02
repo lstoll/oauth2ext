@@ -57,6 +57,15 @@ func TestParseAuthRequest(t *testing.T) {
 				},
 			},
 		},
+		{
+			Name: "Invalid PKCE type",
+			Query: fmt.Sprintf(
+				"response_type=code&client_id=client&redirect_uri=%s&scope=%s&state=state&code_challenge=aaa",
+				url.QueryEscape("https://redirect"), url.QueryEscape("openid groups"),
+			),
+			WantErr:     true,
+			WantErrCode: authErrorCodeInvalidRequest,
+		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
 			meth := tc.Method

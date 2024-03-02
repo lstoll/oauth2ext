@@ -5,6 +5,14 @@ import (
 	"strings"
 )
 
+// CodeChallengeMethod is https://www.rfc-editor.org/rfc/rfc7636#section-4.3
+type CodeChallengeMethod string
+
+const (
+	CodeChallengeMethodPlain = "plain"
+	CodeChallengeMethodS256  = "S256"
+)
+
 // ProviderMetadata implements the JSON structure that describes the
 // configuration of an OIDC provider
 //
@@ -180,6 +188,16 @@ type ProviderMetadata struct {
 	// registration process SHOULD display this URL to the person registering
 	// the Client if it is given.
 	OPTOSURI string `json:"op_tos_uri,omitempty"`
+	// OPTIONAL. JSON array containing a list of Proof Key for Code Exchange
+	// (PKCE) [RFC7636] code challenge methods supported by this authorization
+	// server.  Code challenge method values are used in the
+	// "code_challenge_method" parameter defined in Section 4.3 of [RFC7636].
+	// The valid code challenge method values are those registered in the IANA
+	// "PKCE Code Challenge Methods" registry [IANA.OAuth.Parameters].  If
+	// omitted, the authorization server does not support PKCE.
+	//
+	// https://www.rfc-editor.org/rfc/rfc8414.html#section-2
+	CodeChallengeMethodsSupported []CodeChallengeMethod `json:"code_challenge_methods_supported,omitempty"`
 }
 
 func (p *ProviderMetadata) validate() error {

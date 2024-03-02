@@ -24,14 +24,16 @@ func errAttr(err error) slog.Attr { return slog.String("err", err.Error()) }
 // contents to the end user in any way.
 type SessionData struct {
 	// State for an in-progress auth flow.
-	State string `json:"oidc_state"`
+	State string `json:"oidc_state,omitempty"`
+	// PKCEChallenge for the in-progress auth flow
+	PKCEChallenge string `json:"pkce_challenge,omitempty"`
 	// ReturnTo is where we should navigate to at the end of the flow
-	ReturnTo string `json:"oidc_return_to"`
+	ReturnTo string `json:"oidc_return_to,omitempty"`
 	// IDToken is the id_token for the current logged in user
-	IDToken string `json:"oidc_id_token"`
+	IDToken string `json:"oidc_id_token,omitempty"`
 	// RefreshToken is the refresh token for this OIDC session. It is only
 	// persisted if a secure session store is used.
-	RefreshToken string `json:"oidc_refresh_token"`
+	RefreshToken string `json:"oidc_refresh_token,omitempty"`
 }
 
 // SessionStore are used for managing state across requests.
@@ -227,7 +229,7 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 		return "", err
 	}
 
-	token, err := oidccl.Exchange(ctx, code)
+	token, err := oidccl.Exchange(ctx, code, oidc.ExchangeWithPKCE(session.PKCEChallenge))
 	if err != nil {
 		return "", err
 	}
@@ -254,15 +256,14 @@ func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (st
 	session.IDToken = ""
 	session.RefreshToken = ""
 
-	state := randomState()
-	session.State = state
+	session.State = randomState()
 
 	session.ReturnTo = ""
 	if r.Method == http.MethodGet {
 		session.ReturnTo = r.URL.RequestURI()
 	}
 
-	return oidccl.AuthCodeURL(state), nil
+	return oidccl.AuthCodeURL(session.State, oidc.AuthCodeWithPKCE(&session.PKCEChallenge)), nil
 }
 
 func (h *Handler) getOIDCClient(ctx context.Context) (*oidc.Client, error) {

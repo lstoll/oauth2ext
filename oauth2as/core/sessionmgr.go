@@ -115,6 +115,9 @@ type sessAuthRequest struct {
 	Scopes       []string                `json:"scopes,omitempty"`
 	Nonce        string                  `json:"nonce,omitempty"`
 	ResponseType authRequestResponseType `json:"response_type,omitempty"`
+	// CodeChallenge is the PKCE code challenge, if it was passed when the flow
+	// was started.
+	CodeChallenge string `json:"code_challenge,omitempty"`
 }
 
 type accessToken struct {

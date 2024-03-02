@@ -13,6 +13,8 @@ type responseType string
 const (
 	responseTypeCode     responseType = "code"
 	responseTypeImplicit responseType = "token"
+
+	codeChallengeMethodS256 = "S256"
 )
 
 type authRequest struct {
@@ -23,6 +25,9 @@ type authRequest struct {
 	State        string
 	Scopes       []string
 	ResponseType responseType
+	// CodeChallenge is the PKCE code challenge. If it is provided, it will be
+	// S256 format.
+	CodeChallenge string
 
 	// Raw is the full, unprocessed set of values passed to this request.
 	Raw url.Values
@@ -45,6 +50,8 @@ func parseAuthRequest(req *http.Request) (authReq *authRequest, err error) {
 	ruri := req.FormValue("redirect_uri")
 	scope := req.FormValue("scope")
 	state := req.FormValue("state")
+	codeChallenge := req.FormValue("code_challenge")
+	codeChallengeMethod := req.FormValue("code_challenge_method")
 
 	var rt responseType
 	switch rts {
@@ -70,13 +77,24 @@ func parseAuthRequest(req *http.Request) (authReq *authRequest, err error) {
 		}
 	}
 
+	if codeChallenge != "" && codeChallengeMethod != codeChallengeMethodS256 {
+		return nil, &authError{
+			State:       state,
+			Code:        authErrorCodeInvalidRequest,
+			Description: fmt.Sprintf(`only code_challenge type "%s" supported`, codeChallengeMethodS256),
+			RedirectURI: ruri,
+		}
+
+	}
+
 	return &authRequest{
-		ClientID:     cid,
-		RedirectURI:  ruri,
-		State:        state,
-		Scopes:       strings.Split(strings.TrimSpace(scope), " "),
-		ResponseType: rt,
-		Raw:          req.Form,
+		ClientID:      cid,
+		RedirectURI:   ruri,
+		State:         state,
+		Scopes:        strings.Split(strings.TrimSpace(scope), " "),
+		ResponseType:  rt,
+		Raw:           req.Form,
+		CodeChallenge: codeChallenge,
 	}, nil
 }
 

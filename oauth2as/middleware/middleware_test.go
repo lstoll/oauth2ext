@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/lstoll/oidc"
+	"github.com/lstoll/oidc/discovery"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
@@ -97,18 +98,13 @@ func (s *mockOIDCServer) handleDiscovery(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	discovery := struct {
-		Issuer                 string   `json:"issuer"`
-		AuthorizationEndpoint  string   `json:"authorization_endpoint"`
-		TokenEndpoint          string   `json:"token_endpoint"`
-		JWKSURI                string   `json:"jwks_uri"`
-		ResponseTypesSupported []string `json:"response_types_supported"`
-	}{
-		Issuer:                 s.baseURL,
-		AuthorizationEndpoint:  fmt.Sprintf("%s/auth", s.baseURL),
-		TokenEndpoint:          fmt.Sprintf("%s/token", s.baseURL),
-		JWKSURI:                fmt.Sprintf("%s/keys", s.baseURL),
-		ResponseTypesSupported: []string{"code"},
+	discovery := discovery.ProviderMetadata{
+		Issuer:                        s.baseURL,
+		AuthorizationEndpoint:         fmt.Sprintf("%s/auth", s.baseURL),
+		TokenEndpoint:                 fmt.Sprintf("%s/token", s.baseURL),
+		JWKSURI:                       fmt.Sprintf("%s/keys", s.baseURL),
+		ResponseTypesSupported:        []string{"code"},
+		CodeChallengeMethodsSupported: []discovery.CodeChallengeMethod{discovery.CodeChallengeMethodS256},
 	}
 
 	if err := json.NewEncoder(w).Encode(discovery); err != nil {

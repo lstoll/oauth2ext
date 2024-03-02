@@ -28,6 +28,11 @@ func (s *stubCS) IsUnauthenticatedClient(clientID string) (ok bool, err error) {
 	return false, nil
 }
 
+func (s *stubCS) IsPublicClient(clientID string) (ok bool, err error) {
+	// TODO(lstoll) we probably want to have some of these to check
+	return false, nil
+}
+
 func (s *stubCS) ValidateClientSecret(clientID, clientSecret string) (ok bool, err error) {
 	cl, ok := s.validClients[clientID]
 	return ok && clientSecret == cl.Secret, nil
