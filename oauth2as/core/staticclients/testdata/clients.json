@@ -27,7 +27,7 @@
       "id": "publocalpkceskip",
       "public": true,
       "permitLocalhostRedirect": true,
-      "skipPKCE": true
+      "requiresPKCE": false
     }
   ]
 }

@@ -73,10 +73,10 @@ type Client struct {
 	// PermitLocalhostRedirect allows redirects to localhost, if this is a
 	// public client
 	PermitLocalhostRedirect bool `json:"permitLocalhostRedirect" yaml:"permitLocalhostRedirect"`
-	// SkipPKCE indicates that this client should not be required to use PKCE
-	// for the token exchange. This defaults to false for public clients, and
-	// true for non-public clients.
-	SkipPKCE *bool `json:"skipPKCE" yaml:"skipPKCE"`
+	// RequiresPKCE indicates that this client should be required to use PKCE
+	// for the token exchange. This defaults to true for public clients, and
+	// false for non-public clients.
+	RequiresPKCE *bool `json:"requiresPKCE" yaml:"requiresPKCE"`
 }
 
 func (c *Clients) IsValidClientID(clientID string) (ok bool, err error) {
@@ -90,12 +90,12 @@ func (c *Clients) RequiresPKCE(clientID string) (ok bool, err error) {
 		return false, fmt.Errorf("invalid client ID")
 	}
 
-	if cl.SkipPKCE == nil {
+	if cl.RequiresPKCE == nil {
 		// not set. required if public, not if not
 		return cl.Public, nil
 	}
 
-	return !*cl.SkipPKCE, nil
+	return *cl.RequiresPKCE, nil
 }
 
 func (c *Clients) ValidateClientSecret(clientID, clientSecret string) (ok bool, err error) {
@@ -107,7 +107,7 @@ func (c *Clients) ValidateClientSecret(clientID, clientSecret string) (ok bool, 
 		return false, fmt.Errorf("invalid client ID")
 	}
 
-	if len(cl.Secrets) == 0 && cl.Public && (cl.SkipPKCE == nil || !*cl.SkipPKCE) {
+	if len(cl.Secrets) == 0 && cl.Public && (cl.RequiresPKCE == nil || !*cl.RequiresPKCE) {
 		// we're a public client with no secrets and using PKCE. It's valid
 		return true, nil
 	}
