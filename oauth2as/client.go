@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/lstoll/oidc/discovery"
-	"github.com/tink-crypto/tink-go/v2/keyset"
 	"golang.org/x/oauth2"
 )
 
@@ -18,16 +17,10 @@ const (
 	ScopeOfflineAccess = "offline_access"
 )
 
-type KeysetSource interface {
-	// PublicHandle returns a handle to the public keys for a set.
-	PublicHandle(ctx context.Context) (*keyset.Handle, error)
-}
-
 type Client struct {
 	Verifier
 
 	md *discovery.ProviderMetadata
-	ks KeysetSource
 
 	o2cfg oauth2.Config
 
@@ -65,18 +58,21 @@ func DiscoverClient(ctx context.Context, issuer, clientID, clientSecret, redirec
 		return nil, fmt.Errorf("creating discovery client: %v", err)
 	}
 
-	return NewClient(cl.Metadata(), cl, clientID, clientSecret, redirectURL, opts...), nil
+	return NewClient(cl.Metadata(), cl.PublicHandle, clientID, clientSecret, redirectURL, opts...)
 }
 
 // NewClient creates a client directly from the passed in information
-func NewClient(md *discovery.ProviderMetadata, ks KeysetSource, clientID, clientSecret, redirectURL string, opts ...ClientOpt) *Client {
+func NewClient(md *discovery.ProviderMetadata, ph PublicKeysetHandleFunc, clientID, clientSecret, redirectURL string, opts ...ClientOpt) (*Client, error) {
+	if err := validateHandle(context.Background(), ph); err != nil {
+		return nil, err
+	}
+
 	c := &Client{
 		Verifier: Verifier{
-			md: md,
-			ks: ks,
+			md:       md,
+			kshandle: ph,
 		},
 		md: md,
-		ks: ks,
 		o2cfg: oauth2.Config{
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
@@ -93,7 +89,7 @@ func NewClient(md *discovery.ProviderMetadata, ks KeysetSource, clientID, client
 		o(c)
 	}
 
-	return c
+	return c, nil
 }
 
 type authCodeCfg struct {

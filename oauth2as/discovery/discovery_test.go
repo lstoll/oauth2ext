@@ -12,24 +12,17 @@ import (
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
-type mockKeysource struct {
-	handle *keyset.Handle
-}
-
-func (m *mockKeysource) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
-	if m.handle == nil {
-		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
-		if err != nil {
-			return nil, fmt.Errorf("creating handle: %v", err)
-		}
-		h, err = h.Public()
-		if err != nil {
-			return nil, fmt.Errorf("getting public handle: %w", err)
-		}
-		m.handle = h
+func PublicHandle(ctx context.Context) (*keyset.Handle, error) {
+	h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
+	if err != nil {
+		return nil, fmt.Errorf("creating handle: %v", err)
+	}
+	h, err = h.Public()
+	if err != nil {
+		return nil, fmt.Errorf("getting public handle: %w", err)
 	}
 
-	return m.handle, nil
+	return h, nil
 }
 
 func TestDiscovery(t *testing.T) {
@@ -39,9 +32,10 @@ func TestDiscovery(t *testing.T) {
 	m := http.NewServeMux()
 	ts := httptest.NewServer(m)
 
-	ks := &mockKeysource{}
-
-	kh := NewKeysHandler(ks, 1*time.Nanosecond)
+	kh, err := NewKeysHandler(PublicHandle, 1*time.Nanosecond)
+	if err != nil {
+		t.Fatal(err)
+	}
 	m.Handle("/jwks.json", kh)
 
 	pm := &ProviderMetadata{

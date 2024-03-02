@@ -339,8 +339,8 @@ func TestToken(t *testing.T) {
 
 	newOIDC := func() *OIDC {
 		return &OIDC{
-			smgr:   newStubSMGR(),
-			signer: getSource(t),
+			smgr:     newStubSMGR(),
+			handleFn: KeysetHandle,
 
 			clients: &stubCS{
 				validClients: map[string]csClient{
@@ -793,7 +793,7 @@ func TestFetchCodeSession(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &stubCS{}, getSource(t))
+			oidc, err := New(&Config{}, smgr, &stubCS{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -866,7 +866,7 @@ func TestFetchRefreshSession(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &stubCS{}, getSource(t))
+			oidc, err := New(&Config{}, smgr, &stubCS{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -985,7 +985,7 @@ func TestUserinfo(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &stubCS{}, getSource(t))
+			oidc, err := New(&Config{}, smgr, &stubCS{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1078,27 +1078,17 @@ var (
 	thMu sync.Mutex
 )
 
-type testKeysetSource struct {
-	h *keyset.Handle
-}
-
-func (t *testKeysetSource) Handle(_ context.Context) (*keyset.Handle, error) {
-	return t.h, nil
-}
-
-func getSource(tb testing.TB) KeysetSource {
+func KeysetHandle(_ context.Context) (*keyset.Handle, error) {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
 	if th == nil {
 		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
 		if err != nil {
-			tb.Fatal(err)
+			panic(err)
 		}
 		th = h
 	}
 
-	return &testKeysetSource{
-		h: th,
-	}
+	return th, nil
 }

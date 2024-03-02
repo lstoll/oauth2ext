@@ -16,9 +16,16 @@ import (
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
-// KeysetSource is used to retrieve a handle to a keyset for signing tokens.
-type KeysetSource interface {
-	Handle(ctx context.Context) (*keyset.Handle, error)
+// KeysetHandleFunc is used to retrieve a handle to the current tink keyset handle.
+// The returned handle should contain the private key material for signing. It
+// is called whenever a keyset is required, allowing for implementations to
+// rotate the keyset in use as needed.
+type KeysetHandleFunc func(ctx context.Context) (*keyset.Handle, error)
+
+// StaticKeysetHandle implements HandleFunc, with a keyset handle that never
+// changes.
+func StaticKeysetHandle(h *keyset.Handle) KeysetHandleFunc {
+	return func(context.Context) (*keyset.Handle, error) { return h, nil }
 }
 
 // ClientSource is used for validating client informantion for the general flow
@@ -61,9 +68,9 @@ type Config struct {
 
 // OIDC can be used to handle the various parts of the OIDC auth flow.
 type OIDC struct {
-	smgr    SessionManager
-	clients ClientSource
-	signer  KeysetSource
+	smgr     SessionManager
+	clients  ClientSource
+	handleFn KeysetHandleFunc
 
 	authValidityTime time.Duration
 	codeValidityTime time.Duration
@@ -71,11 +78,11 @@ type OIDC struct {
 	now func() time.Time
 }
 
-func New(cfg *Config, smgr SessionManager, clientSource ClientSource, signer KeysetSource) (*OIDC, error) {
+func New(cfg *Config, smgr SessionManager, clientSource ClientSource, signer KeysetHandleFunc) (*OIDC, error) {
 	o := &OIDC{
-		smgr:    smgr,
-		clients: clientSource,
-		signer:  signer,
+		smgr:     smgr,
+		clients:  clientSource,
+		handleFn: signer,
 
 		authValidityTime: cfg.AuthValidityTime,
 		codeValidityTime: cfg.CodeValidityTime,
@@ -529,7 +536,7 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to put access token", Cause: err}
 	}
 
-	handle, err := o.signer.Handle(ctx)
+	handle, err := o.handleFn(ctx)
 	if err != nil {
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting signer handle", Cause: err}
 	}

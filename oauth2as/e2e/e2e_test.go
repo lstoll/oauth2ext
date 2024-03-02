@@ -81,7 +81,7 @@ func TestE2E(t *testing.T) {
 				},
 			}
 
-			oidcHandlers, err := core.New(cfg, smgr, clientSource, getSource(t))
+			oidcHandlers, err := core.New(cfg, smgr, clientSource, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -143,7 +143,19 @@ func TestE2E(t *testing.T) {
 			}
 			mux.Handle("/.well-known/openid-configuration/", discoh)
 
-			jwksh := discovery.NewKeysHandler(getSource(t), 1*time.Second)
+			privh, err := KeysetHandle(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pubh, err := privh.Public()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			jwksh, err := discovery.NewKeysHandler(discovery.StaticPublicKeysetHandle(pubh), 1*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
 			mux.Handle("/jwks.json", jwksh)
 
 			// set up client
@@ -319,42 +331,20 @@ func (s *stubSMGR) expireAccessTokens(_ context.Context) error {
 
 var (
 	th   *keyset.Handle
-	tph  *keyset.Handle
 	thMu sync.Mutex
 )
 
-type testKeysetSource struct {
-	h  *keyset.Handle
-	ph *keyset.Handle
-}
-
-func (t *testKeysetSource) Handle(_ context.Context) (*keyset.Handle, error) {
-	return t.h, nil
-}
-
-func (t *testKeysetSource) PublicHandle(_ context.Context) (*keyset.Handle, error) {
-	return t.ph, nil
-}
-
-func getSource(tb testing.TB) *testKeysetSource {
+func KeysetHandle(_ context.Context) (*keyset.Handle, error) {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
 	if th == nil {
 		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
 		if err != nil {
-			tb.Fatal(err)
-		}
-		ph, err := h.Public()
-		if err != nil {
-			tb.Fatal(err)
+			panic(err)
 		}
 		th = h
-		tph = ph
 	}
 
-	return &testKeysetSource{
-		h:  th,
-		ph: tph,
-	}
+	return th, nil
 }

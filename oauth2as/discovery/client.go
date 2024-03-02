@@ -6,15 +6,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
+// DefaultJWKSCacheDuration defines the default time we cache a JWKS response,
+// to avoid excessive requests to the issuer.
+const DefaultJWKSCacheDuration = 15 * time.Minute
+
 const oidcwk = "/.well-known/openid-configuration"
 
 // keep us looking like a keysource, for consistency
-var _ KeySource = (*Client)(nil)
+var _ PublicKeysetHandleFunc = ((*Client)(nil)).PublicHandle
 
 // Client can be used to fetch the provider metadata for a given issuer, and can
 // also return the signing keys on demand.
@@ -24,6 +30,11 @@ type Client struct {
 	md *ProviderMetadata
 
 	hc *http.Client
+
+	jwksCacheDuration    time.Duration
+	jwksCacheLastUpdated time.Time
+	jwksHandle           *keyset.Handle
+	jwksMu               sync.Mutex
 }
 
 // ClientOpt is an option that can configure a client
@@ -37,11 +48,19 @@ func WithHTTPClient(hc *http.Client) func(c *Client) {
 	}
 }
 
+// WithJWKSCacheDuration overrides the duration that we cache responses from the jwks endpoint.
+func WithJWKSCacheDuration(d time.Duration) func(c *Client) {
+	return func(c *Client) {
+		c.jwksCacheDuration = d
+	}
+}
+
 // NewClient will initialize a Client, performing the initial discovery.
 func NewClient(ctx context.Context, issuer string, opts ...ClientOpt) (*Client, error) {
 	c := &Client{
-		md: &ProviderMetadata{},
-		hc: http.DefaultClient,
+		md:                &ProviderMetadata{},
+		hc:                http.DefaultClient,
+		jwksCacheDuration: DefaultJWKSCacheDuration,
 	}
 
 	for _, o := range opts {
@@ -67,13 +86,19 @@ func (c *Client) Metadata() *ProviderMetadata {
 	return c.md
 }
 
-// PublicHandle returns a keyset handle for the issuer's JWKS. THis will make a
-// HTTP request.
-//
-// TODO(lstoll) cache this response
+// PublicHandle returns a keyset handle for the issuer's JWKS. This will return
+// a cached result if it exists and is still valid, otherwise will perform a
+// HTTP request to retrieve it.
 func (c *Client) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
+	c.jwksMu.Lock()
+	defer c.jwksMu.Unlock()
+
 	if c.md.JWKSURI == "" {
 		return nil, fmt.Errorf("metadata has no JWKS endpoint, cannot fetch keys")
+	}
+
+	if c.jwksHandle != nil && time.Now().Before(c.jwksCacheLastUpdated.Add(c.jwksCacheDuration)) {
+		return c.jwksHandle, nil
 	}
 
 	res, err := c.hc.Get(c.md.JWKSURI)
@@ -92,6 +117,9 @@ func (c *Client) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating handle from response: %w", err)
 	}
+
+	c.jwksCacheLastUpdated = time.Now()
+	c.jwksHandle = h
 
 	return h, nil
 }
