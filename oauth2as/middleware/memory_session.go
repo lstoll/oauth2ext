@@ -18,7 +18,7 @@ type memorySessionStore struct {
 }
 
 // NewMemorySessionStore creates a simple session store, that tracks state in
-// memory. It is mainly used for testing, it is not suitible for anything
+// memory. It is mainly used for testing, it is not suitable for anything
 // outside a single process as the state will not be shared. It also does not
 // have robust cleaning of stored session data.
 //
