@@ -9,7 +9,7 @@ import (
 func MustUUIDv4() string {
 	uuid := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, uuid); err != nil {
-		panic(fmt.Sprintf("readign from crypto rand failed: %v", err))
+		panic(fmt.Sprintf("reading from crypto rand failed: %v", err))
 	}
 	uuid[6] = (uuid[6] & 0x0f) | 0x40 // version 4
 	uuid[8] = (uuid[8] & 0x3f) | 0x80 // variant is 10
