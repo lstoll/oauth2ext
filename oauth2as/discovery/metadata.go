@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// https://www.rfc-editor.org/rfc/rfc7636#section-4.3
+// CodeChallengeMethod is https://www.rfc-editor.org/rfc/rfc7636#section-4.3
 type CodeChallengeMethod string
 
 const (

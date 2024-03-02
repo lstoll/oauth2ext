@@ -245,7 +245,7 @@ func (c *Client) Exchange(ctx context.Context, code string, opts ...ExchangeOpti
 
 	if c.requirePKCE && !usingPKCE {
 		// https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics#name-authorization-code-grant
-		// it is RECCOMENDED not REQUIRED, but going to have an opinion here
+		// it is RECOMMENDED not REQUIRED, but going to have an opinion here
 		return nil, fmt.Errorf("issuer supports PKCE, but auth flow not made with PKCE")
 	}
 
