@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/lstoll/oidc/discovery"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
@@ -14,40 +13,29 @@ import (
 // keyset handle. The returned handle should not contain private key material.
 // It is called whenever a keyset is required, allowing for implementations to
 // rotate the keyset in use as needed.
-type PublicKeysetHandleFunc func(ctx context.Context) (*keyset.Handle, error)
+type PublicKeysetHandleFunc func() *keyset.Handle
 
 // StaticPublicKeysetHandle implements PublicKeysetHandleFunc, with a keyset handle
 // that never changes.
 func StaticPublicKeysetHandle(h *keyset.Handle) PublicKeysetHandleFunc {
-	return func(context.Context) (*keyset.Handle, error) { return h, nil }
+	return func() *keyset.Handle { return h }
 }
 
+// Verifier can be used to verify ID tokens issued by an OIDC issuer.
 type Verifier struct {
-	md       *discovery.ProviderMetadata
+	issuer   string
 	kshandle PublicKeysetHandleFunc
 }
 
-func DiscoverVerifier(ctx context.Context, issuer string) (*Verifier, error) {
-	cl, err := discovery.NewClient(ctx, issuer)
-	if err != nil {
-		return nil, fmt.Errorf("creating discovery client: %v", err)
-	}
-
-	if err := validateHandle(ctx, cl.PublicHandle); err != nil {
-		return nil, err
-	}
-
-	return &Verifier{
-		md:       cl.Metadata(),
-		kshandle: cl.PublicHandle,
-	}, nil
-}
-
+// NewVerifier creates a verfier for the given issuer and keyset.This can be
+// constructed from a discovery client.
+//
+// e.g:
+// cl, err := discovery.NewClient(ctx, "http://issuer", discovery.WithBackgroundJWKSRefresh(15*time.Minute))
+// NewVerifier(cl.Metadata().Issuer, cl.PublicHandle, ......)
 func NewVerifier(issuer string, ph PublicKeysetHandleFunc) *Verifier {
 	return &Verifier{
-		md: &discovery.ProviderMetadata{
-			Issuer: issuer,
-		},
+		issuer:   issuer,
 		kshandle: ph,
 	}
 }
@@ -57,17 +45,13 @@ type verifyCfg struct{}
 type VerifyOpt func(v *verifyCfg)
 
 func (v *Verifier) VerifyRaw(ctx context.Context, audience string, raw string, opts ...VerifyOpt) (*Claims, error) {
-	h, err := v.kshandle(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting public key handle: %w", err)
-	}
-	verifier, err := jwt.NewVerifier(h)
+	verifier, err := jwt.NewVerifier(v.kshandle())
 	if err != nil {
 		return nil, fmt.Errorf("creating jwt verifier: %w", err)
 	}
 
 	validator, err := jwt.NewValidator(&jwt.ValidatorOpts{
-		ExpectedIssuer:   &v.md.Issuer,
+		ExpectedIssuer:   &v.issuer,
 		ExpectedAudience: &audience,
 	})
 	if err != nil {
@@ -95,12 +79,8 @@ func (v *Verifier) VerifyRaw(ctx context.Context, audience string, raw string, o
 
 // validateHandle tries to retrieve the current handle and create a verifier,
 // used to catch misconfiguration at constructor time rather than use time.
-func validateHandle(ctx context.Context, h PublicKeysetHandleFunc) error {
-	ph, err := h(ctx)
-	if err != nil {
-		return fmt.Errorf("getting handle failed: %w", err)
-	}
-	if _, err = jwt.NewVerifier(ph); err != nil {
+func validateHandle(h PublicKeysetHandleFunc) error {
+	if _, err := jwt.NewVerifier(h()); err != nil {
 		return fmt.Errorf("creating verifier from handle: %w", err)
 	}
 	return nil

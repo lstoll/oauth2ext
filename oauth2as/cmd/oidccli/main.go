@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidc/clitoken"
+	"github.com/lstoll/oidc/discovery"
 	"github.com/lstoll/oidc/tokencache"
 	"golang.org/x/net/context"
 )
@@ -134,7 +136,11 @@ func main() {
 		opts = append(opts, oidc.WithAdditionalScopes([]string{oidc.ScopeOfflineAccess}))
 	}
 
-	client, err := oidc.DiscoverClient(ctx, baseFlags.Issuer, baseFlags.ClientID, baseFlags.ClientSecret, "", opts...)
+	dcl, err := discovery.NewClient(ctx, baseFlags.Issuer, discovery.WithBackgroundJWKSRefresh(5*time.Minute))
+	if err != nil {
+		log.Fatalf("discovering issuer %s: %v", baseFlags.Issuer, err)
+	}
+	client, err := oidc.NewClient(dcl.Metadata(), dcl.PublicHandle, baseFlags.ClientID, baseFlags.ClientSecret, "", opts...)
 	if err != nil {
 		fmt.Printf("failed to discover issuer: %v", err)
 		os.Exit(1)

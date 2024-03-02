@@ -58,36 +58,20 @@ func WithACRValues(acrValues []string, enforce bool) ClientOpt {
 	}
 }
 
-// DiscoverClient will create a client based on the OIDC discovery of the given
-// issuer. It will use the returned information to configure the client, and
-// will use it to create a KeySource that discovers published keys as needed.
-func DiscoverClient(ctx context.Context, issuer, clientID, clientSecret, redirectURL string, opts ...ClientOpt) (*Client, error) {
-	cl, err := discovery.NewClient(ctx, issuer)
-	if err != nil {
-		return nil, fmt.Errorf("creating discovery client: %v", err)
-	}
-
-	c, err := NewClient(cl.Metadata(), cl.PublicHandle, clientID, clientSecret, redirectURL, opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	if slices.Contains(cl.Metadata().CodeChallengeMethodsSupported, discovery.CodeChallengeMethodS256) {
-		c.requirePKCE = true
-	}
-
-	return c, nil
-}
-
-// NewClient creates a client directly from the passed in information
+// NewClient creates a client directly from the passed in information about the
+// provider. This can be constructed from a discovery client.
+//
+// e.g:
+// cl, err := discovery.NewClient(ctx, "http://issuer", discovery.WithBackgroundJWKSRefresh(15*time.Minute))
+// NewClient(cl.Metadata(), cl.PublicHandle, ......)
 func NewClient(md *discovery.ProviderMetadata, ph PublicKeysetHandleFunc, clientID, clientSecret, redirectURL string, opts ...ClientOpt) (*Client, error) {
-	if err := validateHandle(context.Background(), ph); err != nil {
+	if err := validateHandle(ph); err != nil {
 		return nil, err
 	}
 
 	c := &Client{
 		Verifier: Verifier{
-			md:       md,
+			issuer:   md.Issuer,
 			kshandle: ph,
 		},
 		md: md,
@@ -105,6 +89,10 @@ func NewClient(md *discovery.ProviderMetadata, ph PublicKeysetHandleFunc, client
 
 	for _, o := range opts {
 		o(c)
+	}
+
+	if slices.Contains(md.CodeChallengeMethodsSupported, discovery.CodeChallengeMethodS256) {
+		c.requirePKCE = true
 	}
 
 	return c, nil

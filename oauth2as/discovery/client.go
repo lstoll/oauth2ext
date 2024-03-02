@@ -5,17 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
-
-// DefaultJWKSCacheDuration defines the default time we cache a JWKS response,
-// to avoid excessive requests to the issuer.
-const DefaultJWKSCacheDuration = 15 * time.Minute
 
 const oidcwk = "/.well-known/openid-configuration"
 
@@ -31,10 +29,10 @@ type Client struct {
 
 	hc *http.Client
 
-	jwksCacheDuration    time.Duration
-	jwksCacheLastUpdated time.Time
-	jwksHandle           *keyset.Handle
-	jwksMu               sync.Mutex
+	backgroundRefresh         bool
+	backgroundRefreshInterval time.Duration
+	refresher                 *refresher
+	jwksMu                    sync.Mutex
 }
 
 // ClientOpt is an option that can configure a client
@@ -48,19 +46,22 @@ func WithHTTPClient(hc *http.Client) func(c *Client) {
 	}
 }
 
-// WithJWKSCacheDuration overrides the duration that we cache responses from the jwks endpoint.
-func WithJWKSCacheDuration(d time.Duration) func(c *Client) {
+// WithBackgroundJWKSRefresh starts a goroutine in the background to refresh the
+// jwks every interval time, to ensure that remotely rotated keys are accounted
+// for. If the interval is 0, a default of 15 minutes will be used. This routine
+// will log errors via slog.
+func WithBackgroundJWKSRefresh(interval time.Duration) func(c *Client) {
 	return func(c *Client) {
-		c.jwksCacheDuration = d
+		c.backgroundRefresh = true
+		c.backgroundRefreshInterval = interval
 	}
 }
 
 // NewClient will initialize a Client, performing the initial discovery.
 func NewClient(ctx context.Context, issuer string, opts ...ClientOpt) (*Client, error) {
 	c := &Client{
-		md:                &ProviderMetadata{},
-		hc:                http.DefaultClient,
-		jwksCacheDuration: DefaultJWKSCacheDuration,
+		md: &ProviderMetadata{},
+		hc: http.DefaultClient,
 	}
 
 	for _, o := range opts {
@@ -77,6 +78,26 @@ func NewClient(ctx context.Context, issuer string, opts ...ClientOpt) (*Client, 
 		return nil, fmt.Errorf("error decoding provider metadata response: %v", err)
 	}
 
+	c.refresher = &refresher{
+		hc:      c.hc,
+		jwksuri: c.md.JWKSURI,
+		stop:    make(chan struct{}, 1),
+	}
+
+	if err := c.RefreshJWKS(ctx); err != nil {
+		return nil, fmt.Errorf("initial jwks fetch: %w", err)
+	}
+
+	if c.backgroundRefresh {
+		if c.backgroundRefreshInterval == 0 {
+			c.backgroundRefreshInterval = 15 * time.Minute
+		}
+		go c.refresher.RunRefreshRoutine(c.backgroundRefreshInterval)
+		runtime.SetFinalizer(c, func(c *Client) {
+			c.refresher.stop <- struct{}{}
+		})
+	}
+
 	return c, nil
 }
 
@@ -86,40 +107,70 @@ func (c *Client) Metadata() *ProviderMetadata {
 	return c.md
 }
 
-// PublicHandle returns a keyset handle for the issuer's JWKS. This will return
-// a cached result if it exists and is still valid, otherwise will perform a
-// HTTP request to retrieve it.
-func (c *Client) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
+// RefreshJWKS loads the current JWKS keyset from the issuer. This may need to
+// be done periodically to account for key rotation.
+func (c *Client) RefreshJWKS(ctx context.Context) error {
 	c.jwksMu.Lock()
 	defer c.jwksMu.Unlock()
 
-	if c.md.JWKSURI == "" {
-		return nil, fmt.Errorf("metadata has no JWKS endpoint, cannot fetch keys")
-	}
+	return c.refresher.Refresh(ctx)
+}
 
-	if c.jwksHandle != nil && time.Now().Before(c.jwksCacheLastUpdated.Add(c.jwksCacheDuration)) {
-		return c.jwksHandle, nil
-	}
+// PublicHandle returns the current keyset handle for the issuer's JWKS. If keys
+// are rotated remotely, this may need to be refreshed.
+func (c *Client) PublicHandle() *keyset.Handle {
+	return c.refresher.handle
+}
 
-	res, err := c.hc.Get(c.md.JWKSURI)
+// refresher is the embedded type that the refresh goroutine points to. this
+// allows us to set a finalizer on the parent type when it gets GC'd to stop the
+// refresh routine. If the routine had a reference to the parent struct, it
+// would never get GC'd
+type refresher struct {
+	hc      *http.Client
+	jwksuri string
+	handle  *keyset.Handle
+	stop    chan struct{}
+	stopped bool // for testing
+}
+
+func (r *refresher) RunRefreshRoutine(interval time.Duration) {
+	for {
+		select {
+		case <-time.After(interval):
+			if err := r.Refresh(context.Background()); err != nil {
+				slog.Error("failed to refresh jwks", "component", "oidc/discovery", "jwksurl", r.jwksuri, "err", err.Error())
+			}
+		case <-r.stop:
+			r.stopped = true
+			return
+		}
+	}
+}
+
+func (r *refresher) Refresh(ctx context.Context) error {
+	req, err := http.NewRequest(http.MethodGet, r.jwksuri, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get keys from %s: %v", c.md.JWKSURI, err)
+		return fmt.Errorf("creating request for %s: %w", r.jwksuri, err)
+	}
+	req = req.WithContext(ctx)
+	res, err := r.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to get keys from %s: %v", r.jwksuri, err)
 	}
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("expected status %d, got: %d", http.StatusOK, res.StatusCode)
+		return fmt.Errorf("expected status %d, got: %d", http.StatusOK, res.StatusCode)
 	}
 	jwksb, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading JWKS body: %w", err)
+		return fmt.Errorf("reading JWKS body: %w", err)
 	}
 
 	h, err := jwt.JWKSetToPublicKeysetHandle(jwksb)
 	if err != nil {
-		return nil, fmt.Errorf("creating handle from response: %w", err)
+		return fmt.Errorf("creating handle from response: %w", err)
 	}
 
-	c.jwksCacheLastUpdated = time.Now()
-	c.jwksHandle = h
-
-	return h, nil
+	r.handle = h
+	return nil
 }

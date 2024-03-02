@@ -4,9 +4,11 @@ import (
 	"context"
 	"flag"
 	"log"
+	"time"
 
 	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidc/clitoken"
+	"github.com/lstoll/oidc/discovery"
 	"github.com/lstoll/oidc/tokencache"
 )
 
@@ -38,7 +40,11 @@ func main() {
 		opts = append(opts, oidc.WithAdditionalScopes([]string{oidc.ScopeOfflineAccess}))
 	}
 
-	client, err := oidc.DiscoverClient(ctx, cfg.Issuer, cfg.ClientID, cfg.ClientSecret, "", opts...)
+	dcl, err := discovery.NewClient(ctx, cfg.Issuer, discovery.WithBackgroundJWKSRefresh(5*time.Minute))
+	if err != nil {
+		log.Fatalf("discovering issuer: %v", err)
+	}
+	client, err := oidc.NewClient(dcl.Metadata(), dcl.PublicHandle, cfg.ClientID, cfg.ClientSecret, "", opts...)
 	if err != nil {
 		log.Fatalf("failed to discover issuer: %v", err)
 	}

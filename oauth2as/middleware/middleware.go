@@ -9,9 +9,15 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/lstoll/oidc"
+	"github.com/lstoll/oidc/discovery"
 )
+
+// DefaultKeyRefreshIterval is the default interval we try and refresh signing
+// keys from the issuer.
+const DefaultKeyRefreshIterval = 1 * time.Hour
 
 type tokenContextKey struct{}
 
@@ -51,6 +57,9 @@ type SessionStore interface {
 type Handler struct {
 	// Issuer is the URL to the OIDC issuer
 	Issuer string
+	// KeyRefreshInterval is how often we should try and refresh the signing keys
+	// from the issuer. Defaults to DefaultKeyRefreshIterval
+	KeyRefreshInterval time.Duration
 	// ClientID is a client ID for the relying party (the service authenticating
 	// against the OIDC server)
 	ClientID string
@@ -75,8 +84,10 @@ type Handler struct {
 	// small amount of additional data. Required.
 	SessionStore SessionStore
 
-	oidcClient     *oidc.Client
-	oidcClientInit sync.Once
+	discoveryClient *discovery.Client
+	oidcClient      *oidc.Client
+	lastKeyRefresh  time.Time
+	oidcClientMu    sync.Mutex
 }
 
 // Wrap returns an http.Handler that wraps the given http.Handler and
@@ -229,6 +240,16 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 		return "", err
 	}
 
+	h.oidcClientMu.Lock()
+	defer h.oidcClientMu.Unlock()
+
+	// do a refresh before we validate, if we need to.
+	if time.Now().After(h.lastKeyRefresh.Add(h.KeyRefreshInterval)) {
+		if err := h.discoveryClient.RefreshJWKS(r.Context()); err != nil {
+			return "", fmt.Errorf("refreshing JWKS: %w", err)
+		}
+	}
+
 	token, err := oidccl.Exchange(ctx, code, oidc.ExchangeWithPKCE(session.PKCEChallenge))
 	if err != nil {
 		return "", err
@@ -267,19 +288,33 @@ func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (st
 }
 
 func (h *Handler) getOIDCClient(ctx context.Context) (*oidc.Client, error) {
-	var initErr error
-	h.oidcClientInit.Do(func() {
-		var opts []oidc.ClientOpt
-		if len(h.ACRValues) > 0 {
-			opts = append(opts, oidc.WithACRValues(h.ACRValues, true))
-		}
-		if len(h.AdditionalScopes) > 0 {
-			opts = append(opts, oidc.WithAdditionalScopes(h.AdditionalScopes))
-		}
-		h.oidcClient, initErr = oidc.DiscoverClient(ctx, h.Issuer, h.ClientID, h.ClientSecret, h.RedirectURL, opts...)
-	})
-	if initErr != nil {
-		return nil, initErr
+	h.oidcClientMu.Lock()
+	defer h.oidcClientMu.Unlock()
+	if h.oidcClient != nil {
+		return h.oidcClient, nil
+	}
+
+	var opts []oidc.ClientOpt
+	if len(h.ACRValues) > 0 {
+		opts = append(opts, oidc.WithACRValues(h.ACRValues, true))
+	}
+	if len(h.AdditionalScopes) > 0 {
+		opts = append(opts, oidc.WithAdditionalScopes(h.AdditionalScopes))
+	}
+	var err error
+	h.discoveryClient, err = discovery.NewClient(ctx, h.Issuer)
+	if err != nil {
+		return nil, fmt.Errorf("discovering issuer %s: %w", h.Issuer, err)
+	}
+	h.oidcClient, err = oidc.NewClient(h.discoveryClient.Metadata(), h.discoveryClient.PublicHandle, h.ClientID, h.ClientSecret, h.RedirectURL, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("creating OIDC client: %w", err)
+	}
+
+	h.lastKeyRefresh = time.Now()
+
+	if h.KeyRefreshInterval == 0 {
+		h.KeyRefreshInterval = DefaultKeyRefreshIterval
 	}
 
 	return h.oidcClient, nil

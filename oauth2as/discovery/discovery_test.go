@@ -12,20 +12,22 @@ import (
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
-func PublicHandle(ctx context.Context) (*keyset.Handle, error) {
+func PublicHandle() *keyset.Handle {
 	h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
 	if err != nil {
-		return nil, fmt.Errorf("creating handle: %v", err)
+		panic(fmt.Sprintf("creating handle: %v", err))
 	}
 	h, err = h.Public()
 	if err != nil {
-		return nil, fmt.Errorf("getting public handle: %w", err)
+		panic(fmt.Sprintf("getting public handle: %v", err))
 	}
 
-	return h, nil
+	return h
 }
 
 func TestDiscovery(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -51,13 +53,8 @@ func TestDiscovery(t *testing.T) {
 	}
 	m.Handle(oidcwk, ch)
 
-	cli, err := NewClient(ctx, ts.URL)
+	_, err = NewClient(ctx, ts.URL)
 	if err != nil {
 		t.Fatalf("failed to create discovery client: %v", err)
-	}
-
-	_, err = cli.PublicHandle(ctx)
-	if err != nil {
-		t.Fatalf("getting public handle: %v", err)
 	}
 }

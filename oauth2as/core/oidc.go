@@ -22,12 +22,12 @@ import (
 // The returned handle should contain the private key material for signing. It
 // is called whenever a keyset is required, allowing for implementations to
 // rotate the keyset in use as needed.
-type KeysetHandleFunc func(ctx context.Context) (*keyset.Handle, error)
+type KeysetHandleFunc func() *keyset.Handle
 
 // StaticKeysetHandle implements HandleFunc, with a keyset handle that never
 // changes.
 func StaticKeysetHandle(h *keyset.Handle) KeysetHandleFunc {
-	return func(context.Context) (*keyset.Handle, error) { return h, nil }
+	return func() *keyset.Handle { return h }
 }
 
 // ClientSource is used for validating client informantion for the general flow
@@ -566,11 +566,7 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to put access token", Cause: err}
 	}
 
-	handle, err := o.handleFn(ctx)
-	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting signer handle", Cause: err}
-	}
-	signer, err := jwt.NewSigner(handle)
+	signer, err := jwt.NewSigner(o.handleFn())
 	if err != nil {
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating signer from handle", Cause: err}
 	}

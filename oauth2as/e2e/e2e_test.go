@@ -151,7 +151,7 @@ func TestE2E(t *testing.T) {
 			}
 			mux.Handle("/.well-known/openid-configuration/", discoh)
 
-			privh, err := KeysetHandle(ctx)
+			privh := KeysetHandle()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,7 +167,11 @@ func TestE2E(t *testing.T) {
 			mux.Handle("/jwks.json", jwksh)
 
 			// set up client
-			cl, err := oidc.DiscoverClient(ctx, oidcSvr.URL, clientID, clientSecret, cliSvr.URL)
+			dcl, err := discovery.NewClient(ctx, oidcSvr.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cl, err := oidc.NewClient(dcl.Metadata(), dcl.PublicHandle, clientID, clientSecret, cliSvr.URL)
 			if err != nil {
 				t.Fatalf("discovering client: %v", err)
 			}
@@ -326,7 +330,7 @@ var (
 	thMu sync.Mutex
 )
 
-func KeysetHandle(_ context.Context) (*keyset.Handle, error) {
+func KeysetHandle() *keyset.Handle {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
@@ -338,5 +342,5 @@ func KeysetHandle(_ context.Context) (*keyset.Handle, error) {
 		th = h
 	}
 
-	return th, nil
+	return th
 }

@@ -1082,7 +1082,7 @@ var (
 	thMu sync.Mutex
 )
 
-func KeysetHandle(_ context.Context) (*keyset.Handle, error) {
+func KeysetHandle() *keyset.Handle {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
@@ -1094,5 +1094,5 @@ func KeysetHandle(_ context.Context) (*keyset.Handle, error) {
 		th = h
 	}
 
-	return th, nil
+	return th
 }

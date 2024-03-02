@@ -5,8 +5,10 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/lstoll/oidc"
+	"github.com/lstoll/oidc/discovery"
 )
 
 const (
@@ -37,7 +39,11 @@ func main() {
 
 	flag.Parse()
 
-	cli, err := oidc.DiscoverClient(ctx, cfg.Issuer, cfg.ClientID, cfg.ClientSecret, cfg.RedirectURL)
+	dcl, err := discovery.NewClient(ctx, cfg.Issuer, discovery.WithBackgroundJWKSRefresh(5*time.Minute))
+	if err != nil {
+		log.Fatalf("discovering issuer: %v", err)
+	}
+	cli, err := oidc.NewClient(dcl.Metadata(), dcl.PublicHandle, cfg.ClientID, cfg.ClientSecret, cfg.RedirectURL)
 	if err != nil {
 		log.Fatalf("failed to discover issuer: %v", err)
 	}
