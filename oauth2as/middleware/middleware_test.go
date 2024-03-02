@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/sessions"
 	"github.com/lstoll/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
@@ -270,11 +269,16 @@ func TestMiddleware_HappyPath(t *testing.T) {
 	oidcServer.validClientID = "valid-client-id"
 	oidcServer.validClientSecret = "valid-client-secret"
 
+	store, err := NewMemorySessionStore(http.Cookie{Name: "oidc-login", Path: "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	handler := &Handler{
 		Issuer:       oidcServer.baseURL,
 		ClientID:     oidcServer.validClientID,
 		ClientSecret: oidcServer.validClientSecret,
-		SessionStore: sessions.NewCookieStore([]byte("super-secret-key")),
+		SessionStore: store,
 	}
 
 	baseURL, cleanupServer := startServer(t, handler.Wrap(protected))
@@ -321,11 +325,16 @@ func TestContext(t *testing.T) {
 	oidcServer.validClientID = "valid-client-id"
 	oidcServer.validClientSecret = "valid-client-secret"
 
+	store, err := NewMemorySessionStore(http.Cookie{Name: "oidc-login", Path: "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	handler := &Handler{
 		Issuer:       oidcServer.baseURL,
 		ClientID:     oidcServer.validClientID,
 		ClientSecret: oidcServer.validClientSecret,
-		SessionStore: sessions.NewCookieStore([]byte("super-secret-key")),
+		SessionStore: store,
 	}
 
 	baseURL, cleanupServer := startServer(t, handler.Wrap(protected))
