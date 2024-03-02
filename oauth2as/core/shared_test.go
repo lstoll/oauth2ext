@@ -3,13 +3,9 @@ package core
 import (
 	"context"
 	"crypto/rand"
-	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-
-	"github.com/go-jose/go-jose/v3"
-	"github.com/lstoll/oidc/signer"
 )
 
 // contains helpers used by multiple tests
@@ -97,33 +93,4 @@ func (s *stubSMGR) PutSession(_ context.Context, sess Session) error {
 func (s *stubSMGR) DeleteSession(ctx context.Context, sessionID string) error {
 	delete(s.sessions, sessionID)
 	return nil
-}
-
-var testSigner = func() Signer {
-	key := mustGenRSAKey(512)
-
-	signingKey := jose.SigningKey{Algorithm: jose.RS256, Key: &jose.JSONWebKey{
-		Key:   key,
-		KeyID: "testkey",
-	}}
-
-	verificationKeys := []jose.JSONWebKey{
-		{
-			Key:       key.Public(),
-			KeyID:     "testkey",
-			Algorithm: "RS256",
-			Use:       "sig",
-		},
-	}
-
-	return signer.NewStatic(signingKey, verificationKeys)
-}()
-
-func mustGenRSAKey(bits int) *rsa.PrivateKey {
-	key, err := rsa.GenerateKey(rand.Reader, bits)
-	if err != nil {
-		panic(err)
-	}
-
-	return key
 }

@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 
 	"github.com/lstoll/oidc"
-	"github.com/pkg/errors"
 )
 
 var (
@@ -167,7 +166,7 @@ func (s *LocalOIDCTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
 
 		code := r.FormValue("code")
 		if code == "" {
-			err := errors.New("no code in request")
+			err := fmt.Errorf("no code in request")
 			resultCh <- result{err: err}
 
 			w.WriteHeader(http.StatusBadRequest)
@@ -177,7 +176,7 @@ func (s *LocalOIDCTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
 
 		gotState := r.FormValue("state")
 		if gotState == "" || gotState != state {
-			err := errors.New("bad state")
+			err := fmt.Errorf("bad state")
 			resultCh <- result{err: err}
 
 			w.WriteHeader(http.StatusBadRequest)
@@ -207,7 +206,7 @@ func (s *LocalOIDCTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
 
 	ln, err := newLocalTCPListenerInRange(s.portLow, s.portHigh)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to bind socket")
+		return nil, fmt.Errorf("failed to bind socket: %w", err)
 	}
 	defer func() { _ = ln.Close() }()
 	tcpAddr := ln.Addr().(*net.TCPAddr)
@@ -234,7 +233,7 @@ func (s *LocalOIDCTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
 	authURL := s.client.AuthCodeURL(state, authCodeOpts...)
 
 	if err := s.opener.Open(ctx, authURL); err != nil {
-		return nil, errors.Wrap(err, "failed to open URL")
+		return nil, fmt.Errorf("failed to open URL: %w", err)
 	}
 
 	var res result

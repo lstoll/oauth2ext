@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,19 +12,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-jose/go-jose/v3"
 	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidc/oauth2"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
-// Signer is used for signing identity tokens
-type Signer interface {
-	// SignerAlg returns the algorithm the signer uses
-	SignerAlg(ctx context.Context) (jose.SignatureAlgorithm, error)
-	// Sign the provided data
-	Sign(ctx context.Context, data []byte) (signed []byte, err error)
-	// VerifySignature verifies the signature given token against the current signers
-	VerifySignature(ctx context.Context, jwt string) (payload []byte, err error)
+// KeysetHandleFunc is used to retrieve a handle to the current tink keyset handle.
+// The returned handle should contain the private key material for signing. It
+// is called whenever a keyset is required, allowing for implementations to
+// rotate the keyset in use as needed.
+type KeysetHandleFunc func(ctx context.Context) (*keyset.Handle, error)
+
+// StaticKeysetHandle implements HandleFunc, with a keyset handle that never
+// changes.
+func StaticKeysetHandle(h *keyset.Handle) KeysetHandleFunc {
+	return func(context.Context) (*keyset.Handle, error) { return h, nil }
 }
 
 // ClientSource is used for validating client informantion for the general flow
@@ -83,9 +85,9 @@ func RequirePKCEForPublicClients() OIDCOpt {
 
 // OIDC can be used to handle the various parts of the OIDC auth flow.
 type OIDC struct {
-	smgr    SessionManager
-	clients ClientSource
-	signer  Signer
+	smgr     SessionManager
+	clients  ClientSource
+	handleFn KeysetHandleFunc
 
 	authValidityTime time.Duration
 	codeValidityTime time.Duration
@@ -95,11 +97,11 @@ type OIDC struct {
 	requirePKCEForPublicClients bool
 }
 
-func New(cfg *Config, smgr SessionManager, clientSource ClientSource, signer Signer, opts ...OIDCOpt) (*OIDC, error) {
+func New(cfg *Config, smgr SessionManager, clientSource ClientSource, signer KeysetHandleFunc, opts ...OIDCOpt) (*OIDC, error) {
 	o := &OIDC{
-		smgr:    smgr,
-		clients: clientSource,
-		signer:  signer,
+		smgr:     smgr,
+		clients:  clientSource,
+		handleFn: signer,
 
 		authValidityTime: cfg.AuthValidityTime,
 		codeValidityTime: cfg.CodeValidityTime,
@@ -527,6 +529,10 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
+	if tresp.IDToken.Expiry == 0 {
+		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "id token cannot have a 0 expiry"}
+	}
+
 	if tresp.AccessTokenValidUntil.Before(o.now()) {
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "access token must be valid > now"}
 	}
@@ -574,12 +580,21 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to put access token", Cause: err}
 	}
 
-	idtb, err := json.Marshal(tresp.IDToken)
+	handle, err := o.handleFn(ctx)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to marshal id token", Cause: err}
+		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting signer handle", Cause: err}
+	}
+	signer, err := jwt.NewSigner(handle)
+	if err != nil {
+		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating signer from handle", Cause: err}
 	}
 
-	sidt, err := o.signer.Sign(ctx, idtb)
+	rawJWT, err := claimsToRawJWT(tresp.IDToken)
+	if err != nil {
+		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping claims to jwt", Cause: err}
+	}
+
+	sidt, err := signer.SignAndEncode(rawJWT)
 	if err != nil {
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign id token", Cause: err}
 	}
@@ -779,4 +794,57 @@ func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
 	hashedVerifier := h.Sum(nil)
 	computedChallenge := base64.RawURLEncoding.EncodeToString(hashedVerifier)
 	return computedChallenge == storedCodeChallenge
+}
+
+func claimsToRawJWT(claims oidc.Claims) (*jwt.RawJWT, error) {
+	var exp *time.Time
+	if claims.Expiry != 0 {
+		t := claims.Expiry.Time()
+		exp = &t
+	}
+	var nbf *time.Time
+	if claims.NotBefore != 0 {
+		t := claims.NotBefore.Time()
+		nbf = &t
+	}
+	var iat *time.Time
+	if claims.IssuedAt != 0 {
+		t := claims.IssuedAt.Time()
+		iat = &t
+	}
+
+	opts := &jwt.RawJWTOptions{
+		Issuer:       &claims.Issuer,
+		Subject:      &claims.Subject,
+		Audiences:    claims.Audience,
+		ExpiresAt:    exp,
+		NotBefore:    nbf,
+		IssuedAt:     iat,
+		CustomClaims: map[string]interface{}{},
+	}
+	if claims.AuthTime != 0 {
+		opts.CustomClaims["auth_time"] = int(claims.AuthTime)
+	}
+	if claims.Nonce != "" {
+		opts.CustomClaims["nonce"] = claims.Nonce
+	}
+	if claims.ACR != "" {
+		opts.CustomClaims["acr"] = claims.ACR
+	}
+	if claims.AMR != nil {
+		opts.CustomClaims["amr"] = claims.AMR
+	}
+	if claims.AZP != "" {
+		opts.CustomClaims["azp"] = claims.AZP
+	}
+	for k, v := range claims.Extra {
+		opts.CustomClaims[k] = v
+	}
+
+	raw, err := jwt.NewRawJWT(opts)
+	if err != nil {
+		return nil, fmt.Errorf("constructing raw JWT from claims: %w", err)
+	}
+
+	return raw, nil
 }

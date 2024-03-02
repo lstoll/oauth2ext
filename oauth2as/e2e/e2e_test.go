@@ -3,21 +3,21 @@ package e2e
 import (
 	"context"
 	"crypto/rand"
-	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/go-jose/go-jose/v3"
 	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidc/core"
 	"github.com/lstoll/oidc/discovery"
-	"github.com/lstoll/oidc/signer"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
 func TestE2E(t *testing.T) {
@@ -87,7 +87,7 @@ func TestE2E(t *testing.T) {
 				},
 			}
 
-			oidcHandlers, err := core.New(cfg, smgr, clientSource, testSigner)
+			oidcHandlers, err := core.New(cfg, smgr, clientSource, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -149,7 +149,19 @@ func TestE2E(t *testing.T) {
 			}
 			mux.Handle("/.well-known/openid-configuration/", discoh)
 
-			jwksh := discovery.NewKeysHandler(testSigner, 1*time.Second)
+			privh, err := KeysetHandle(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pubh, err := privh.Public()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			jwksh, err := discovery.NewKeysHandler(discovery.StaticPublicKeysetHandle(pubh), 1*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
 			mux.Handle("/jwks.json", jwksh)
 
 			// set up client
@@ -345,31 +357,22 @@ func (s *stubSMGR) expireAccessTokens(_ context.Context) error {
 	return nil
 }
 
-var testSigner = func() *signer.StaticSigner {
-	key := mustGenRSAKey(512)
+var (
+	th   *keyset.Handle
+	thMu sync.Mutex
+)
 
-	signingKey := jose.SigningKey{Algorithm: jose.RS256, Key: &jose.JSONWebKey{
-		Key:   key,
-		KeyID: "testkey",
-	}}
-
-	verificationKeys := []jose.JSONWebKey{
-		{
-			Key:       key.Public(),
-			KeyID:     "testkey",
-			Algorithm: "RS256",
-			Use:       "sig",
-		},
+func KeysetHandle(_ context.Context) (*keyset.Handle, error) {
+	thMu.Lock()
+	defer thMu.Unlock()
+	// we only make one, because it's slow
+	if th == nil {
+		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
+		if err != nil {
+			panic(err)
+		}
+		th = h
 	}
 
-	return signer.NewStatic(signingKey, verificationKeys)
-}()
-
-func mustGenRSAKey(bits int) *rsa.PrivateKey {
-	key, err := rsa.GenerateKey(rand.Reader, bits)
-	if err != nil {
-		panic(err)
-	}
-
-	return key
+	return th, nil
 }

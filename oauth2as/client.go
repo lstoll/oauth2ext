@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-jose/go-jose/v3"
 	"github.com/lstoll/oidc/discovery"
 	"golang.org/x/oauth2"
 )
@@ -22,15 +21,10 @@ const (
 	ScopeOfflineAccess = "offline_access"
 )
 
-type KeySource interface {
-	GetKey(ctx context.Context, kid string) (*jose.JSONWebKey, error)
-}
-
 type Client struct {
 	Verifier
 
 	md *discovery.ProviderMetadata
-	ks KeySource
 
 	o2cfg oauth2.Config
 
@@ -68,18 +62,21 @@ func DiscoverClient(ctx context.Context, issuer, clientID, clientSecret, redirec
 		return nil, fmt.Errorf("creating discovery client: %v", err)
 	}
 
-	return NewClient(cl.Metadata(), cl, clientID, clientSecret, redirectURL, opts...), nil
+	return NewClient(cl.Metadata(), cl.PublicHandle, clientID, clientSecret, redirectURL, opts...)
 }
 
 // NewClient creates a client directly from the passed in information
-func NewClient(md *discovery.ProviderMetadata, ks KeySource, clientID, clientSecret, redirectURL string, opts ...ClientOpt) *Client {
+func NewClient(md *discovery.ProviderMetadata, ph PublicKeysetHandleFunc, clientID, clientSecret, redirectURL string, opts ...ClientOpt) (*Client, error) {
+	if err := validateHandle(context.Background(), ph); err != nil {
+		return nil, err
+	}
+
 	c := &Client{
 		Verifier: Verifier{
-			md: md,
-			ks: ks,
+			md:       md,
+			kshandle: ph,
 		},
 		md: md,
-		ks: ks,
 		o2cfg: oauth2.Config{
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
@@ -96,7 +93,7 @@ func NewClient(md *discovery.ProviderMetadata, ks KeySource, clientID, clientSec
 		o(c)
 	}
 
-	return c
+	return c, nil
 }
 
 type authCodeCfg struct {
