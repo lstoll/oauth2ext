@@ -91,7 +91,7 @@ func TestE2E(t *testing.T) {
 				},
 			}
 
-			oidcHandlers, err := core.New(cfg, smgr, clientSource, KeysetHandle)
+			oidcHandlers, err := core.New(cfg, smgr, clientSource, testKeysetHandle())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -138,7 +138,7 @@ func TestE2E(t *testing.T) {
 				}
 			})
 
-			privh := KeysetHandle()
+			privh, err := testKeysetHandle().Handle(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -332,7 +332,7 @@ var (
 	thMu sync.Mutex
 )
 
-func KeysetHandle() *keyset.Handle {
+func testKeysetHandle() core.KeysetHandle {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
@@ -344,5 +344,5 @@ func KeysetHandle() *keyset.Handle {
 		th = h
 	}
 
-	return th
+	return core.NewStaticKeysetHandle(th)
 }

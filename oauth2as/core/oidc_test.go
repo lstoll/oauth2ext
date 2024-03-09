@@ -345,8 +345,8 @@ func TestToken(t *testing.T) {
 		return &OIDC{
 			issuer: issuer,
 
-			smgr:     newStubSMGR(),
-			handleFn: KeysetHandle,
+			smgr:         newStubSMGR(),
+			keysetHandle: testKeysetHandle(),
 
 			clients: &staticclients.Clients{
 				Clients: []staticclients.Client{
@@ -798,7 +798,7 @@ func TestFetchCodeSession(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{Issuer: "http://issuer"}, smgr, &staticclients.Clients{}, KeysetHandle)
+			oidc, err := New(&Config{Issuer: "http://issuer"}, smgr, &staticclients.Clients{}, testKeysetHandle())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -871,7 +871,7 @@ func TestFetchRefreshSession(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{Issuer: "http://issuer"}, smgr, &staticclients.Clients{}, KeysetHandle)
+			oidc, err := New(&Config{Issuer: "http://issuer"}, smgr, &staticclients.Clients{}, testKeysetHandle())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -912,7 +912,11 @@ func TestUserinfo(t *testing.T) {
 	}
 
 	signAccessToken := func(cl oidc.AccessTokenClaims) string {
-		signer, err := jwt.NewSigner(KeysetHandle())
+		h, err := testKeysetHandle().Handle(context.TODO())
+		if err != nil {
+			t.Fatal(err)
+		}
+		signer, err := jwt.NewSigner(h)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -993,7 +997,7 @@ func TestUserinfo(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{Issuer: issuer}, smgr, &staticclients.Clients{}, KeysetHandle)
+			oidc, err := New(&Config{Issuer: issuer}, smgr, &staticclients.Clients{}, testKeysetHandle())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1080,7 +1084,7 @@ var (
 	thMu sync.Mutex
 )
 
-func KeysetHandle() *keyset.Handle {
+func testKeysetHandle() KeysetHandle {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
@@ -1092,5 +1096,5 @@ func KeysetHandle() *keyset.Handle {
 		th = h
 	}
 
-	return th
+	return NewStaticKeysetHandle(th)
 }

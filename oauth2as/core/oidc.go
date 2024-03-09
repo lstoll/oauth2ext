@@ -19,16 +19,22 @@ import (
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
-// KeysetHandleFunc is used to retrieve a handle to the current tink keyset handle.
-// The returned handle should contain the private key material for signing. It
-// is called whenever a keyset is required, allowing for implementations to
-// rotate the keyset in use as needed.
-type KeysetHandleFunc func() *keyset.Handle
+// KeysetHandle is used to get the current handle for a signing keyset. It
+// should contain private key material suitable for JWT signing
+type KeysetHandle interface {
+	Handle(context.Context) (*keyset.Handle, error)
+}
 
-// StaticKeysetHandle implements HandleFunc, with a keyset handle that never
-// changes.
-func StaticKeysetHandle(h *keyset.Handle) KeysetHandleFunc {
-	return func() *keyset.Handle { return h }
+type staticKeysetHandle struct {
+	h *keyset.Handle
+}
+
+func (s *staticKeysetHandle) Handle(context.Context) (*keyset.Handle, error) {
+	return s.h, nil
+}
+
+func NewStaticKeysetHandle(h *keyset.Handle) KeysetHandle {
+	return &staticKeysetHandle{h: h}
 }
 
 // ClientSource is used for validating client informantion for the general flow
@@ -76,10 +82,10 @@ type OIDCOpt func(*OIDC)
 
 // OIDC can be used to handle the various parts of the OIDC auth flow.
 type OIDC struct {
-	issuer   string
-	smgr     SessionManager
-	clients  ClientSource
-	handleFn KeysetHandleFunc
+	issuer       string
+	smgr         SessionManager
+	clients      ClientSource
+	keysetHandle KeysetHandle
 
 	authValidityTime time.Duration
 	codeValidityTime time.Duration
@@ -87,15 +93,15 @@ type OIDC struct {
 	now func() time.Time
 }
 
-func New(cfg *Config, smgr SessionManager, clientSource ClientSource, signer KeysetHandleFunc, opts ...OIDCOpt) (*OIDC, error) {
+func New(cfg *Config, smgr SessionManager, clientSource ClientSource, keysetHandle KeysetHandle, opts ...OIDCOpt) (*OIDC, error) {
 	if cfg.Issuer == "" {
 		return nil, fmt.Errorf("issuer must be provided")
 	}
 
 	o := &OIDC{
-		smgr:     smgr,
-		clients:  clientSource,
-		handleFn: signer,
+		smgr:         smgr,
+		clients:      clientSource,
+		keysetHandle: keysetHandle,
 
 		issuer:           cfg.Issuer,
 		authValidityTime: cfg.AuthValidityTime,
@@ -598,7 +604,12 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to put access token", Cause: err}
 	}
 
-	signer, err := jwt.NewSigner(o.handleFn())
+	h, err := o.keysetHandle.Handle(ctx)
+	if err != nil {
+		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting handle", Cause: err}
+	}
+
+	signer, err := jwt.NewSigner(h)
 	if err != nil {
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating signer from handle", Cause: err}
 	}
@@ -742,7 +753,12 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w
 		return herr
 	}
 
-	h := o.handleFn()
+	h, err := o.keysetHandle.Handle(req.Context())
+	if err != nil {
+		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
+		_ = writeError(w, req, herr)
+		return herr
+	}
 	ph, err := h.Public()
 	if err != nil {
 		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
