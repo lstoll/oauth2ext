@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidc/discovery"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
+	"golang.org/x/oauth2"
 )
 
 // mockOIDCServer mocks out just enough of an OIDC server for tests. It accepts
@@ -76,10 +76,10 @@ func newMockOIDCServer() *mockOIDCServer {
 	s := &mockOIDCServer{}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/openid-configuration", s.handleDiscovery)
-	mux.HandleFunc("/auth", s.handleAuth)
-	mux.HandleFunc("/token", s.handleToken)
-	mux.HandleFunc("/keys", s.handleKeys)
+	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleDiscovery)
+	mux.HandleFunc("GET /auth", s.handleAuth)
+	mux.HandleFunc("POST /token", s.handleToken)
+	mux.HandleFunc("GET /keys", s.handleKeys)
 	s.mux = mux
 
 	// Very short key. Used only for testing so generation time is quick.
@@ -93,18 +93,13 @@ func (s *mockOIDCServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *mockOIDCServer) handleDiscovery(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "not GET request", http.StatusMethodNotAllowed)
-		return
-	}
-
-	discovery := discovery.ProviderMetadata{
+	discovery := oidc.ProviderMetadata{
 		Issuer:                        s.baseURL,
 		AuthorizationEndpoint:         fmt.Sprintf("%s/auth", s.baseURL),
 		TokenEndpoint:                 fmt.Sprintf("%s/token", s.baseURL),
 		JWKSURI:                       fmt.Sprintf("%s/keys", s.baseURL),
 		ResponseTypesSupported:        []string{"code"},
-		CodeChallengeMethodsSupported: []discovery.CodeChallengeMethod{discovery.CodeChallengeMethodS256},
+		CodeChallengeMethodsSupported: []oidc.CodeChallengeMethod{oidc.CodeChallengeMethodS256},
 	}
 
 	if err := json.NewEncoder(w).Encode(discovery); err != nil {
@@ -114,11 +109,6 @@ func (s *mockOIDCServer) handleDiscovery(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *mockOIDCServer) handleAuth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "not GET request", http.StatusMethodNotAllowed)
-		return
-	}
-
 	clientID := r.URL.Query().Get("client_id")
 	if clientID != s.validClientID {
 		http.Error(w, "invalid client ID", http.StatusBadRequest)
@@ -149,11 +139,6 @@ func (s *mockOIDCServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *mockOIDCServer) handleToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "not a POST request", http.StatusMethodNotAllowed)
-		return
-	}
-
 	clientID, clientSecret, ok := r.BasicAuth()
 	if !ok {
 		http.Error(w, "missing authorization header", http.StatusUnauthorized)
@@ -305,7 +290,7 @@ func TestMiddleware_HappyPath(t *testing.T) {
 
 func TestContext(t *testing.T) {
 	var ( // Capture in handler
-		gotTokSrc oidc.TokenSource
+		gotTokSrc oauth2.TokenSource
 		gotClaims *oidc.Claims
 		gotRaw    string
 	)
@@ -359,15 +344,9 @@ func TestContext(t *testing.T) {
 		t.Error("context missing id_token")
 	}
 
-	tst, err := gotTokSrc.Token(context.Background())
+	_, err = gotTokSrc.Token()
 	if err != nil {
 		t.Fatalf("calling token source token: %v", err)
-	}
-	if tst.Claims.Subject != "valid-subject" {
-		t.Errorf("tokensource: want claims sub valid-subject, got: %s", tst.Claims.Subject)
-	}
-	if tst.IDToken == "" {
-		t.Error("tokensource: token missing id_token")
 	}
 }
 

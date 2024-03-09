@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/lstoll/oidc"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -37,13 +38,24 @@ func main() {
 
 	flag.Parse()
 
-	cli, err := oidc.DiscoverClient(ctx, cfg.Issuer, cfg.ClientID, cfg.ClientSecret, cfg.RedirectURL)
+	provider, err := oidc.DiscoverProvider(ctx, cfg.Issuer, nil)
 	if err != nil {
-		log.Fatalf("failed to discover issuer: %v", err)
+		log.Fatalf("discovering issuer: %v", err)
+	}
+
+	scopes := []string{oidc.ScopeOpenID}
+
+	oa2Cfg := oauth2.Config{
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+		Endpoint:     provider.Endpoint(),
+		Scopes:       scopes,
+		RedirectURL:  cfg.RedirectURL,
 	}
 
 	svr := &server{
-		oidccli:        cli,
+		provider:       provider,
+		oa2Cfg:         oa2Cfg,
 		pkceChallenges: make(map[string]string),
 	}
 

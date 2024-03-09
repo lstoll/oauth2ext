@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/lstoll/oidc"
+	"golang.org/x/oauth2"
 )
 
 type cachingTokenSource struct {
-	src   oidc.TokenSource
+	src   oauth2.TokenSource
 	cache CredentialCache
 
 	iss       string
@@ -16,7 +16,8 @@ type cachingTokenSource struct {
 	scopes    []string
 	acrValues []string
 
-	client *oidc.Client
+	oauth2Config  *oauth2.Config
+	oauth2Context context.Context
 }
 
 type TokenSourceOpt func(*cachingTokenSource)
@@ -44,22 +45,23 @@ func WithACRValues(acrValues []string) TokenSourceOpt {
 	}
 }
 
-// WithRefreshClient will add a configured client to the source. This will be
+// WithRefreshConfig will add a oauth2 configuration to the source. This will be
 // used to fetch a new token if the cached token is expired and has a
-// RefreshToken
-func WithRefreshClient(client *oidc.Client) TokenSourceOpt {
+// RefreshToken. The provided context will be used for all refreshes.
+func WithRefreshConfig(ctx context.Context, cfg oauth2.Config) TokenSourceOpt {
 	return func(c *cachingTokenSource) {
-		c.client = client
+		c.oauth2Context = ctx
+		c.oauth2Config = &cfg
 	}
 }
 
-// TokenSource wraps an oidc.TokenSource, caching the token results locally so
+// TokenSource wraps an oauth2.TokenSource, caching the token results locally so
 // they survive cross-process execution. The result of BestCredentialCache is
 // used for the cache, this can be overridden with the WithCache option. Items
 // are stored in the cache keyed by their issuer and audience, WithScopes and
 // WithACRValues can be used to further refine the keying where differentiation
 // is required on these values.
-func TokenSource(src oidc.TokenSource, issuer, audience string, opts ...TokenSourceOpt) oidc.TokenSource {
+func TokenSource(src oauth2.TokenSource, issuer, audience string, opts ...TokenSourceOpt) oauth2.TokenSource {
 	ts := &cachingTokenSource{
 		src: src,
 		iss: issuer,
@@ -80,19 +82,19 @@ func TokenSource(src oidc.TokenSource, issuer, audience string, opts ...TokenSou
 // Token checks the cache for a token, and if it exists and is valid returns it.
 // Otherwise, it will call the upstream Token source and cache the result,
 // before returning it.
-func (c *cachingTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
+func (c *cachingTokenSource) Token() (*oauth2.Token, error) {
 	token, err := c.cache.Get(c.iss, c.aud, c.scopes, c.acrValues)
 	if err != nil {
 		return nil, fmt.Errorf("cache get: %v", err)
 	}
 
-	var newToken *oidc.Token
+	var newToken *oauth2.Token
 	if token != nil && token.Valid() {
 		return token, nil
 	} else if token != nil && token.RefreshToken != "" {
 		// we have an expired token, try and refresh if we can.
-		rts := c.client.TokenSource(ctx, token)
-		t, err := rts.Token(ctx)
+		rts := c.oauth2Config.TokenSource(c.oauth2Context, token)
+		t, err := rts.Token()
 		// ignore errors here, just let it fail to a new token
 		if err == nil {
 			newToken = t
@@ -101,7 +103,7 @@ func (c *cachingTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
 
 	if newToken == nil {
 		// if we get here cache and refresh failed, so fetch from upstream
-		t, err := c.src.Token(ctx)
+		t, err := c.src.Token()
 		if err != nil {
 			return nil, fmt.Errorf("fetching new token: %v", err)
 		}

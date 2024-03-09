@@ -9,9 +9,15 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/lstoll/oidc"
+	"golang.org/x/oauth2"
 )
+
+// DefaultKeyRefreshIterval is the default interval we try and refresh signing
+// keys from the issuer.
+const DefaultKeyRefreshIterval = 1 * time.Hour
 
 type tokenContextKey struct{}
 
@@ -29,11 +35,8 @@ type SessionData struct {
 	PKCEChallenge string `json:"pkce_challenge,omitempty"`
 	// ReturnTo is where we should navigate to at the end of the flow
 	ReturnTo string `json:"oidc_return_to,omitempty"`
-	// IDToken is the id_token for the current logged in user
-	IDToken string `json:"oidc_id_token,omitempty"`
-	// RefreshToken is the refresh token for this OIDC session. It is only
-	// persisted if a secure session store is used.
-	RefreshToken string `json:"oidc_refresh_token,omitempty"`
+	// Token stores the returned oauth2.Token
+	Token *oidc.MarshaledToken `json:"token,omitempty"`
 }
 
 // SessionStore are used for managing state across requests.
@@ -51,6 +54,9 @@ type SessionStore interface {
 type Handler struct {
 	// Issuer is the URL to the OIDC issuer
 	Issuer string
+	// KeyRefreshInterval is how often we should try and refresh the signing keys
+	// from the issuer. Defaults to DefaultKeyRefreshIterval
+	KeyRefreshInterval time.Duration
 	// ClientID is a client ID for the relying party (the service authenticating
 	// against the OIDC server)
 	ClientID string
@@ -75,8 +81,9 @@ type Handler struct {
 	// small amount of additional data. Required.
 	SessionStore SessionStore
 
-	oidcClient     *oidc.Client
-	oidcClientInit sync.Once
+	provider     *oidc.Provider
+	oauth2Config *oauth2.Config
+	oidcClientMu sync.Mutex
 }
 
 // Wrap returns an http.Handler that wraps the given http.Handler and
@@ -96,7 +103,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 		}
 
 		// Check for a user that's already authenticated
-		tok, err := h.authenticateExisting(r, session)
+		tok, claims, err := h.authenticateExisting(r, session)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -107,7 +114,10 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			}
 
 			// Authentication successful
-			r = r.WithContext(context.WithValue(r.Context(), tokenContextKey{}, tok))
+			r = r.WithContext(context.WithValue(r.Context(), tokenContextKey{}, contextData{
+				token:  tok,
+				claims: claims,
+			}))
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -149,46 +159,44 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 //
 // This function may modify the session if a token is refreshed, so it must be
 // saved afterward.
-func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*oidc.Token, error) {
+func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*oauth2.Token, *oidc.Claims, error) {
 	ctx := r.Context()
 
-	if session.IDToken == "" {
-		return nil, nil
+	if session.Token == nil {
+		return nil, nil, nil
 	}
 
-	oidccl, err := h.getOIDCClient(ctx)
+	provider, oauth2cfg, err := h.getOIDCClient(r.Context())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	idToken, err := oidccl.VerifyRaw(ctx, h.ClientID, session.IDToken)
+	// TODO(lstoll) is it really worth verifying every time, if we obtained it
+	// and stored it in the session? Can probably just check expiry.
+	claims, err := provider.VerifyIDToken(ctx, session.Token.Token, h.verificationOptions())
 	if err != nil {
 		// Attempt to refresh the token
-		if session.RefreshToken == "" {
-			return nil, nil
+		if session.Token.RefreshToken == "" {
+			return nil, nil, nil
 		}
-
-		oidccl, err := h.getOIDCClient(ctx)
+		token, err := oauth2cfg.TokenSource(ctx, session.Token.Token).Token()
 		if err != nil {
-			return nil, err
+			return nil, nil, nil
 		}
-
-		token, err := oidccl.TokenSource(ctx, &oidc.Token{RefreshToken: session.RefreshToken}).Token(ctx)
+		// TODO(lstoll) same with over-verification
+		_, err = provider.VerifyIDToken(ctx, token, h.verificationOptions())
 		if err != nil {
-			return nil, nil
+			return nil, nil, nil
 		}
-
-		session.IDToken = token.IDToken
-		session.RefreshToken = token.RefreshToken
-
-		idToken = &token.Claims
 	}
 
 	// create a new token with refresh token stripped. We ultimtely don't want
 	// downstream consumers refreshing themselves, as it will likely invalidate
 	// ours. This should mainly be used during a HTTP request lifecycle too, so
 	// we would have done the job of refreshing if needed.
-	return &oidc.Token{IDToken: session.IDToken, Claims: *idToken, Expiry: idToken.Expiry.Time()}, nil
+	retTok := *session.Token.Token
+	retTok.RefreshToken = ""
+	return &retTok, claims, nil
 }
 
 // authenticateCallback returns (returnTo, nil) if the user is authenticated,
@@ -224,18 +232,24 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 		return "", fmt.Errorf("state did not match")
 	}
 
-	oidccl, err := h.getOIDCClient(ctx)
+	provider, oauth2cfg, err := h.getOIDCClient(r.Context())
 	if err != nil {
 		return "", err
 	}
 
-	token, err := oidccl.Exchange(ctx, code, oidc.ExchangeWithPKCE(session.PKCEChallenge))
+	token, err := oauth2cfg.Exchange(ctx, code, oauth2.VerifierOption(session.PKCEChallenge))
 	if err != nil {
 		return "", err
 	}
 
-	session.IDToken = token.IDToken
-	session.RefreshToken = token.RefreshToken
+	// TODO(lstoll) do we want to verify the ID token here? was retrieved from a
+	// trusted source....
+	_, err = provider.VerifyIDToken(ctx, token, h.verificationOptions())
+	if err != nil {
+		return "", fmt.Errorf("verifying id_token failed: %w", err)
+	}
+
+	session.Token = &oidc.MarshaledToken{Token: token}
 	session.State = ""
 
 	returnTo := session.ReturnTo
@@ -248,85 +262,98 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 }
 
 func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (string, error) {
-	oidccl, err := h.getOIDCClient(r.Context())
+	_, oauth2cfg, err := h.getOIDCClient(r.Context())
 	if err != nil {
 		return "", err
 	}
 
-	session.IDToken = ""
-	session.RefreshToken = ""
+	session.Token = nil
 
 	session.State = randomState()
+	session.PKCEChallenge = oauth2.GenerateVerifier()
 
 	session.ReturnTo = ""
 	if r.Method == http.MethodGet {
 		session.ReturnTo = r.URL.RequestURI()
 	}
 
-	return oidccl.AuthCodeURL(session.State, oidc.AuthCodeWithPKCE(&session.PKCEChallenge)), nil
-}
-
-func (h *Handler) getOIDCClient(ctx context.Context) (*oidc.Client, error) {
-	var initErr error
-	h.oidcClientInit.Do(func() {
-		var opts []oidc.ClientOpt
-		if len(h.ACRValues) > 0 {
-			opts = append(opts, oidc.WithACRValues(h.ACRValues, true))
-		}
-		if len(h.AdditionalScopes) > 0 {
-			opts = append(opts, oidc.WithAdditionalScopes(h.AdditionalScopes))
-		}
-		h.oidcClient, initErr = oidc.DiscoverClient(ctx, h.Issuer, h.ClientID, h.ClientSecret, h.RedirectURL, opts...)
-	})
-	if initErr != nil {
-		return nil, initErr
+	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(session.PKCEChallenge)}
+	if len(h.ACRValues) > 0 {
+		opts = append(opts, oidc.SetACRValues(h.ACRValues))
 	}
 
-	return h.oidcClient, nil
+	return oauth2cfg.AuthCodeURL(session.State, opts...), nil
+}
+
+func (h *Handler) getOIDCClient(ctx context.Context) (*oidc.Provider, *oauth2.Config, error) {
+	h.oidcClientMu.Lock()
+	defer h.oidcClientMu.Unlock()
+	if h.provider != nil {
+		return h.provider, h.oauth2Config, nil
+	}
+
+	var err error
+	h.provider, err = oidc.DiscoverProvider(ctx, h.Issuer, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("discovering issuer %s: %w", h.Issuer, err)
+	}
+	h.oauth2Config = &oauth2.Config{
+		ClientID:     h.ClientID,
+		ClientSecret: h.ClientSecret,
+		RedirectURL:  h.RedirectURL,
+		Scopes:       append([]string{"openid"}, h.AdditionalScopes...),
+		Endpoint:     h.provider.Endpoint(),
+	}
+
+	return h.provider, h.oauth2Config, nil
+}
+
+func (h *Handler) verificationOptions() oidc.VerificationOpts {
+	return oidc.VerificationOpts{
+		ClientID:  h.ClientID,
+		ACRValues: h.ACRValues,
+	}
+}
+
+type contextData struct {
+	token  *oauth2.Token
+	claims *oidc.Claims
 }
 
 // ClaimsFromContext returns the claims for the given request context
 func ClaimsFromContext(ctx context.Context) *oidc.Claims {
-	tok, ok := ctx.Value(tokenContextKey{}).(*oidc.Token)
+	cd, ok := ctx.Value(tokenContextKey{}).(contextData)
 	if !ok {
 		return nil
 	}
 
-	return &tok.Claims
+	return cd.claims
 }
 
 // RawIDTokenFromContext returns the raw JWT from the given request context
 func RawIDTokenFromContext(ctx context.Context) string {
-	tok, ok := ctx.Value(tokenContextKey{}).(*oidc.Token)
+	cd, ok := ctx.Value(tokenContextKey{}).(contextData)
 	if !ok {
 		return ""
 	}
 
-	return tok.IDToken
-}
-
-var _ oidc.TokenSource = (*contextTokenSource)(nil)
-
-type contextTokenSource struct {
-	tok *oidc.Token
-}
-
-func (c *contextTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
-	if c == nil || c.tok == nil {
-		return nil, fmt.Errorf("no token in context")
+	idt, ok := oidc.IDToken(cd.token)
+	if !ok {
+		return ""
 	}
-	return c.tok, nil
+
+	return idt
 }
 
 // TokenSourceFromContext returns a usable tokensource from this request context. The request
 // must have been wrapped with the middleware for this to be initialized. This token source is
-func TokenSourceFromContext(ctx context.Context) oidc.TokenSource {
-	tok, ok := ctx.Value(tokenContextKey{}).(*oidc.Token)
+func TokenSourceFromContext(ctx context.Context) oauth2.TokenSource {
+	cd, ok := ctx.Value(tokenContextKey{}).(contextData)
 	if !ok {
-		return &contextTokenSource{}
+		return nil
 	}
 
-	return &contextTokenSource{tok: tok}
+	return oauth2.StaticTokenSource(cd.token)
 }
 
 func randomState() string {

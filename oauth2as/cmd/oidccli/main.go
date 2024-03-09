@@ -12,6 +12,7 @@ import (
 	"github.com/lstoll/oidc/clitoken"
 	"github.com/lstoll/oidc/tokencache"
 	"golang.org/x/net/context"
+	"golang.org/x/oauth2"
 )
 
 type subCommand struct {
@@ -90,7 +91,7 @@ func main() {
 		missingFlags = append(missingFlags, "client-id")
 	}
 
-	var execFn func(context.Context, oidc.TokenSource) error
+	var execFn func(context.Context, *oidc.Provider, oauth2.TokenSource) error
 
 	switch baseFs.Arg(0) {
 	case "raw":
@@ -98,24 +99,24 @@ func main() {
 			fmt.Printf("failed parsing raw args: %v", err)
 			os.Exit(1)
 		}
-		execFn = func(ctx context.Context, ts oidc.TokenSource) error {
-			return raw(ctx, ts, rawFlags)
+		execFn = func(ctx context.Context, _ *oidc.Provider, ts oauth2.TokenSource) error {
+			return raw(ts, rawFlags)
 		}
 	case "kubernetes":
 		if err := kubeFs.Parse(baseFs.Args()[1:]); err != nil {
 			fmt.Printf("failed parsing kube args: %v", err)
 			os.Exit(1)
 		}
-		execFn = func(ctx context.Context, ts oidc.TokenSource) error {
-			return kubernetes(ctx, ts, kubeFlags)
+		execFn = func(ctx context.Context, _ *oidc.Provider, ts oauth2.TokenSource) error {
+			return kubernetes(ts, kubeFlags)
 		}
 	case "info":
 		if err := infoFs.Parse(baseFs.Args()[1:]); err != nil {
 			fmt.Printf("failed parsing info args: %v", err)
 			os.Exit(1)
 		}
-		execFn = func(ctx context.Context, ts oidc.TokenSource) error {
-			return info(ctx, ts, infoFlags)
+		execFn = func(ctx context.Context, provider *oidc.Provider, ts oauth2.TokenSource) error {
+			return info(ctx, provider, ts, infoFlags)
 		}
 	default:
 		fmt.Printf("error: invalid subcommand %s\n\n", baseFs.Arg(0))
@@ -129,20 +130,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	var opts []oidc.ClientOpt
-	if baseFlags.Offline {
-		opts = append(opts, oidc.WithAdditionalScopes([]string{oidc.ScopeOfflineAccess}))
-	}
-
-	client, err := oidc.DiscoverClient(ctx, baseFlags.Issuer, baseFlags.ClientID, baseFlags.ClientSecret, "", opts...)
+	provider, err := oidc.DiscoverProvider(ctx, baseFlags.Issuer, nil)
 	if err != nil {
-		fmt.Printf("failed to discover issuer: %v", err)
+		fmt.Printf("discovering issuer %s: %v", baseFlags.Issuer, err)
 		os.Exit(1)
 	}
 
-	var ts oidc.TokenSource
+	scopes := []string{oidc.ScopeOpenID}
+	if baseFlags.Offline {
+		scopes = append(scopes, "offline")
+	}
 
-	ts, err = clitoken.NewSource(client, clitoken.WithPortRange(baseFlags.PortLow, baseFlags.PortHigh))
+	oa2Cfg := oauth2.Config{
+		ClientID:     baseFlags.ClientID,
+		ClientSecret: baseFlags.ClientSecret,
+		Endpoint:     provider.Endpoint(),
+		Scopes:       scopes,
+	}
+
+	var ts oauth2.TokenSource
+	ts, err = clitoken.NewSource(ctx, oa2Cfg, clitoken.WithPortRange(baseFlags.PortLow, baseFlags.PortHigh))
 	if err != nil {
 		fmt.Printf("getting cli token source: %v", err)
 		os.Exit(1)
@@ -151,13 +158,13 @@ func main() {
 	if !baseFlags.SkipCache {
 		var tsOpts []tokencache.TokenSourceOpt
 		if baseFlags.Offline {
-			tsOpts = append(tsOpts, tokencache.WithRefreshClient(client))
+			tsOpts = append(tsOpts, tokencache.WithRefreshConfig(ctx, oa2Cfg))
 		}
 
 		ts = tokencache.TokenSource(ts, baseFlags.Issuer, baseFlags.ClientID, tsOpts...)
 	}
 
-	if err := execFn(ctx, ts); err != nil {
+	if err := execFn(ctx, provider, ts); err != nil {
 		fmt.Printf("error: %+v", err)
 		os.Exit(1)
 	}
@@ -182,12 +189,18 @@ func printFullUsage(baseFs *flag.FlagSet, subcommands []*subCommand) {
 	}
 }
 
-func raw(ctx context.Context, ts oidc.TokenSource, _ rawOpts) error {
-	tok, err := ts.Token(ctx)
+func raw(ts oauth2.TokenSource, _ rawOpts) error {
+	// TODO(lstoll) might want to default to access token, and make id_token an
+	// option.
+	tok, err := ts.Token()
 	if err != nil {
 		return fmt.Errorf("fetching token: %v", err)
 	}
-	fmt.Print(tok.IDToken)
+	idt, ok := oidc.IDToken(tok)
+	if !ok {
+		return fmt.Errorf("response has no id_token")
+	}
+	fmt.Print(idt)
 	return nil
 }
 
@@ -209,34 +222,46 @@ type kubeExecCred struct {
 	Status     kubeToken `json:"status"`
 }
 
-func kubernetes(ctx context.Context, ts oidc.TokenSource, _ kubeOpts) error {
-	tok, err := ts.Token(ctx)
+func kubernetes(ts oauth2.TokenSource, _ kubeOpts) error {
+	tok, err := ts.Token()
 	if err != nil {
 		return fmt.Errorf("fetching token: %v", err)
+	}
+	idt, ok := oidc.IDToken(tok)
+	if !ok {
+		return fmt.Errorf("token contains no id_token")
 	}
 	creds := kubeExecCred{
 		APIVersion: apiVersion,
 		Kind:       execCredKind,
 		Status: kubeToken{
-			Token:               tok.IDToken,
+			Token:               idt,
 			ExpirationTimestamp: &tok.Expiry,
 		},
 	}
 	return json.NewEncoder(os.Stdout).Encode(&creds)
 }
 
-func info(ctx context.Context, ts oidc.TokenSource, _ infoOpts) error {
-	tok, err := ts.Token(ctx)
+func info(ctx context.Context, provider *oidc.Provider, ts oauth2.TokenSource, _ infoOpts) error {
+	tok, err := ts.Token()
 	if err != nil {
 		return fmt.Errorf("fetching token: %v", err)
+	}
+
+	claims, err := provider.VerifyIDToken(ctx, tok, oidc.VerificationOpts{IgnoreClientID: true})
+	if err != nil {
+		return fmt.Errorf("ID token verification: %w", err)
 	}
 
 	fmt.Printf("Access Token: %s\n", tok.AccessToken)
 	fmt.Printf("Refresh Token: %s\n", tok.RefreshToken)
 	fmt.Printf("Access Token expires: %s\n", tok.Expiry.String())
-	fmt.Printf("ID token: %s\n", tok.IDToken)
-	fmt.Printf("Claims expires: %s\n", tok.Claims.Expiry.Time().String())
-	fmt.Printf("Claims: %v\n", tok.Claims)
+	idt, ok := oidc.IDToken(tok)
+	if ok {
+		fmt.Printf("ID token: %s\n", idt)
+	}
+	fmt.Printf("Claims expires: %s\n", claims.Expiry.Time().String())
+	fmt.Printf("Claims: %v\n", claims)
 
 	return nil
 }

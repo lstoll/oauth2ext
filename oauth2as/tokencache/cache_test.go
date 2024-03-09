@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/lstoll/oidc"
+	"golang.org/x/oauth2"
 )
 
 func TestKeychainCredentialCache(t *testing.T) {
@@ -49,13 +49,13 @@ func TestMemoryWriteThroughCredentialCache(t *testing.T) {
 func testCache(t *testing.T, cache CredentialCache) {
 	for _, tc := range []struct {
 		name string
-		run  func(cache CredentialCache) (*oidc.Token, error)
-		want *oidc.Token
+		run  func(cache CredentialCache) (*oauth2.Token, error)
+		want *oauth2.Token
 	}{
 		{
 			name: "happy path",
-			run: func(cache CredentialCache) (*oidc.Token, error) {
-				token := &oidc.Token{AccessToken: "abc123", IDToken: "zyx987"}
+			run: func(cache CredentialCache) (*oauth2.Token, error) {
+				token := (&oauth2.Token{AccessToken: "abc123"}).WithExtra(map[string]any{"id_token": "zyx987"})
 
 				if err := cache.Set("https://issuer1.test", "clientID", []string{"openid"}, []string{"acr1"}, token); err != nil {
 					return nil, err
@@ -63,12 +63,12 @@ func testCache(t *testing.T, cache CredentialCache) {
 
 				return cache.Get("https://issuer1.test", "clientID", []string{"openid"}, []string{"acr1"})
 			},
-			want: &oidc.Token{AccessToken: "abc123", IDToken: "zyx987"},
+			want: (&oauth2.Token{AccessToken: "abc123"}).WithExtra(map[string]any{"id_token": "zyx987"}),
 		},
 		{
 			name: "cache miss by issuer",
-			run: func(cache CredentialCache) (*oidc.Token, error) {
-				token := &oidc.Token{AccessToken: "abc123", IDToken: "zyx987"}
+			run: func(cache CredentialCache) (*oauth2.Token, error) {
+				token := (&oauth2.Token{AccessToken: "abc123"}).WithExtra(map[string]any{"id_token": "zyx987"})
 
 				if err := cache.Set("https://issuer2.test", "clientID", []string{"openid"}, []string{"acr1"}, token); err != nil {
 					return nil, err
@@ -80,8 +80,8 @@ func testCache(t *testing.T, cache CredentialCache) {
 		},
 		{
 			name: "cache miss by client ID",
-			run: func(cache CredentialCache) (*oidc.Token, error) {
-				token := &oidc.Token{AccessToken: "abc123", IDToken: "zyx987"}
+			run: func(cache CredentialCache) (*oauth2.Token, error) {
+				token := (&oauth2.Token{AccessToken: "abc123"}).WithExtra(map[string]any{"id_token": "zyx987"})
 
 				if err := cache.Set("https://issuer4.test", "clientID1", []string{"openid"}, []string{"acr1"}, token); err != nil {
 					return nil, err
@@ -93,8 +93,8 @@ func testCache(t *testing.T, cache CredentialCache) {
 		},
 		{
 			name: "cache miss by scopes",
-			run: func(cache CredentialCache) (*oidc.Token, error) {
-				token := &oidc.Token{AccessToken: "abc123", IDToken: "zyx987"}
+			run: func(cache CredentialCache) (*oauth2.Token, error) {
+				token := (&oauth2.Token{AccessToken: "abc123"}).WithExtra(map[string]any{"id_token": "zyx987"})
 
 				if err := cache.Set("https://issuer5.test", "clientID", []string{"openid"}, []string{"acr1"}, token); err != nil {
 					return nil, err
@@ -106,8 +106,8 @@ func testCache(t *testing.T, cache CredentialCache) {
 		},
 		{
 			name: "cache miss by ACR",
-			run: func(cache CredentialCache) (*oidc.Token, error) {
-				token := &oidc.Token{AccessToken: "abc123", IDToken: "zyx987"}
+			run: func(cache CredentialCache) (*oauth2.Token, error) {
+				token := (&oauth2.Token{AccessToken: "abc123"}).WithExtra(map[string]any{"id_token": "zyx987"})
 
 				if err := cache.Set("https://issuer5.test", "clientID", []string{"openid"}, []string{"acr1"}, token); err != nil {
 					return nil, err
@@ -125,9 +125,10 @@ func testCache(t *testing.T, cache CredentialCache) {
 				t.Fatal(err)
 			}
 
-			// ignore claims internal state, it doesn't roundtrip in an
-			// comparable way but that's OK.
-			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreUnexported(oidc.Claims{})); diff != "" {
+			// ignore token internal state, it doesn't roundtrip in an
+			// comparable way.
+			// TODO(lstoll) better comparison?
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreUnexported(oauth2.Token{})); diff != "" {
 				t.Fatalf("want: %+v, got %+v", tc.want, got)
 			}
 		})

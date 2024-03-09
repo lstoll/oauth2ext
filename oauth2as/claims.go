@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/tink-crypto/tink-go/v2/jwt"
 )
 
 // Claims represents the set of JWT claims for the user.
@@ -255,4 +257,17 @@ func (u *UnixTime) UnmarshalJSON(b []byte) error {
 	}
 	*u = UnixTime(int64(flt))
 	return nil
+}
+
+func claimsFromVerifiedJWT(jwt *jwt.VerifiedJWT) (*Claims, error) {
+	// TODO(lstoll) is this good enough? Do we want to do more/other processing?
+	b, err := jwt.JSONPayload()
+	if err != nil {
+		return nil, fmt.Errorf("extracting JSON payload: %w", err)
+	}
+	var cl Claims
+	if err := json.Unmarshal(b, &cl); err != nil {
+		return nil, fmt.Errorf("unmarshaling claims: %w", err)
+	}
+	return &cl, nil
 }
