@@ -30,7 +30,7 @@ func main() {
 		Issuer:           iss,
 		AuthValidityTime: 5 * time.Minute,
 		CodeValidityTime: 5 * time.Minute,
-	}, smgr, clients, core.StaticKeysetHandle(privh))
+	}, smgr, clients, core.NewStaticKeysetHandle(privh))
 	if err != nil {
 		log.Fatalf("Failed to create OIDC server instance: %v", err)
 	}
