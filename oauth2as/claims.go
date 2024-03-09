@@ -422,3 +422,12 @@ func (c *AccessTokenClaims) Unmarshal(into any) error {
 	}
 	return json.Unmarshal(c.raw, into)
 }
+
+func (c AccessTokenClaims) String() string {
+	m, err := json.Marshal(&c)
+	if err != nil {
+		return fmt.Sprintf("sub: %s failed: %v", c.Subject, err)
+	}
+
+	return string(m)
+}
