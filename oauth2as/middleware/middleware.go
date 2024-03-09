@@ -159,7 +159,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 //
 // This function may modify the session if a token is refreshed, so it must be
 // saved afterward.
-func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*oauth2.Token, *oidc.Claims, error) {
+func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*oauth2.Token, *oidc.IDClaims, error) {
 	ctx := r.Context()
 
 	if session.Token == nil {
@@ -317,11 +317,11 @@ func (h *Handler) verificationOptions() oidc.VerificationOpts {
 
 type contextData struct {
 	token  *oauth2.Token
-	claims *oidc.Claims
+	claims *oidc.IDClaims
 }
 
 // ClaimsFromContext returns the claims for the given request context
-func ClaimsFromContext(ctx context.Context) *oidc.Claims {
+func ClaimsFromContext(ctx context.Context) *oidc.IDClaims {
 	cd, ok := ctx.Value(tokenContextKey{}).(contextData)
 	if !ok {
 		return nil

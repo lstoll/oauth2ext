@@ -121,13 +121,14 @@ func (s *server) token(w http.ResponseWriter, req *http.Request) {
 		meta := s.storage.sessions[tr.SessionID].Meta
 		s.storage.sessions[tr.SessionID].Meta = meta
 
-		idt := tr.PrefillIDToken("http://localhost:8085", "subject", time.Now().Add(s.tokenValidFor))
+		idt := tr.PrefillIDToken("subject", time.Now().Add(s.tokenValidFor))
+		at := tr.PrefillAccessToken("subject", time.Now().Add(s.tokenValidFor))
 
 		return &core.TokenResponse{
-			AccessTokenValidUntil:  time.Now().Add(s.tokenValidFor),
 			RefreshTokenValidUntil: time.Now().Add(s.refreshValidFor),
 			IssueRefreshToken:      tr.SessionRefreshable, // always allow it if we want it
 			IDToken:                idt,
+			AccessToken:            at,
 		}, nil
 	})
 	if err != nil {

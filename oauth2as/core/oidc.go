@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidc/oauth2"
 	"github.com/tink-crypto/tink-go/v2/jwt"
@@ -57,6 +58,8 @@ const (
 
 // Config sets configuration values for the OIDC flow implementation
 type Config struct {
+	// Issuer is the issuer we are serving for.
+	Issuer string
 	// AuthValidityTime is the maximum time an authorization flow/AuthID is
 	// valid. This is the time from Starting to Finishing the authorization. The
 	// optimal time here will be application specific, and should encompass how
@@ -73,6 +76,7 @@ type OIDCOpt func(*OIDC)
 
 // OIDC can be used to handle the various parts of the OIDC auth flow.
 type OIDC struct {
+	issuer   string
 	smgr     SessionManager
 	clients  ClientSource
 	handleFn KeysetHandleFunc
@@ -84,11 +88,16 @@ type OIDC struct {
 }
 
 func New(cfg *Config, smgr SessionManager, clientSource ClientSource, signer KeysetHandleFunc, opts ...OIDCOpt) (*OIDC, error) {
+	if cfg.Issuer == "" {
+		return nil, fmt.Errorf("issuer must be provided")
+	}
+
 	o := &OIDC{
 		smgr:     smgr,
 		clients:  clientSource,
 		handleFn: signer,
 
+		issuer:           cfg.Issuer,
 		authValidityTime: cfg.AuthValidityTime,
 		codeValidityTime: cfg.CodeValidityTime,
 
@@ -328,6 +337,7 @@ type TokenRequest struct {
 	// AuthTime Time when the End-User authentication occurred
 	AuthTime time.Time
 
+	issuer  string
 	authReq *sessAuthRequest
 	now     func() time.Time
 }
@@ -344,12 +354,12 @@ type TokenRequest struct {
 // * Issued At (iat) time set
 // * Auth Time (auth_time) time set
 // * Nonce that was originally passed in, if there was one
-func (t *TokenRequest) PrefillIDToken(iss, sub string, expires time.Time) oidc.Claims {
-	return oidc.Claims{
-		Issuer:   iss,
+func (t *TokenRequest) PrefillIDToken(sub string, expires time.Time) oidc.IDClaims {
+	return oidc.IDClaims{
+		Issuer:   t.issuer,
 		Subject:  sub,
 		Expiry:   oidc.NewUnixTime(expires),
-		Audience: oidc.Audience{t.ClientID},
+		Audience: oidc.StrOrSlice{t.ClientID},
 		ACR:      t.Authorization.ACR,
 		AMR:      t.Authorization.AMR,
 		IssuedAt: oidc.NewUnixTime(t.now()),
@@ -359,21 +369,57 @@ func (t *TokenRequest) PrefillIDToken(iss, sub string, expires time.Time) oidc.C
 	}
 }
 
+// PrefillAccessToken can be used to create a basic access token containing all
+// required claims, mapped with information from this request. The issuer and
+// subject will be set as provided, and the token's expiry will be set to the
+// appropriate time base on the validity period
+//
+// Aside from the explicitly passed fields, the following information will be set:
+// * Audience (aud) will contain the Client ID
+// * ACR claim set
+// * AMR claim set
+// * Issued At (iat) time set
+// * Auth Time (auth_time) time set
+// * Scope from the Authorization
+// * Randomly generated JWTID (uuid v4)
+// * Client ID for this request
+func (t *TokenRequest) PrefillAccessToken(sub string, expires time.Time) oidc.AccessTokenClaims {
+	return oidc.AccessTokenClaims{
+		Issuer:         t.issuer,
+		Subject:        sub,
+		Expiry:         oidc.NewUnixTime(expires),
+		Audience:       oidc.StrOrSlice{t.ClientID},
+		ACR:            t.Authorization.ACR,
+		AMR:            t.Authorization.AMR,
+		IssuedAt:       oidc.NewUnixTime(t.now()),
+		AuthTime:       oidc.NewUnixTime(t.AuthTime),
+		Scope:          strings.Join(t.Authorization.Scopes, " "),
+		JWTID:          uuid.NewString(),
+		ClientID:       t.ClientID,
+		LoginSessionID: t.SessionID,
+		Extra:          map[string]interface{}{},
+	}
+}
+
 // TokenResponse is returned by the token endpoint handler, indicating what it
 // should actually return to the user.
 type TokenResponse struct {
 	// IssueRefreshToken indicates if we should issue a refresh token.
 	IssueRefreshToken bool
 
+	// AccessToken is returned as the access token for the request to this
+	// endpoint. It is up to the application to store _all_ the desired
+	// information in the token correctly, and to obey the OAuth2 JWT profile
+	// spec (https://datatracker.ietf.org/doc/html/rfc9068). The handler will
+	// make no changes to this token.
+	AccessToken oidc.AccessTokenClaims
+
 	// IDToken is returned as the id_token for the request to this endpoint. It
 	// is up to the application to store _all_ the desired information in the
 	// token correctly, and to obey the OIDC spec. The handler will make no
 	// changes to this token.
-	IDToken oidc.Claims
+	IDToken oidc.IDClaims
 
-	// AccessTokenValidUntil indicates how long the returned authorization token
-	// should be valid for.
-	AccessTokenValidUntil time.Time
 	// RefreshTokenValidUntil indicates how long the returned refresh token should
 	// be valid for, assuming one is issued.
 	RefreshTokenValidUntil time.Time
@@ -502,6 +548,7 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		Nonce:              sess.Request.Nonce,
 		AuthTime:           sess.Authorization.AuthorizedAt,
 
+		issuer:  o.issuer,
 		authReq: sess.Request,
 		now:     o.now,
 	}
@@ -519,26 +566,8 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "id token cannot have a 0 expiry"}
 	}
 
-	if tresp.AccessTokenValidUntil.Before(o.now()) {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "access token must be valid > now"}
-	}
-
 	if tresp.IssueRefreshToken && tresp.RefreshTokenValidUntil.Before(o.now()) {
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "refresh token must be valid > now"}
-	}
-
-	// create a new access token
-	useratok, satok, err := newToken(sess.ID, tresp.AccessTokenValidUntil)
-	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to generate access token", Cause: err}
-	}
-	sess.Expiry = satok.Expiry
-	sess.AccessToken = satok
-	sess.Stage = sessionStageAccessTokenIssued
-
-	accessTok, err := marshalToken(useratok)
-	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to marshal user token", Cause: err}
 	}
 
 	// If we're allowing refresh, issue one of those too.
@@ -562,6 +591,9 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		sess.RefreshToken = nil
 	}
 
+	// update the session stage before we put it, we will be issuing a token.
+	sess.Stage = sessionStageAccessTokenIssued
+
 	if err := putSession(ctx, o.smgr, sess); err != nil {
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to put access token", Cause: err}
 	}
@@ -571,21 +603,31 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating signer from handle", Cause: err}
 	}
 
-	rawJWT, err := claimsToRawJWT(tresp.IDToken)
+	rawIDJWT, err := idClaimsToRawJWT(tresp.IDToken)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping claims to jwt", Cause: err}
+		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping id claims to jwt", Cause: err}
 	}
 
-	sidt, err := signer.SignAndEncode(rawJWT)
+	sidt, err := signer.SignAndEncode(rawIDJWT)
 	if err != nil {
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign id token", Cause: err}
 	}
 
+	rawATJWT, err := accessTokenClaimsToRawJWT(tresp.AccessToken)
+	if err != nil {
+		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping access claims to jwt", Cause: err}
+	}
+
+	sat, err := signer.SignAndEncode(rawATJWT)
+	if err != nil {
+		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign access token", Cause: err}
+	}
+
 	return &tokenResponse{
-		AccessToken:  accessTok,
+		AccessToken:  sat,
 		RefreshToken: refreshTok,
 		TokenType:    "bearer",
-		ExpiresIn:    tresp.AccessTokenValidUntil.Sub(o.now()),
+		ExpiresIn:    tresp.AccessToken.Expiry.Time().Sub(o.now()),
 		ExtraParams: map[string]interface{}{
 			"id_token": string(sidt),
 		},
@@ -681,8 +723,8 @@ func (o *OIDC) fetchRefreshSession(ctx context.Context, treq *tokenRequest) (*se
 // UserinfoRequest contains information about this request to the UserInfo
 // endpoint
 type UserinfoRequest struct {
-	// SessionID of the session this request is for.
-	SessionID string
+	// Subject is the sub of the user this request is for.
+	Subject string
 }
 
 // Userinfo can handle a request to the userinfo endpoint. If the request is not
@@ -700,54 +742,49 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w
 		return herr
 	}
 
-	uaccess, err := unmarshalToken(authSp[1])
+	h := o.handleFn()
+	ph, err := h.Public()
 	if err != nil {
-		be := &bearerError{Code: bearerErrorCodeInvalidRequest, Description: "malformed token"}
+		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
+		_ = writeError(w, req, herr)
+		return herr
+	}
+
+	jwtVerifier, err := jwt.NewVerifier(ph)
+	if err != nil {
+		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
+		_ = writeError(w, req, herr)
+		return herr
+	}
+
+	jwtValidator, err := jwt.NewValidator(&jwt.ValidatorOpts{
+		ExpectedIssuer:  &o.issuer,
+		IgnoreAudiences: true, // we don't care about the audience here, this is just introspecting the user
+	})
+	if err != nil {
+		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
+		_ = writeError(w, req, herr)
+		return herr
+	}
+
+	jwt, err := jwtVerifier.VerifyAndDecode(authSp[1], jwtValidator)
+	if err != nil {
+		be := &bearerError{Code: bearerErrorCodeInvalidRequest, Description: "invalid access token"}
 		herr := &httpError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), Cause: err}
 		_ = writeError(w, req, herr)
 		return herr
 	}
 
-	// make sure we have an unexpired session
-	sess, err := getSession(req.Context(), o.smgr, uaccess.SessionId)
+	sub, err := jwt.Subject()
 	if err != nil {
 		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
-		_ = writeError(w, req, herr)
-		return herr
-	}
-
-	// make sure we have a valid, unexpired session and an unexpired token
-	if sess == nil || o.now().After(sess.Expiry) || o.now().After(sess.AccessToken.Expiry) {
-		be := &bearerError{Code: bearerErrorCodeInvalidToken, Description: "token no longer valid"}
-		herr := &httpError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), CauseMsg: "Access token expired"}
-		_ = writeError(w, req, herr)
-		return herr
-	}
-
-	// and make sure the token is valid
-	ok, err := tokensMatch(uaccess, sess.AccessToken)
-	if err != nil {
-		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
-		_ = writeError(w, req, herr)
-		return herr
-	}
-	if !ok {
-		// if we're passed an invalid access token drop the whole session, might
-		// be under attack
-		if err := o.smgr.DeleteSession(req.Context(), sess.ID); err != nil {
-			herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
-			_ = writeError(w, req, herr)
-			return herr
-		}
-		be := &bearerError{Code: bearerErrorCodeInvalidToken, Description: "token not valid"}
-		herr := &httpError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String()}
 		_ = writeError(w, req, herr)
 		return herr
 	}
 
 	// If we make it to here, we have been presented a valid token for a valid session. Run the handler.
 	uireq := &UserinfoRequest{
-		SessionID: uaccess.SessionId,
+		Subject: sub,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -778,7 +815,7 @@ func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
 	return computedChallenge == storedCodeChallenge
 }
 
-func claimsToRawJWT(claims oidc.Claims) (*jwt.RawJWT, error) {
+func idClaimsToRawJWT(claims oidc.IDClaims) (*jwt.RawJWT, error) {
 	var exp *time.Time
 	if claims.Expiry != 0 {
 		t := claims.Expiry.Time()
@@ -819,6 +856,68 @@ func claimsToRawJWT(claims oidc.Claims) (*jwt.RawJWT, error) {
 	if claims.AZP != "" {
 		opts.CustomClaims["azp"] = claims.AZP
 	}
+	for k, v := range claims.Extra {
+		opts.CustomClaims[k] = v
+	}
+
+	raw, err := jwt.NewRawJWT(opts)
+	if err != nil {
+		return nil, fmt.Errorf("constructing raw JWT from claims: %w", err)
+	}
+
+	return raw, nil
+}
+
+func accessTokenClaimsToRawJWT(claims oidc.AccessTokenClaims) (*jwt.RawJWT, error) {
+	var exp *time.Time
+	if claims.Expiry != 0 {
+		t := claims.Expiry.Time()
+		exp = &t
+	}
+	var iat *time.Time
+	if claims.IssuedAt != 0 {
+		t := claims.IssuedAt.Time()
+		iat = &t
+	}
+	var jti *string
+	if claims.JWTID != "" {
+		jti = &claims.JWTID
+	}
+
+	opts := &jwt.RawJWTOptions{
+		Issuer:       &claims.Issuer,
+		Subject:      &claims.Subject,
+		Audiences:    claims.Audience,
+		ExpiresAt:    exp,
+		IssuedAt:     iat,
+		JWTID:        jti,
+		CustomClaims: map[string]interface{}{},
+	}
+	if claims.AuthTime != 0 {
+		opts.CustomClaims["auth_time"] = int(claims.AuthTime)
+	}
+	if claims.ACR != "" {
+		opts.CustomClaims["acr"] = claims.ACR
+	}
+	if claims.AMR != nil {
+		opts.CustomClaims["amr"] = claims.AMR
+	}
+	if claims.ClientID != "" {
+		opts.CustomClaims["client_id"] = claims.ClientID
+	}
+	if claims.Scope != "" {
+		opts.CustomClaims["scope"] = claims.Scope
+	}
+	if len(claims.Groups) != 0 {
+		opts.CustomClaims["groups"] = claims.Groups
+	}
+	if len(claims.Roles) != 0 {
+		opts.CustomClaims["roles"] = claims.Roles
+	}
+	if len(claims.Entitlements) != 0 {
+		opts.CustomClaims["entitlements"] = claims.Entitlements
+	}
+
 	for k, v := range claims.Extra {
 		opts.CustomClaims[k] = v
 	}

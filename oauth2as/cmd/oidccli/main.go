@@ -30,9 +30,13 @@ type baseOpts struct {
 	SkipCache    bool
 }
 
-type rawOpts struct{}
+type rawOpts struct {
+	UseIDToken bool
+}
 
-type kubeOpts struct{}
+type kubeOpts struct {
+	UseIDToken bool
+}
 
 type infoOpts struct{}
 
@@ -53,6 +57,7 @@ func main() {
 
 	rawFlags := rawOpts{}
 	rawFs := flag.NewFlagSet("raw", flag.ExitOnError)
+	rawFs.BoolVar(&rawFlags.UseIDToken, "use-id-token", rawFlags.UseIDToken, "Use ID token, rather than access token")
 	subcommands = append(subcommands, &subCommand{
 		Flags:       rawFs,
 		Description: "Output a raw JWT for this client",
@@ -60,6 +65,7 @@ func main() {
 
 	kubeFlags := kubeOpts{}
 	kubeFs := flag.NewFlagSet("kubernetes", flag.ExitOnError)
+	kubeFs.BoolVar(&kubeFlags.UseIDToken, "use-id-token", kubeFlags.UseIDToken, "Use ID token, rather than access token")
 	subcommands = append(subcommands, &subCommand{
 		Flags:       kubeFs,
 		Description: "Output credentials in a format that can be consumed by kubectl/client-go",
@@ -189,18 +195,22 @@ func printFullUsage(baseFs *flag.FlagSet, subcommands []*subCommand) {
 	}
 }
 
-func raw(ts oauth2.TokenSource, _ rawOpts) error {
+func raw(ts oauth2.TokenSource, opts rawOpts) error {
 	// TODO(lstoll) might want to default to access token, and make id_token an
 	// option.
 	tok, err := ts.Token()
 	if err != nil {
 		return fmt.Errorf("fetching token: %v", err)
 	}
-	idt, ok := oidc.IDToken(tok)
-	if !ok {
-		return fmt.Errorf("response has no id_token")
+	var raw string = tok.AccessToken
+	if opts.UseIDToken {
+		idt, ok := oidc.IDToken(tok)
+		if !ok {
+			return fmt.Errorf("response has no id_token")
+		}
+		raw = idt
 	}
-	fmt.Print(idt)
+	fmt.Print(raw)
 	return nil
 }
 
@@ -222,20 +232,24 @@ type kubeExecCred struct {
 	Status     kubeToken `json:"status"`
 }
 
-func kubernetes(ts oauth2.TokenSource, _ kubeOpts) error {
+func kubernetes(ts oauth2.TokenSource, opts kubeOpts) error {
 	tok, err := ts.Token()
 	if err != nil {
 		return fmt.Errorf("fetching token: %v", err)
 	}
-	idt, ok := oidc.IDToken(tok)
-	if !ok {
-		return fmt.Errorf("token contains no id_token")
+	var raw = tok.AccessToken
+	if opts.UseIDToken {
+		idt, ok := oidc.IDToken(tok)
+		if !ok {
+			return fmt.Errorf("response has no id_token")
+		}
+		raw = idt
 	}
 	creds := kubeExecCred{
 		APIVersion: apiVersion,
 		Kind:       execCredKind,
 		Status: kubeToken{
-			Token:               idt,
+			Token:               raw,
 			ExpirationTimestamp: &tok.Expiry,
 		},
 	}
@@ -248,20 +262,32 @@ func info(ctx context.Context, provider *oidc.Provider, ts oauth2.TokenSource, _
 		return fmt.Errorf("fetching token: %v", err)
 	}
 
-	claims, err := provider.VerifyIDToken(ctx, tok, oidc.VerificationOpts{IgnoreClientID: true})
-	if err != nil {
-		return fmt.Errorf("ID token verification: %w", err)
-	}
-
 	fmt.Printf("Access Token: %s\n", tok.AccessToken)
-	fmt.Printf("Refresh Token: %s\n", tok.RefreshToken)
 	fmt.Printf("Access Token expires: %s\n", tok.Expiry.String())
+	if isJWT(tok.AccessToken) {
+		claims, err := provider.VerifyAccessToken(ctx, tok, oidc.VerificationOpts{IgnoreClientID: true})
+		if err != nil {
+			return fmt.Errorf("access token verification: %w", err)
+		}
+		fmt.Printf("Access token claims expires: %s\n", claims.Expiry.Time().String())
+		fmt.Printf("Access token claims: %v\n", claims)
+	}
+	fmt.Printf("Refresh Token: %s\n", tok.RefreshToken)
 	idt, ok := oidc.IDToken(tok)
 	if ok {
+		claims, err := provider.VerifyIDToken(ctx, tok, oidc.VerificationOpts{IgnoreClientID: true})
+		if err != nil {
+			return fmt.Errorf("ID token verification: %w", err)
+		}
 		fmt.Printf("ID token: %s\n", idt)
+		fmt.Printf("ID token claims expires: %s\n", claims.Expiry.Time().String())
+		fmt.Printf("ID token claims: %v\n", claims)
 	}
-	fmt.Printf("Claims expires: %s\n", claims.Expiry.Time().String())
-	fmt.Printf("Claims: %v\n", claims)
 
 	return nil
+}
+
+// isJWT guesses is something is a JWT
+func isJWT(s string) bool {
+	return strings.Count(s, ".") == 2
 }

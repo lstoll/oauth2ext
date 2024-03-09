@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math"
 	"net/http/httptest"
 	"net/url"
 	"sync"
@@ -284,7 +283,7 @@ func TestIDTokenPrefill(t *testing.T) {
 	for _, tc := range []struct {
 		Name string
 		TReq TokenRequest
-		Want oidc.Claims
+		Want oidc.IDClaims
 	}{
 		{
 			Name: "Fields filled",
@@ -299,12 +298,13 @@ func TestIDTokenPrefill(t *testing.T) {
 				AuthTime: now,
 				Nonce:    "nonce",
 
-				now: nowFn,
+				issuer: "issuer",
+				now:    nowFn,
 			},
-			Want: oidc.Claims{
+			Want: oidc.IDClaims{
 				Issuer:   "issuer",
 				Subject:  "subject",
-				Audience: oidc.Audience{"client"},
+				Audience: oidc.StrOrSlice{"client"},
 				Expiry:   1574686451,
 				IssuedAt: 1574686451,
 				AuthTime: 1574686451,
@@ -316,8 +316,8 @@ func TestIDTokenPrefill(t *testing.T) {
 		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
-			tok := tc.TReq.PrefillIDToken("issuer", "subject", now)
-			if diff := cmp.Diff(tc.Want, tok, cmpopts.IgnoreUnexported(oidc.Claims{})); diff != "" {
+			tok := tc.TReq.PrefillIDToken("subject", now)
+			if diff := cmp.Diff(tc.Want, tok, cmpopts.IgnoreUnexported(oidc.IDClaims{})); diff != "" {
 				t.Error(diff)
 			}
 		})
@@ -330,6 +330,8 @@ func (u *unauthorizedErrImpl) Unauthorized() bool { return true }
 
 func TestToken(t *testing.T) {
 	const (
+		issuer = "https://issuer"
+
 		clientID     = "client-id"
 		clientSecret = "client-secret"
 		redirectURI  = "https://redirect"
@@ -341,6 +343,8 @@ func TestToken(t *testing.T) {
 
 	newOIDC := func() *OIDC {
 		return &OIDC{
+			issuer: issuer,
+
 			smgr:     newStubSMGR(),
 			handleFn: KeysetHandle,
 
@@ -392,11 +396,11 @@ func TestToken(t *testing.T) {
 		return utokstr
 	}
 
-	newHandler := func(t *testing.T) func(req *TokenRequest) (*TokenResponse, error) {
+	newHandler := func(_ *testing.T, expIn time.Duration) func(req *TokenRequest) (*TokenResponse, error) {
 		return func(req *TokenRequest) (*TokenResponse, error) {
 			return &TokenResponse{
-				IDToken:               req.PrefillIDToken("http://iss", "sub", time.Now().Add(time.Minute)),
-				AccessTokenValidUntil: time.Now().Add(1 * time.Minute),
+				IDToken:     req.PrefillIDToken("sub", time.Now().Add(expIn)),
+				AccessToken: req.PrefillAccessToken("sub", time.Now().Add(expIn)),
 			}, nil
 		}
 	}
@@ -413,7 +417,7 @@ func TestToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		tresp, err := o.token(context.Background(), treq, newHandler(t))
+		tresp, err := o.token(context.Background(), treq, newHandler(t, time.Minute))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -435,13 +439,13 @@ func TestToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		_, err := o.token(context.Background(), treq, newHandler(t))
+		_, err := o.token(context.Background(), treq, newHandler(t, time.Minute))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
 		// replay fails
-		_, err = o.token(context.Background(), treq, newHandler(t))
+		_, err = o.token(context.Background(), treq, newHandler(t, time.Minute))
 		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
 			t.Errorf("want invalid token grant error, got: %v", err)
 		}
@@ -459,7 +463,7 @@ func TestToken(t *testing.T) {
 			ClientSecret: "invalid-secret",
 		}
 
-		_, err := o.token(context.Background(), treq, newHandler(t))
+		_, err := o.token(context.Background(), treq, newHandler(t, time.Minute))
 		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeUnauthorizedClient {
 			t.Errorf("want unauthorized client error, got: %v", err)
 		}
@@ -479,7 +483,7 @@ func TestToken(t *testing.T) {
 			ClientSecret: otherClientSecret,
 		}
 
-		_, err := o.token(context.Background(), treq, newHandler(t))
+		_, err := o.token(context.Background(), treq, newHandler(t, time.Minute))
 		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeUnauthorizedClient {
 			t.Errorf("want unauthorized client error, got: %v", err)
 		}
@@ -497,10 +501,9 @@ func TestToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		ih := newHandler(t)
+		ih := newHandler(t, 5*time.Minute)
 		h := func(req *TokenRequest) (*TokenResponse, error) {
 			r, err := ih(req)
-			r.AccessTokenValidUntil = time.Now().Add(5 * time.Minute)
 			return r, err
 		}
 
@@ -515,8 +518,8 @@ func TestToken(t *testing.T) {
 
 		// compare whole seconds, we calculate this based on a expiresAt - now
 		// delta so the function run time is factored in.
-		if math.Round(tresp.ExpiresIn.Seconds()) != math.Round((5 * time.Minute).Seconds()) {
-			t.Errorf("want token exp %f, got: %f", math.Round((5 * time.Minute).Seconds()), math.Round(tresp.ExpiresIn.Seconds()))
+		if tresp.ExpiresIn > 5*time.Minute+2*time.Second || tresp.ExpiresIn < 5*time.Minute-2*time.Second {
+			t.Errorf("want token exp within 2s of %f, got: %f", 5*time.Minute.Seconds(), tresp.ExpiresIn.Seconds())
 		}
 	})
 
@@ -524,10 +527,9 @@ func TestToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeSess(t, o.smgr)
 
-		ih := newHandler(t)
+		ih := newHandler(t, time.Minute)
 		h := func(req *TokenRequest) (*TokenResponse, error) {
 			r, err := ih(req)
-			r.AccessTokenValidUntil = o.now().Add(5 * time.Minute)
 			r.RefreshTokenValidUntil = o.now().Add(10 * time.Minute)
 			r.IssueRefreshToken = true
 			return r, err
@@ -605,13 +607,12 @@ func TestToken(t *testing.T) {
 		var returnErr error
 		const errDesc = "Refresh unauthorized"
 
-		ih := newHandler(t)
+		ih := newHandler(t, time.Minute)
 		h := func(req *TokenRequest) (*TokenResponse, error) {
 			if returnErr != nil {
 				return nil, returnErr
 			}
 			r, err := ih(req)
-			r.AccessTokenValidUntil = o.now().Add(5 * time.Minute)
 			r.RefreshTokenValidUntil = o.now().Add(10 * time.Minute)
 			r.IssueRefreshToken = true
 			return r, err
@@ -797,7 +798,7 @@ func TestFetchCodeSession(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &staticclients.Clients{}, KeysetHandle)
+			oidc, err := New(&Config{Issuer: "http://issuer"}, smgr, &staticclients.Clients{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -870,7 +871,7 @@ func TestFetchRefreshSession(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &staticclients.Clients{}, KeysetHandle)
+			oidc, err := New(&Config{Issuer: "http://issuer"}, smgr, &staticclients.Clients{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -900,7 +901,7 @@ func TestFetchRefreshSession(t *testing.T) {
 func TestUserinfo(t *testing.T) {
 	echoHandler := func(w io.Writer, uireq *UserinfoRequest) error {
 		o := map[string]interface{}{
-			"gotsess": uireq.SessionID,
+			"gotsub": uireq.Subject,
 		}
 
 		if err := json.NewEncoder(w).Encode(o); err != nil {
@@ -910,11 +911,32 @@ func TestUserinfo(t *testing.T) {
 		return nil
 	}
 
+	signAccessToken := func(cl oidc.AccessTokenClaims) string {
+		signer, err := jwt.NewSigner(KeysetHandle())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		rawATJWT, err := accessTokenClaimsToRawJWT(cl)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		sat, err := signer.SignAndEncode(rawATJWT)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return sat
+	}
+
+	issuer := "http://iss"
+
 	for _, tc := range []struct {
 		Name string
 		// Setup should return both a session to be persisted, and an access
 		// token
-		Setup   func(t *testing.T) (sess *sessionV2, accessToken string)
+		Setup   func(t *testing.T) (accessToken string)
 		Handler func(w io.Writer, uireq *UserinfoRequest) error
 		// WantErr signifies that we expect an error
 		WantErr bool
@@ -923,64 +945,46 @@ func TestUserinfo(t *testing.T) {
 	}{
 		{
 			Name: "Simple output, valid session",
-			Setup: func(t *testing.T) (sess *sessionV2, accessToken string) {
-				sid := "session-id"
-				u, s, err := newToken(sid, time.Now().Add(1*time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				sess = &sessionV2{
-					ID:          sid,
-					AccessToken: s,
-					Expiry:      time.Now().Add(1 * time.Minute),
-				}
-
-				return sess, mustMarshal(u)
+			Setup: func(t *testing.T) (accessToken string) {
+				return signAccessToken(oidc.AccessTokenClaims{
+					Issuer:  issuer,
+					Subject: "sub",
+					Expiry:  oidc.NewUnixTime(time.Now().Add(1 * time.Minute)),
+				})
 			},
 			Handler: echoHandler,
 			WantJSON: map[string]interface{}{
-				"gotsess": "session-id",
+				"gotsub": "sub",
 			},
 		},
 		{
-			Name: "Token for non-existent session",
-			Setup: func(t *testing.T) (sess *sessionV2, accessToken string) {
-				sid := "session-id"
-				u, _, err := newToken(sid, time.Now().Add(1*time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				return nil, mustMarshal(u)
+			Name: "Token for other issuer",
+			Setup: func(t *testing.T) (accessToken string) {
+				return signAccessToken(oidc.AccessTokenClaims{
+					Issuer:  "http://other",
+					Subject: "sub",
+					Expiry:  oidc.NewUnixTime(time.Now().Add(1 * time.Minute)),
+				})
 			},
 			Handler: echoHandler,
 			WantErr: true,
 		},
 		{
 			Name: "Expired access token",
-			Setup: func(t *testing.T) (sess *sessionV2, accessToken string) {
-				sid := "session-id"
-				u, s, err := newToken(sid, time.Now().Add(-1*time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				sess = &sessionV2{
-					ID:          sid,
-					AccessToken: s,
-					Expiry:      time.Now().Add(1 * time.Minute),
-				}
-
-				return sess, mustMarshal(u)
+			Setup: func(t *testing.T) (accessToken string) {
+				return signAccessToken(oidc.AccessTokenClaims{
+					Issuer:  issuer,
+					Subject: "sub",
+					Expiry:  oidc.NewUnixTime(time.Now().Add(-1 * time.Minute)),
+				})
 			},
 			Handler: echoHandler,
 			WantErr: true,
 		},
 		{
 			Name: "No access token",
-			Setup: func(t *testing.T) (sess *sessionV2, accessToken string) {
-				return nil, ""
+			Setup: func(t *testing.T) (accessToken string) {
+				return ""
 			},
 			Handler: echoHandler,
 			WantErr: true,
@@ -989,18 +993,12 @@ func TestUserinfo(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			smgr := newStubSMGR()
 
-			oidc, err := New(&Config{}, smgr, &staticclients.Clients{}, KeysetHandle)
+			oidc, err := New(&Config{Issuer: issuer}, smgr, &staticclients.Clients{}, KeysetHandle)
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			sess, at := tc.Setup(t)
-
-			if sess != nil {
-				if err := putSession(context.Background(), smgr, sess); err != nil {
-					t.Fatalf("error persisting initial session: %v", err)
-				}
-			}
+			at := tc.Setup(t)
 
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("GET", "/userinfo", nil)

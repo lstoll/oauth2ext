@@ -75,6 +75,7 @@ func TestE2E(t *testing.T) {
 			defer cliSvr.Close()
 
 			cfg := &core.Config{
+				Issuer:           "http://issuer",
 				AuthValidityTime: 1 * time.Minute,
 				CodeValidityTime: 1 * time.Minute,
 			}
@@ -114,8 +115,8 @@ func TestE2E(t *testing.T) {
 			mux.HandleFunc("/token", func(w http.ResponseWriter, req *http.Request) {
 				err := oidcHandlers.Token(w, req, func(tr *core.TokenRequest) (*core.TokenResponse, error) {
 					return &core.TokenResponse{
-						IDToken:                tr.PrefillIDToken(oidcSvr.URL, "test-sub", time.Now().Add(1*time.Minute)),
-						AccessTokenValidUntil:  time.Now().Add(1 * time.Minute),
+						IDToken:                tr.PrefillIDToken("test-sub", time.Now().Add(1*time.Minute)),
+						AccessToken:            tr.PrefillAccessToken("test-sub", time.Now().Add(1*time.Minute)),
 						IssueRefreshToken:      true,
 						RefreshTokenValidUntil: time.Now().Add(2 * time.Minute),
 					}, nil
