@@ -6,8 +6,6 @@ import (
 	"slices"
 	"strconv"
 	"time"
-
-	"github.com/tink-crypto/tink-go/v2/jwt"
 )
 
 // IDClaims represents the set of JWT claims for a user ID Token.
@@ -256,19 +254,6 @@ func (u *UnixTime) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-func claimsFromVerifiedJWT(jwt *jwt.VerifiedJWT) (*IDClaims, error) {
-	// TODO(lstoll) is this good enough? Do we want to do more/other processing?
-	b, err := jwt.JSONPayload()
-	if err != nil {
-		return nil, fmt.Errorf("extracting JSON payload: %w", err)
-	}
-	var cl IDClaims
-	if err := json.Unmarshal(b, &cl); err != nil {
-		return nil, fmt.Errorf("unmarshaling claims: %w", err)
-	}
-	return &cl, nil
-}
-
 // AccessTokenClaims represents the set of JWT claims for an OAuth2 JWT Access
 // token.
 //
@@ -300,6 +285,45 @@ type AccessTokenClaims struct {
 	JWTID string `json:"jti,omitempty"`
 	// https://www.rfc-editor.org/rfc/rfc8693#section-4.2
 	Scope string `json:"scope,omitempty"`
+	// Time when the End-User authentication occurred. Its value is a JSON
+	// number representing the number of seconds from 1970-01-01T0:0:0Z as
+	// measured in UTC until the date/time. When a max_age request is made or
+	// when auth_time is requested as an Essential Claim, then this Claim is
+	// REQUIRED; otherwise, its inclusion is OPTIONAL. (The auth_time Claim
+	// semantically corresponds to the OpenID 2.0 PAPE [OpenID.PAPE] auth_time
+	// response parameter.)
+	//
+	// https://openid.net/specs/openid-connect-core-1_0.html
+	AuthTime UnixTime `json:"auth_time,omitempty"`
+	// OPTIONAL. Authentication Context Class Reference. String specifying an
+	// Authentication Context Class Reference value that identifies the
+	// Authentication Context Class that the authentication performed satisfied.
+	// The value "0" indicates the End-User authentication did not meet the
+	// requirements of ISO/IEC 29115 [ISO29115] level 1. Authentication using a
+	// long-lived browser cookie, for instance, is one example where the use of
+	// "level 0" is appropriate. Authentications with level 0 SHOULD NOT be used
+	// to authorize access to any resource of any monetary value. (This
+	// corresponds to the OpenID 2.0 PAPE [OpenID.PAPE] nist_auth_level 0.) An
+	// absolute URI or an RFC 6711 [RFC6711] registered name SHOULD be used as
+	// the acr value; registered names MUST NOT be used with a different meaning
+	// than that which is registered. Parties using this claim will need to
+	// agree upon the meanings of the values used, which may be
+	// context-specific. The acr value is a case sensitive string.
+	//
+	// https://openid.net/specs/openid-connect-core-1_0.html
+	ACR string `json:"acr,omitempty"`
+	// OPTIONAL. Authentication Methods References. JSON array of strings that
+	// are identifiers for authentication methods used in the authentication.
+	// For instance, values might indicate that both password and OTP
+	// authentication methods were used. The definition of particular values to
+	// be used in the amr Claim is beyond the scope of this specification.
+	// Parties using this claim will need to agree upon the meanings of the
+	// values used, which may be context-specific. The amr value is an array of
+	// case sensitive strings.
+	//
+	// https://openid.net/specs/openid-connect-core-1_0.html
+	AMR []string `json:"amr,omitempty"`
+
 	// https://datatracker.ietf.org/doc/html/rfc9068#section-2.2.3.1 |
 	// https://www.rfc-editor.org/rfc/rfc7643#section-4.1.2
 	//
@@ -312,6 +336,10 @@ type AccessTokenClaims struct {
 	// https://datatracker.ietf.org/doc/html/rfc9068#section-2.2.3.1 |
 	// https://www.rfc-editor.org/rfc/rfc7643#section-4.1.2
 	Entitlements []string `json:"entitlements,omitempty"`
+
+	// LoginSessionID is the session ID of the login via OIDC.
+	// Application-speficic, used for auditing purposes.
+	LoginSessionID string `json:"lsid,omitempty"`
 
 	// Extra are additional claims, that the standard claims will be merged in
 	// to. If a key is overridden here, the struct value wins.

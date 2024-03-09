@@ -89,10 +89,7 @@ type sessionV2 struct {
 	//
 	// https://tools.ietf.org/html/rfc6819#section-4.4.1.1
 	AuthCodeRedeemed bool `json:"auth_code_redeemed,omitempty"`
-	// The current access token, if one has been issued. It's expiration time
-	// should always be checked.
-	AccessToken *accessToken `json:"access_token,omitempty"`
-	// The currently valid refresh token for this session. I
+	// The currently valid refresh token for this session.
 	RefreshToken *accessToken `json:"refresh_token,omitempty"`
 	// The time the whole session should be expired at. It should be garbage
 	// collected at this time.

@@ -24,15 +24,16 @@ func main() {
 		log.Fatalf("parsing clients: %v", err)
 	}
 
+	iss := "http://localhost:8085"
+
 	core, err := core.New(&core.Config{
+		Issuer:           iss,
 		AuthValidityTime: 5 * time.Minute,
 		CodeValidityTime: 5 * time.Minute,
 	}, smgr, clients, core.StaticKeysetHandle(privh))
 	if err != nil {
 		log.Fatalf("Failed to create OIDC server instance: %v", err)
 	}
-
-	iss := "http://localhost:8085"
 
 	m := http.NewServeMux()
 

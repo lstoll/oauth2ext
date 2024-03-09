@@ -181,8 +181,12 @@ type VerificationOpts struct {
 	ACRValues []string
 }
 
-func (p *Provider) VerifyAccessToken(ctx context.Context, tok *oauth2.Token, opts VerificationOpts) (*IDClaims, error) {
-	return p.verifyToken(ctx, tok.AccessToken, opts)
+func (p *Provider) VerifyAccessToken(ctx context.Context, tok *oauth2.Token, opts VerificationOpts) (*AccessTokenClaims, error) {
+	var acl AccessTokenClaims
+	if err := p.verifyToken(ctx, tok.AccessToken, opts, &acl); err != nil {
+		return nil, err
+	}
+	return &acl, nil
 }
 
 func (p *Provider) VerifyIDToken(ctx context.Context, tok *oauth2.Token, opts VerificationOpts) (*IDClaims, error) {
@@ -190,10 +194,14 @@ func (p *Provider) VerifyIDToken(ctx context.Context, tok *oauth2.Token, opts Ve
 	if !ok {
 		return nil, fmt.Errorf("token does not contain an ID token")
 	}
-	return p.verifyToken(ctx, idt, opts)
+	var idcl IDClaims
+	if err := p.verifyToken(ctx, idt, opts, &idcl); err != nil {
+		return nil, err
+	}
+	return &idcl, nil
 }
 
-func (p *Provider) verifyToken(ctx context.Context, rawJWT string, opts VerificationOpts) (*IDClaims, error) {
+func (p *Provider) verifyToken(ctx context.Context, rawJWT string, opts VerificationOpts, into validatable) error {
 	vops := &jwt.ValidatorOpts{
 		ExpectedIssuer:  &p.Metadata.Issuer,
 		IgnoreAudiences: opts.IgnoreClientID,
@@ -204,19 +212,23 @@ func (p *Provider) verifyToken(ctx context.Context, rawJWT string, opts Verifica
 
 	vjwt, err := p.VerifyToken(ctx, rawJWT, vops)
 	if err != nil {
-		return nil, fmt.Errorf("jwt verification failed: %w", err)
+		return fmt.Errorf("jwt verification failed: %w", err)
 	}
 
-	cl, err := claimsFromVerifiedJWT(vjwt)
+	// TODO(lstoll) is this good enough? Do we want to do more/other processing?
+	b, err := vjwt.JSONPayload()
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("extracting JSON payload: %w", err)
+	}
+	if err := json.Unmarshal(b, &into); err != nil {
+		return fmt.Errorf("unmarshaling claims: %w", err)
 	}
 
-	if len(opts.ACRValues) > 0 && !slices.Contains(opts.ACRValues, cl.ACR) {
-		return nil, fmt.Errorf("token does not meet ACR requirements")
+	if len(opts.ACRValues) > 0 && !slices.Contains(opts.ACRValues, into.acr()) {
+		return fmt.Errorf("token does not meet ACR requirements")
 	}
 
-	return cl, nil
+	return nil
 }
 
 func (p *Provider) Userinfo(ctx context.Context, tokenSource oauth2.TokenSource) (*IDClaims, error) {
@@ -269,4 +281,16 @@ func (s *staticPublicHandle) PublicHandle(context.Context) (*keyset.Handle, erro
 
 func NewStaticPublicHandle(h *keyset.Handle) PublicHandle {
 	return &staticPublicHandle{h: h}
+}
+
+type validatable interface {
+	acr() string
+}
+
+func (c *IDClaims) acr() string {
+	return c.ACR
+}
+
+func (a *AccessTokenClaims) acr() string {
+	return a.ACR
 }
