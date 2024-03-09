@@ -19,6 +19,7 @@ import (
 	"github.com/lstoll/oidc/discovery"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
+	"golang.org/x/oauth2"
 )
 
 func TestE2E(t *testing.T) {
@@ -136,21 +137,6 @@ func TestE2E(t *testing.T) {
 				}
 			})
 
-			// discovery endpoint
-			md := &discovery.ProviderMetadata{
-				Issuer:                oidcSvr.URL,
-				AuthorizationEndpoint: oidcSvr.URL + "/authorization",
-				TokenEndpoint:         oidcSvr.URL + "/token",
-				JWKSURI:               oidcSvr.URL + "/jwks.json",
-				UserinfoEndpoint:      oidcSvr.URL + "/userinfo",
-			}
-
-			discoh, err := discovery.NewConfigurationHandler(md, discovery.WithCoreDefaults())
-			if err != nil {
-				t.Fatalf("Failed to initialize discovery handler: %v", err)
-			}
-			mux.Handle("/.well-known/openid-configuration/", discoh)
-
 			privh := KeysetHandle()
 			if err != nil {
 				t.Fatal(err)
@@ -160,30 +146,40 @@ func TestE2E(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			jwksh, err := discovery.NewKeysHandler(discovery.StaticPublicKeysetHandle(pubh), 1*time.Second)
+			// discovery endpoint
+			md := discovery.DefaultCoreMetadata(oidcSvr.URL)
+			md.Issuer = oidcSvr.URL
+			md.AuthorizationEndpoint = oidcSvr.URL + "/authorization"
+			md.TokenEndpoint = oidcSvr.URL + "/token"
+			md.UserinfoEndpoint = oidcSvr.URL + "/userinfo"
+
+			discoh, err := discovery.NewConfigurationHandler(md, oidc.NewStaticPublicHandle(pubh))
+			if err != nil {
+				t.Fatalf("Failed to initialize discovery handler: %v", err)
+			}
+			mux.Handle("GET /.well-known/openid-configuration", discoh)
+			mux.Handle("GET /.well-known/jwks.json", discoh)
+
+			provider, err := oidc.DiscoverProvider(ctx, oidcSvr.URL, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			mux.Handle("/jwks.json", jwksh)
 
-			// set up client
-			dcl, err := discovery.NewClient(ctx, oidcSvr.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cl, err := oidc.NewClient(dcl.Metadata(), dcl.PublicHandle, clientID, clientSecret, cliSvr.URL)
-			if err != nil {
-				t.Fatalf("discovering client: %v", err)
+			o2 := &oauth2.Config{
+				ClientID:     clientID,
+				ClientSecret: clientSecret,
+				Endpoint:     provider.Endpoint(),
+				RedirectURL:  cliSvr.URL,
 			}
 
-			var codeVerifier string
-			var acopts []oidc.AuthCodeOption
+			var acopts []oauth2.AuthCodeOption
+			verifier := oauth2.GenerateVerifier()
 			if tc.WithPKCE {
-				acopts = append(acopts, oidc.AuthCodeWithPKCE(&codeVerifier))
+				acopts = append(acopts, oauth2.S256ChallengeOption(verifier))
 			}
 
 			client := &http.Client{}
-			resp, err := client.Get(cl.AuthCodeURL(state, acopts...))
+			resp, err := client.Get(o2.AuthCodeURL(state, acopts...))
 			if err != nil {
 				t.Fatalf("error getting auth URL: %v", err)
 			}
@@ -196,20 +192,19 @@ func TestE2E(t *testing.T) {
 				t.Fatal("waiting for callback timed out after 1s")
 			}
 
-			var eopts []oidc.ExchangeOptions
+			var eopts []oauth2.AuthCodeOption
 			if tc.WithPKCE {
-				t.Logf("verifier: %v", codeVerifier)
-				eopts = append(eopts, oidc.ExchangeWithPKCE(codeVerifier))
+				eopts = append(eopts, oauth2.VerifierOption(verifier))
 			}
 
-			tok, err := cl.Exchange(ctx, callbackCode, eopts...)
+			tok, err := o2.Exchange(ctx, callbackCode, eopts...)
 			if err != nil {
 				t.Fatalf("error exchanging code %q for token: %v", callbackCode, err)
 			}
 
-			t.Logf("claims: %#v", tok.Claims)
+			ts := o2.TokenSource(ctx, tok)
 
-			uir, err := cl.Userinfo(ctx, tok)
+			uir, err := provider.Userinfo(ctx, ts)
 			if err != nil {
 				t.Fatalf("error fetching userinfo: %v", err)
 			}
@@ -225,18 +220,24 @@ func TestE2E(t *testing.T) {
 				}
 				tok.Expiry = time.Now().Add(-1 * time.Second) // needs to line up with remote change, else we won't refresh
 
-				uir, err := cl.Userinfo(ctx, tok)
+				uir, err := provider.Userinfo(ctx, ts)
 				if err != nil {
 					t.Fatalf("error fetching userinfo: %v", err)
 				}
 
-				if currRT == uir.Token.RefreshToken {
+				t.Logf("subsequent userinfo response: %#v", uir)
+
+				nt, err := ts.Token()
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if currRT == nt.RefreshToken {
 					t.Fatal("userinfo should result in new refresh token")
 				}
 
-				tok = uir.Token
+				tok = nt
 			}
-
 		})
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/lstoll/oidc"
+	"golang.org/x/oauth2"
 )
 
 var (
@@ -37,7 +38,9 @@ const (
 type LocalOIDCTokenSource struct {
 	sync.Mutex
 
-	client *oidc.Client
+	ctx context.Context
+
+	oa2Cfg oauth2.Config
 
 	opener Opener
 
@@ -51,39 +54,48 @@ type LocalOIDCTokenSource struct {
 
 type LocalOIDCTokenSourceOpt func(s *LocalOIDCTokenSource)
 
-var _ oidc.TokenSource = (*LocalOIDCTokenSource)(nil)
+var _ oauth2.TokenSource = (*LocalOIDCTokenSource)(nil)
 
 // NewSource creates a token source that command line (CLI) programs can use to
-// fetch tokens from an OIDC Provider for use in authenticating clients to other
-// systems (e.g., Kubernetes clusters, Docker registries, etc.). The client
-// should be configured with any scopes/acr values that are required.
+// fetch tokens from an OAuth2/OIDC Provider for use in authenticating clients
+// to other systems (e.g., Kubernetes clusters, Docker registries, etc.). The
+// client should be configured with any scopes/acr values that are required.
 //
 // This will trigger the auth flow each time, in practice the result should be
-// cached.
+// cached. The resulting tokens are not verified, and the caller should verify
+// if desired.
 //
 // Example:
 //
-//	ctx := context.TODO()
+// ctx := context.TODO()
 //
-//	client, err := oidc.DiscoverClient(ctx, StagingURL, ClientID, ClientSecret, "")
+//	provider, err := oidc.DiscoverProvider(ctx, issuer)
 //	if err != nil {
-//	  // handle err
+//		// handle err
 //	}
 //
-//	ts, err := NewLocalOIDCTokenSource(client, clientID, clientSecret)
-//	if err != nil {
-//	  // handle err
+//	oa2Cfg := oauth2.Config{
+//		ClientID:     clientID,
+//		ClientSecret: clientSecret,
+//		Endpoint:     provider.Endpoint(),
+//		Scopes: []string{oidc.ScopeOpenID},
 //	}
 //
-//	token, err := ts.Token(ctx)
+//	ts, err := NewSource(ctx, oa2Cfg)
 //	if err != nil {
-//	  // handle error
+//		// handle err
 //	}
 //
-//	// use token
-func NewSource(client *oidc.Client, opts ...LocalOIDCTokenSourceOpt) (*LocalOIDCTokenSource, error) {
+//	token, err := ts.Token()
+//	if err != nil {
+//		// handle error
+//	}
+//
+// use token
+func NewSource(ctx context.Context, oa2Cfg oauth2.Config, opts ...LocalOIDCTokenSourceOpt) (*LocalOIDCTokenSource, error) {
 	s := &LocalOIDCTokenSource{
-		client:   client,
+		ctx:      ctx,
+		oa2Cfg:   oa2Cfg,
 		opener:   DetectOpener(),
 		renderer: &renderer{},
 	}
@@ -136,7 +148,7 @@ func WithOpener(opener Opener) LocalOIDCTokenSourceOpt {
 
 // Token attempts to a fetch a token. The user will be required to open a URL
 // in their browser and authenticate to the upstream IdP.
-func (s *LocalOIDCTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
+func (s *LocalOIDCTokenSource) Token() (*oauth2.Token, error) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -212,14 +224,14 @@ func (s *LocalOIDCTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
 	tcpAddr := ln.Addr().(*net.TCPAddr)
 
 	go func() { _ = httpSrv.Serve(ln) }()
-	defer func() { _ = httpSrv.Shutdown(ctx) }()
+	defer func() { _ = httpSrv.Shutdown(s.ctx) }()
 
-	var codeVerifier string
-	authCodeOpts := []oidc.AuthCodeOption{
-		oidc.AuthCodeWithPKCE(&codeVerifier),
+	verifier := oauth2.GenerateVerifier()
+	authCodeOpts := []oauth2.AuthCodeOption{
+		oauth2.S256ChallengeOption(verifier),
 	}
 	if s.nonceGenerator != nil {
-		nonce, err := s.nonceGenerator(ctx)
+		nonce, err := s.nonceGenerator(s.ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate nonce: %v", err)
 		}
@@ -228,18 +240,18 @@ func (s *LocalOIDCTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
 	}
 
 	// we need to update this each invocation
-	s.client.SetRedirectURL(fmt.Sprintf("http://127.0.0.1:%d/callback", tcpAddr.Port))
+	s.oa2Cfg.RedirectURL = fmt.Sprintf("http://127.0.0.1:%d/callback", tcpAddr.Port)
 
-	authURL := s.client.AuthCodeURL(state, authCodeOpts...)
+	authURL := s.oa2Cfg.AuthCodeURL(state, authCodeOpts...)
 
-	if err := s.opener.Open(ctx, authURL); err != nil {
+	if err := s.opener.Open(s.ctx, authURL); err != nil {
 		return nil, fmt.Errorf("failed to open URL: %w", err)
 	}
 
 	var res result
 	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
 	case res = <-resultCh:
 		// continue
 	}
@@ -248,7 +260,7 @@ func (s *LocalOIDCTokenSource) Token(ctx context.Context) (*oidc.Token, error) {
 		return nil, res.err
 	}
 
-	return s.client.Exchange(ctx, res.code, oidc.ExchangeWithPKCE(codeVerifier))
+	return s.oa2Cfg.Exchange(s.ctx, res.code, oauth2.VerifierOption(verifier))
 }
 
 func newLocalTCPListenerInRange(portLow int, portHigh int) (net.Listener, error) {

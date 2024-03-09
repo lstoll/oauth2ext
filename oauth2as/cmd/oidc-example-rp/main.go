@@ -5,10 +5,9 @@ import (
 	"flag"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidc/discovery"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -39,17 +38,24 @@ func main() {
 
 	flag.Parse()
 
-	dcl, err := discovery.NewClient(ctx, cfg.Issuer, discovery.WithBackgroundJWKSRefresh(5*time.Minute))
+	provider, err := oidc.DiscoverProvider(ctx, cfg.Issuer, nil)
 	if err != nil {
 		log.Fatalf("discovering issuer: %v", err)
 	}
-	cli, err := oidc.NewClient(dcl.Metadata(), dcl.PublicHandle, cfg.ClientID, cfg.ClientSecret, cfg.RedirectURL)
-	if err != nil {
-		log.Fatalf("failed to discover issuer: %v", err)
+
+	scopes := []string{oidc.ScopeOpenID}
+
+	oa2Cfg := oauth2.Config{
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+		Endpoint:     provider.Endpoint(),
+		Scopes:       scopes,
+		RedirectURL:  cfg.RedirectURL,
 	}
 
 	svr := &server{
-		oidccli:        cli,
+		provider:       provider,
+		oa2Cfg:         oa2Cfg,
 		pkceChallenges: make(map[string]string),
 	}
 

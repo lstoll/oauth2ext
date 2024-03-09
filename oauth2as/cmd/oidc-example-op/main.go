@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidc/core"
 	"github.com/lstoll/oidc/core/staticclients"
 	"github.com/lstoll/oidc/discovery"
@@ -23,7 +24,7 @@ func main() {
 		log.Fatalf("parsing clients: %v", err)
 	}
 
-	oidc, err := core.New(&core.Config{
+	core, err := core.New(&core.Config{
 		AuthValidityTime: 5 * time.Minute,
 		CodeValidityTime: 5 * time.Minute,
 	}, smgr, clients, core.StaticKeysetHandle(privh))
@@ -36,7 +37,7 @@ func main() {
 	m := http.NewServeMux()
 
 	svr := &server{
-		oidc:            oidc,
+		oidc:            core,
 		storage:         smgr,
 		tokenValidFor:   30 * time.Second,
 		refreshValidFor: 5 * time.Minute,
@@ -44,25 +45,16 @@ func main() {
 
 	m.Handle("/", svr)
 
-	md := &discovery.ProviderMetadata{
-		Issuer:                        iss,
-		AuthorizationEndpoint:         iss + "/auth",
-		TokenEndpoint:                 iss + "/token",
-		JWKSURI:                       iss + "/jwks.json",
-		CodeChallengeMethodsSupported: []discovery.CodeChallengeMethod{discovery.CodeChallengeMethodS256},
-	}
+	md := discovery.DefaultCoreMetadata(iss)
+	md.AuthorizationEndpoint = iss + "/auth"
+	md.TokenEndpoint = iss + "/token"
 
-	discoh, err := discovery.NewConfigurationHandler(md, discovery.WithCoreDefaults())
+	discoh, err := discovery.NewConfigurationHandler(md, oidc.NewStaticPublicHandle(pubh))
 	if err != nil {
 		log.Fatalf("Failed to initialize discovery handler: %v", err)
 	}
-	m.Handle("/.well-known/openid-configuration/", discoh)
-
-	jwksh, err := discovery.NewKeysHandler(discovery.StaticPublicKeysetHandle(pubh), 1*time.Second)
-	if err != nil {
-		log.Fatalf("creating keys handler: %v", err)
-	}
-	m.Handle("/jwks.json", jwksh)
+	m.Handle("GET /.well-known/openid-configuration", discoh)
+	m.Handle("GET /.well-known/jwks.json", discoh)
 
 	log.Printf("Listening on: %s", "localhost:8085")
 	err = http.ListenAndServe("localhost:8085", m)

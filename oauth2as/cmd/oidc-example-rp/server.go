@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"sync"
 
 	"net/http"
 
 	"github.com/lstoll/oidc"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -18,7 +20,8 @@ const (
 )
 
 type server struct {
-	oidccli  *oidc.Client
+	provider *oidc.Provider
+	oa2Cfg   oauth2.Config
 	mux      *http.ServeMux
 	muxSetup sync.Once
 
@@ -62,13 +65,13 @@ func (s *server) start(w http.ResponseWriter, req *http.Request) {
 	}
 	http.SetCookie(w, sc)
 
-	var pkceChallenge string
-	url := s.oidccli.AuthCodeURL(state, oidc.AuthCodeWithPKCE(&pkceChallenge))
+	verifier := oauth2.GenerateVerifier()
+	url := s.oa2Cfg.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier))
 
 	// it is not safe to give this to the end user. Associating it with a
 	// secured session would be good, for this app we just track it server side
 	// against the state.
-	s.pkceChallenges[state] = pkceChallenge
+	s.pkceChallenges[state] = verifier
 
 	http.Redirect(w, req, url, http.StatusSeeOther)
 }
@@ -118,22 +121,35 @@ func (s *server) callback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	token, err := s.oidccli.Exchange(req.Context(), code, oidc.ExchangeWithPKCE(chall))
+	token, err := s.oa2Cfg.Exchange(req.Context(), code, oauth2.VerifierOption(chall))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("error exchanging code %q for token: %v", code, err), http.StatusInternalServerError)
 		return
 	}
 
-	cljson, err := json.MarshalIndent(token.Claims, "", "  ")
-	if err != nil {
-		http.Error(w, "couldn't serialize claims", http.StatusBadRequest)
-		return
-	}
-
 	tmplData := map[string]interface{}{
 		"access_token": token.AccessToken,
-		"id_token":     token.IDToken,
-		"claims":       string(cljson),
+	}
+
+	idt, hasIDToken := oidc.IDToken(token)
+	if hasIDToken {
+		cl, err := s.provider.VerifyIDToken(req.Context(), token, oidc.VerificationOpts{
+			ClientID: string(s.oa2Cfg.ClientID),
+		})
+		if err != nil {
+			slog.ErrorContext(req.Context(), "verifying ID token", "err", err)
+			http.Error(w, fmt.Sprintf("verifying token: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		cljson, err := json.MarshalIndent(cl, "", "  ")
+		if err != nil {
+			http.Error(w, "couldn't serialize claims", http.StatusBadRequest)
+			return
+		}
+
+		tmplData["id_token"] = idt
+		tmplData["claims"] = string(cljson)
 	}
 
 	if err := callbackTmpl.Execute(w, tmplData); err != nil {
