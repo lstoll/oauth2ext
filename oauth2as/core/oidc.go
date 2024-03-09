@@ -344,12 +344,12 @@ type TokenRequest struct {
 // * Issued At (iat) time set
 // * Auth Time (auth_time) time set
 // * Nonce that was originally passed in, if there was one
-func (t *TokenRequest) PrefillIDToken(iss, sub string, expires time.Time) oidc.Claims {
-	return oidc.Claims{
+func (t *TokenRequest) PrefillIDToken(iss, sub string, expires time.Time) oidc.IDClaims {
+	return oidc.IDClaims{
 		Issuer:   iss,
 		Subject:  sub,
 		Expiry:   oidc.NewUnixTime(expires),
-		Audience: oidc.Audience{t.ClientID},
+		Audience: oidc.StrOrSlice{t.ClientID},
 		ACR:      t.Authorization.ACR,
 		AMR:      t.Authorization.AMR,
 		IssuedAt: oidc.NewUnixTime(t.now()),
@@ -369,7 +369,7 @@ type TokenResponse struct {
 	// is up to the application to store _all_ the desired information in the
 	// token correctly, and to obey the OIDC spec. The handler will make no
 	// changes to this token.
-	IDToken oidc.Claims
+	IDToken oidc.IDClaims
 
 	// AccessTokenValidUntil indicates how long the returned authorization token
 	// should be valid for.
@@ -778,7 +778,7 @@ func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
 	return computedChallenge == storedCodeChallenge
 }
 
-func claimsToRawJWT(claims oidc.Claims) (*jwt.RawJWT, error) {
+func claimsToRawJWT(claims oidc.IDClaims) (*jwt.RawJWT, error) {
 	var exp *time.Time
 	if claims.Expiry != 0 {
 		t := claims.Expiry.Time()

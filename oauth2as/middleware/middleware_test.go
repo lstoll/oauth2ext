@@ -291,7 +291,7 @@ func TestMiddleware_HappyPath(t *testing.T) {
 func TestContext(t *testing.T) {
 	var ( // Capture in handler
 		gotTokSrc oauth2.TokenSource
-		gotClaims *oidc.Claims
+		gotClaims *oidc.IDClaims
 		gotRaw    string
 	)
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

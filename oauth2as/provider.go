@@ -181,11 +181,11 @@ type VerificationOpts struct {
 	ACRValues []string
 }
 
-func (p *Provider) VerifyAccessToken(ctx context.Context, tok *oauth2.Token, opts VerificationOpts) (*Claims, error) {
+func (p *Provider) VerifyAccessToken(ctx context.Context, tok *oauth2.Token, opts VerificationOpts) (*IDClaims, error) {
 	return p.verifyToken(ctx, tok.AccessToken, opts)
 }
 
-func (p *Provider) VerifyIDToken(ctx context.Context, tok *oauth2.Token, opts VerificationOpts) (*Claims, error) {
+func (p *Provider) VerifyIDToken(ctx context.Context, tok *oauth2.Token, opts VerificationOpts) (*IDClaims, error) {
 	idt, ok := IDToken(tok)
 	if !ok {
 		return nil, fmt.Errorf("token does not contain an ID token")
@@ -193,7 +193,7 @@ func (p *Provider) VerifyIDToken(ctx context.Context, tok *oauth2.Token, opts Ve
 	return p.verifyToken(ctx, idt, opts)
 }
 
-func (p *Provider) verifyToken(ctx context.Context, rawJWT string, opts VerificationOpts) (*Claims, error) {
+func (p *Provider) verifyToken(ctx context.Context, rawJWT string, opts VerificationOpts) (*IDClaims, error) {
 	vops := &jwt.ValidatorOpts{
 		ExpectedIssuer:  &p.Metadata.Issuer,
 		IgnoreAudiences: opts.IgnoreClientID,
@@ -219,7 +219,7 @@ func (p *Provider) verifyToken(ctx context.Context, rawJWT string, opts Verifica
 	return cl, nil
 }
 
-func (p *Provider) Userinfo(ctx context.Context, tokenSource oauth2.TokenSource) (*Claims, error) {
+func (p *Provider) Userinfo(ctx context.Context, tokenSource oauth2.TokenSource) (*IDClaims, error) {
 	if p.Metadata.UserinfoEndpoint == "" {
 		return nil, fmt.Errorf("provider does not have a userinfo endpoint")
 	}
@@ -244,7 +244,7 @@ func (p *Provider) Userinfo(ctx context.Context, tokenSource oauth2.TokenSource)
 		return nil, fmt.Errorf("bad response from server: http %d", resp.StatusCode)
 	}
 
-	var cl Claims
+	var cl IDClaims
 
 	if err := json.NewDecoder(resp.Body).Decode(&cl); err != nil {
 		return nil, fmt.Errorf("failed decoding response body: %v", err)
