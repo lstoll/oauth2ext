@@ -591,6 +591,9 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		sess.RefreshToken = nil
 	}
 
+	// update the session stage before we put it, we will be issuing a token.
+	sess.Stage = sessionStageAccessTokenIssued
+
 	if err := putSession(ctx, o.smgr, sess); err != nil {
 		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to put access token", Cause: err}
 	}
@@ -758,6 +761,11 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w
 		ExpectedIssuer:  &o.issuer,
 		IgnoreAudiences: true, // we don't care about the audience here, this is just introspecting the user
 	})
+	if err != nil {
+		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
+		_ = writeError(w, req, herr)
+		return herr
+	}
 
 	jwt, err := jwtVerifier.VerifyAndDecode(authSp[1], jwtValidator)
 	if err != nil {
