@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -14,6 +13,8 @@ import (
 	"github.com/lstoll/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 )
+
+const awsSTSUserAgent = "AWS Security Token Service"
 
 const DefaultCacheFor = 1 * time.Minute
 
@@ -82,7 +83,6 @@ func NewConfigurationHandler(metadata *oidc.ProviderMetadata, keyset oidc.Public
 }
 
 func (h *ConfigurationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Printf("path %s", r.URL.Path)
 	h.mux.ServeHTTP(w, r)
 }
 
@@ -100,9 +100,24 @@ func (h *ConfigurationHandler) serveKeys(w http.ResponseWriter, req *http.Reques
 		slog.ErrorContext(req.Context(), "getting jwks", "err", err.Error())
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
 	}
+	jwks := h.currJWKS
+
+	if strings.Contains(req.UserAgent(), awsSTSUserAgent) {
+		// AWS STS rejects JWKS that contains a "key_ops" field with the value
+		// of "verify" (other values not tested). This seems like a mistake and
+		// are going to follow up with them, in the mean time make it happy by
+		// removing the fields.
+		j, err := stripKeyOps(jwks)
+		if err != nil {
+			slog.ErrorContext(req.Context(), "failed to write jwks", "err", err.Error())
+			http.Error(w, "Internal Error", http.StatusInternalServerError)
+			return
+		}
+		jwks = j
+	}
 
 	w.Header().Set("Content-Type", "application/jwk-set+json")
-	if _, err := w.Write(h.currJWKS); err != nil {
+	if _, err := w.Write(jwks); err != nil {
 		slog.ErrorContext(req.Context(), "failed to write jwks", "err", err.Error())
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
 		return
@@ -163,4 +178,24 @@ func validateMetadata(p *oidc.ProviderMetadata) error {
 		return fmt.Errorf("invalid provider metadata: %s", strings.Join(errs, ", "))
 	}
 	return nil
+}
+
+// stripKeyOps removes the key_ops field from the raw JWKS json.
+func stripKeyOps(in []byte) ([]byte, error) {
+	var jwks map[string]any
+	if err := json.Unmarshal(in, &jwks); err != nil {
+		return nil, fmt.Errorf("unmarshaling input jwks: %w", err)
+	}
+	keys, ok := jwks["keys"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("jwks does not contain keys entry")
+	}
+	for _, k := range keys {
+		km, ok := k.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("key entry is not a map")
+		}
+		delete(km, "key_ops")
+	}
+	return json.Marshal(jwks)
 }
