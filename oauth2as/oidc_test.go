@@ -1,4 +1,4 @@
-package core
+package oidcop
 
 import (
 	"context"
@@ -14,9 +14,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidc/core/staticclients"
-	"github.com/lstoll/oidc/oauth2"
-	corev1 "github.com/lstoll/oidc/proto/core/v1"
+	"github.com/lstoll/oidcop/oauth2"
+	corev1 "github.com/lstoll/oidcop/proto/core/v1"
+	"github.com/lstoll/oidcop/staticclients"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )

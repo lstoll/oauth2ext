@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidc/core"
-	"github.com/lstoll/oidc/core/staticclients"
-	"github.com/lstoll/oidc/discovery"
+	"github.com/lstoll/oidcop"
+	"github.com/lstoll/oidcop/discovery"
+	"github.com/lstoll/oidcop/staticclients"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 	"golang.org/x/oauth2"
@@ -74,7 +74,7 @@ func TestE2E(t *testing.T) {
 			}))
 			defer cliSvr.Close()
 
-			cfg := &core.Config{
+			cfg := &oidcop.Config{
 				Issuer:           "http://issuer",
 				AuthValidityTime: 1 * time.Minute,
 				CodeValidityTime: 1 * time.Minute,
@@ -91,7 +91,7 @@ func TestE2E(t *testing.T) {
 				},
 			}
 
-			oidcHandlers, err := core.New(cfg, smgr, clientSource, testKeysetHandle())
+			oidcHandlers, err := oidcop.New(cfg, smgr, clientSource, testKeysetHandle())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -107,14 +107,14 @@ func TestE2E(t *testing.T) {
 				}
 
 				// just finish it straight away
-				if err := oidcHandlers.FinishAuthorization(w, req, ar.SessionID, &core.Authorization{Scopes: []string{"openid"}}); err != nil {
+				if err := oidcHandlers.FinishAuthorization(w, req, ar.SessionID, &oidcop.Authorization{Scopes: []string{"openid"}}); err != nil {
 					t.Fatalf("error finishing authorization: %v", err)
 				}
 			})
 
 			mux.HandleFunc("/token", func(w http.ResponseWriter, req *http.Request) {
-				err := oidcHandlers.Token(w, req, func(tr *core.TokenRequest) (*core.TokenResponse, error) {
-					return &core.TokenResponse{
+				err := oidcHandlers.Token(w, req, func(tr *oidcop.TokenRequest) (*oidcop.TokenResponse, error) {
+					return &oidcop.TokenResponse{
 						IDToken:                tr.PrefillIDToken("test-sub", time.Now().Add(1*time.Minute)),
 						AccessToken:            tr.PrefillAccessToken("test-sub", time.Now().Add(1*time.Minute)),
 						IssueRefreshToken:      true,
@@ -127,7 +127,7 @@ func TestE2E(t *testing.T) {
 			})
 
 			mux.HandleFunc("/userinfo", func(w http.ResponseWriter, req *http.Request) {
-				err := oidcHandlers.Userinfo(w, req, func(w io.Writer, _ *core.UserinfoRequest) error {
+				err := oidcHandlers.Userinfo(w, req, func(w io.Writer, _ *oidcop.UserinfoRequest) error {
 					fmt.Fprintf(w, `{
 						"sub": "test-sub"
 					}`)
@@ -276,7 +276,7 @@ func (s *stubSMGR) NewID() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func (s *stubSMGR) GetSession(_ context.Context, sessionID string, into core.Session) (found bool, err error) {
+func (s *stubSMGR) GetSession(_ context.Context, sessionID string, into oidcop.Session) (found bool, err error) {
 	sess, ok := s.sessions[sessionID]
 	if !ok {
 		return false, nil
@@ -287,7 +287,7 @@ func (s *stubSMGR) GetSession(_ context.Context, sessionID string, into core.Ses
 	return true, nil
 }
 
-func (s *stubSMGR) PutSession(_ context.Context, sess core.Session) error {
+func (s *stubSMGR) PutSession(_ context.Context, sess oidcop.Session) error {
 	if sess.ID() == "" {
 		return fmt.Errorf("session has no ID")
 	}
@@ -332,7 +332,7 @@ var (
 	thMu sync.Mutex
 )
 
-func testKeysetHandle() core.KeysetHandle {
+func testKeysetHandle() oidcop.KeysetHandle {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
@@ -344,5 +344,5 @@ func testKeysetHandle() core.KeysetHandle {
 		th = h
 	}
 
-	return core.NewStaticKeysetHandle(th)
+	return oidcop.NewStaticKeysetHandle(th)
 }

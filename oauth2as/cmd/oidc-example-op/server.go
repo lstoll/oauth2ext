@@ -11,7 +11,7 @@ import (
 
 	"net/http"
 
-	"github.com/lstoll/oidc/core"
+	"github.com/lstoll/oidcop"
 )
 
 const (
@@ -19,7 +19,7 @@ const (
 )
 
 type server struct {
-	oidc            *core.OIDC
+	oidc            *oidcop.OIDC
 	mux             *http.ServeMux
 	muxSetup        sync.Once
 	storage         *storage
@@ -89,7 +89,7 @@ func (s *server) finishAuthorization(w http.ResponseWriter, req *http.Request) {
 		amr = strings.Split(req.FormValue("amr"), ",")
 	}
 
-	auth := &core.Authorization{
+	auth := &oidcop.Authorization{
 		Scopes: strings.Split(req.FormValue("scopes"), " "),
 		ACR:    req.FormValue("acr"),
 		AMR:    amr,
@@ -116,7 +116,7 @@ func (s *server) finishAuthorization(w http.ResponseWriter, req *http.Request) {
 }
 
 func (s *server) token(w http.ResponseWriter, req *http.Request) {
-	err := s.oidc.Token(w, req, func(tr *core.TokenRequest) (*core.TokenResponse, error) {
+	err := s.oidc.Token(w, req, func(tr *oidcop.TokenRequest) (*oidcop.TokenResponse, error) {
 		// This is how we could update our metadata
 		meta := s.storage.sessions[tr.SessionID].Meta
 		s.storage.sessions[tr.SessionID].Meta = meta
@@ -124,7 +124,7 @@ func (s *server) token(w http.ResponseWriter, req *http.Request) {
 		idt := tr.PrefillIDToken("subject", time.Now().Add(s.tokenValidFor))
 		at := tr.PrefillAccessToken("subject", time.Now().Add(s.tokenValidFor))
 
-		return &core.TokenResponse{
+		return &oidcop.TokenResponse{
 			RefreshTokenValidUntil: time.Now().Add(s.refreshValidFor),
 			IssueRefreshToken:      tr.SessionRefreshable, // always allow it if we want it
 			IDToken:                idt,

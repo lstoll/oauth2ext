@@ -1,62 +1,82 @@
-package oidc
+package oidcop
 
 import (
-	"encoding/json"
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"time"
 
-	"golang.org/x/oauth2"
+	corev1 "github.com/lstoll/oidcop/proto/core/v1"
+	"golang.org/x/crypto/bcrypt"
+	"google.golang.org/protobuf/proto"
 )
 
-// IDToken extracts the ID token from the given oauth2 Token
-func IDToken(tok *oauth2.Token) (string, bool) {
-	idt, ok := tok.Extra("id_token").(string)
-	return idt, ok
-}
+const (
+	tokenLen = 48
+)
 
-// TokenWithID reconstructs the oauth2 token, with the ID token added. This
-// exists because the serialized form of the oauth2 token does not contain the
-// extra/ID token info, so this safely allows a token to be stored and t
-func TokenWithID(tok *oauth2.Token, idToken string) *oauth2.Token {
-	return nil
-}
-
-// MarshaledToken is a wrapper for an oauth2 token, that allows the ID Token to
-// be serialized as well if present. This is used when a token needs to be
-// saved/restored.
-type MarshaledToken struct {
-	*oauth2.Token
-}
-
-// marshaledToken is our internal state we serialize/deserialize from,
-// so we can avoid exposing the ID token directly and in conflict with the
-type marshaledToken struct {
-	*oauth2.Token
-	IDToken string `json:"id_token,omitempty"`
-}
-
-func (t *MarshaledToken) UnmarshalJSON(b []byte) error {
-	var mt marshaledToken
-	if err := json.Unmarshal(b, &mt); err != nil {
-		return err
-	}
-	if t == nil {
-		nt := new(MarshaledToken)
-		*t = *nt
-	}
-	t.Token = mt.Token
-	if mt.IDToken != "" {
-		t.Token = t.Token.WithExtra(map[string]any{
-			"id_token": mt.IDToken,
-		})
-	}
-	return nil
-}
-
-func (t MarshaledToken) MarshalJSON() ([]byte, error) {
-	idt, _ := IDToken(t.Token)
-	mt := marshaledToken{
-		Token:   t.Token,
-		IDToken: idt,
+// newToken generates a fresh token, from random data. The user and stored
+// states are returned.
+func newToken(sessID string, expires time.Time) (*corev1.UserToken, *accessToken, error) {
+	b := make([]byte, tokenLen)
+	if _, err := rand.Read(b); err != nil {
+		return nil, nil, fmt.Errorf("error reading random data: %w", err)
 	}
 
-	return json.Marshal(mt)
+	bc, err := bcrypt.GenerateFromPassword(b, bcrypt.DefaultCost)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to hash password: %w", err)
+	}
+
+	ut := &corev1.UserToken{
+		Token:     b,
+		SessionId: sessID,
+	}
+
+	st := &accessToken{
+		Bcrypted: bc,
+		Expiry:   expires,
+	}
+
+	return ut, st, nil
+}
+
+// tokensMatch compares a deserialized user token, and it's corresponding stored
+// token. if the user token value hashes to the same value on the server.
+func tokensMatch(user *corev1.UserToken, stored *accessToken) (bool, error) {
+	err := bcrypt.CompareHashAndPassword(stored.Bcrypted, user.Token)
+	if err == nil {
+		// no error in comparison, they match
+		return true, nil
+	} else if err == bcrypt.ErrMismatchedHashAndPassword {
+		// they do not match, this isn't an error per se.
+		return false, nil
+	}
+	return false, fmt.Errorf("failed comparing tokens: %w", err)
+}
+
+// marshalToken returns a user-friendly version of the token. This is the base64
+// serialized marshaled proto
+func marshalToken(user *corev1.UserToken) (string, error) {
+	b, err := proto.Marshal(user)
+	if err != nil {
+		return "", fmt.Errorf("couldn't marshal user token to proto: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func unmarshalToken(tok string) (*corev1.UserToken, error) {
+	b, err := base64.RawURLEncoding.DecodeString(tok)
+	if _, ok := err.(base64.CorruptInputError); ok {
+		// token may have been encoded with previously used base64.RawStdEncoding encoder
+		b, err = base64.RawStdEncoding.DecodeString(tok)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode of token failed: %w", err)
+	}
+	ut := &corev1.UserToken{}
+	if err := proto.Unmarshal(b, ut); err != nil {
+		return nil, fmt.Errorf("proto decoding of token failed: %w", err)
+	}
+	return ut, err
 }

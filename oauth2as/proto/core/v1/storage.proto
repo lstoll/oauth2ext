@@ -2,7 +2,7 @@ syntax = "proto3";
 
 import "google/protobuf/timestamp.proto";
 
-package oidc.core.v1;
+package oidc.oidcop.v1;
 option go_package = ".;core";
 
 // StoredToken represents the session-persisted state of a token

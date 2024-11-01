@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/lstoll/oidc/core"
+	"github.com/lstoll/oidcop"
 )
 
 type metadata struct {
@@ -39,7 +39,7 @@ func (s *storage) NewID() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func (s *storage) GetSession(_ context.Context, sessionID string, into core.Session) (bool, error) {
+func (s *storage) GetSession(_ context.Context, sessionID string, into oidcop.Session) (bool, error) {
 	sess, ok := s.sessions[sessionID]
 	if !ok {
 		return false, nil
@@ -50,7 +50,7 @@ func (s *storage) GetSession(_ context.Context, sessionID string, into core.Sess
 	return true, nil
 }
 
-func (s *storage) PutSession(_ context.Context, sess core.Session) error {
+func (s *storage) PutSession(_ context.Context, sess oidcop.Session) error {
 	if sess.ID() == "" {
 		return fmt.Errorf("session has no ID")
 	}

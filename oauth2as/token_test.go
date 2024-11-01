@@ -1,41 +1,69 @@
-package oidc
+package oidcop
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
-	"golang.org/x/oauth2"
+	"google.golang.org/protobuf/proto"
 )
 
-func TestMarshaledToken(t *testing.T) {
-	in := &oauth2.Token{
-		AccessToken:  "aaaaa",
-		RefreshToken: "bbbbbb",
-		Expiry:       time.Now(),
-	}
-	in = in.WithExtra(map[string]any{"id_token": "cccccc"})
+func TestTokens(t *testing.T) {
+	sessID := mustGenerateID()
 
-	mt := &MarshaledToken{in}
-
-	b, err := json.Marshal(mt)
+	utok, stok, err := newToken(sessID, time.Now().Add(1*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got := new(MarshaledToken)
-	if err := json.Unmarshal(b, got); err != nil {
+	// get what we send to the user
+	utokstr, err := marshalToken(utok)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if diff := cmp.Diff(in, got.Token, cmpopts.IgnoreUnexported(oauth2.Token{})); diff != "" {
-		t.Error(diff)
+	// parse it back, maje sure they compare
+	gotTok, err := unmarshalToken(utokstr)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	idt, ok := IDToken(got.Token)
-	if !ok || idt != "cccccc" {
-		t.Errorf("want idt to exist and be cccccc, got: %s (exist %t)", idt, ok)
+	eq, err := tokensMatch(gotTok, stok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eq {
+		t.Error("want: tokens to be equal, got not equal")
+	}
+
+	utok2, _, err := newToken(sessID, time.Now().Add(1*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq, err = tokensMatch(utok2, stok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eq {
+		t.Error("want: tokens to not be equal, got equal")
+	}
+}
+
+func TestUnmarshalToken(t *testing.T) {
+	encodedURLToken := "ChZXb2ozLXFJS0xEbzg5aDlaYXNaTmF3EjAezFlLpPCa5dMEOTNT0rpUnQUQrFZnKxV4AMvV2UzI7HXlLSSem-PVW-68oJDOA08"
+	encodedStdToken := "ChZXb2ozLXFJS0xEbzg5aDlaYXNaTmF3EjAezFlLpPCa5dMEOTNT0rpUnQUQrFZnKxV4AMvV2UzI7HXlLSSem+PVW+68oJDOA08"
+
+	urlToken, err := unmarshalToken(encodedURLToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdToken, err := unmarshalToken(encodedStdToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !proto.Equal(urlToken, stdToken) {
+		t.Error("want: url encoded and std encoded tokens to be equal, got not equal")
 	}
 }

@@ -1,3 +1,3 @@
-# oidc
+# oidcop
 
-Experimental OIDC library, for server and client use.
+Go library for implementing OIDC OPs (Servers)

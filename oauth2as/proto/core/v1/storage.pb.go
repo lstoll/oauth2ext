@@ -174,12 +174,12 @@ func file_storage_proto_rawDescGZIP() []byte {
 
 var file_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_storage_proto_goTypes = []interface{}{
-	(*StoredToken)(nil),           // 0: oidc.core.v1.StoredToken
-	(*UserToken)(nil),             // 1: oidc.core.v1.UserToken
+	(*StoredToken)(nil),           // 0: oidc.oidcop.v1.StoredToken
+	(*UserToken)(nil),             // 1: oidc.oidcop.v1.UserToken
 	(*timestamppb.Timestamp)(nil), // 2: google.protobuf.Timestamp
 }
 var file_storage_proto_depIdxs = []int32{
-	2, // 0: oidc.core.v1.StoredToken.expires_at:type_name -> google.protobuf.Timestamp
+	2, // 0: oidc.oidcop.v1.StoredToken.expires_at:type_name -> google.protobuf.Timestamp
 	1, // [1:1] is the sub-list for method output_type
 	1, // [1:1] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name

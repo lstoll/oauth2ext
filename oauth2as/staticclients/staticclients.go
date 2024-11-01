@@ -20,7 +20,7 @@ var (
 	reValidPublicRedirectURI = regexp.MustCompile(`\Ahttp://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?(?:|/[A-Za-z0-9./_-]{0,1000})\z`)
 )
 
-// Clients implements the core.ClientSource against a static list of clients.
+// Clients implements the oidcop.ClientSource against a static list of clients.
 // The type is tagged, to enable loading from JSON/YAML. This can be created
 // directly, or via unserializing / using the ExpandUnmarshal function
 type Clients struct {

@@ -1,4 +1,4 @@
-package core
+package oidcop
 
 import (
 	"encoding/json"
@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/lstoll/oidc/oauth2"
+	"github.com/lstoll/oidcop/oauth2"
 )
 
 func TestParseToken(t *testing.T) {

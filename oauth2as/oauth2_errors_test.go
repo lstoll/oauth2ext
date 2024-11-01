@@ -1,4 +1,4 @@
-package core
+package oidcop
 
 import (
 	"encoding/json"
@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/lstoll/oidc/oauth2"
+	"github.com/lstoll/oidcop/oauth2"
 	"golang.org/x/text/language"
 	"golang.org/x/text/search"
 )

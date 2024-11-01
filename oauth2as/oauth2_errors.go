@@ -1,4 +1,4 @@
-package core
+package oidcop
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/lstoll/oidc/oauth2"
+	"github.com/lstoll/oidcop/oauth2"
 )
 
 // writeError handles the passed error appropriately. After calling this, the

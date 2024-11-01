@@ -1,4 +1,4 @@
-package core
+package oidcop
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lstoll/oidc/oauth2"
+	"github.com/lstoll/oidcop/oauth2"
 )
 
 type GrantType string

@@ -1,4 +1,4 @@
-package core
+package oidcop
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidc/oauth2"
+	"github.com/lstoll/oidcop/oauth2"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )

@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidc/core"
-	"github.com/lstoll/oidc/core/staticclients"
-	"github.com/lstoll/oidc/discovery"
+	"github.com/lstoll/oidcop"
+	"github.com/lstoll/oidcop/discovery"
+	"github.com/lstoll/oidcop/staticclients"
 )
 
 //go:embed clients.json
@@ -26,11 +26,11 @@ func main() {
 
 	iss := "http://localhost:8085"
 
-	core, err := core.New(&core.Config{
+	core, err := oidcop.New(&oidcop.Config{
 		Issuer:           iss,
 		AuthValidityTime: 5 * time.Minute,
 		CodeValidityTime: 5 * time.Minute,
-	}, smgr, clients, core.NewStaticKeysetHandle(privh))
+	}, smgr, clients, oidcop.NewStaticKeysetHandle(privh))
 	if err != nil {
 		log.Fatalf("Failed to create OIDC server instance: %v", err)
 	}
