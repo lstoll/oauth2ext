@@ -1,4 +1,4 @@
-// Package core is an library implementation of helpers for implementing the
+// Package oidcop is an library implementation of helpers for implementing the
 // core OIDC specification
 // (https://openid.net/specs/openid-connect-core-1_0.html). It aims to provide
 // the tools needed to build a compliant implementation of the specification.

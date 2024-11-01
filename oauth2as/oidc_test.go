@@ -14,7 +14,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidcop/oauth2"
+	"github.com/lstoll/oidcop/internal/oauth2"
 	corev1 "github.com/lstoll/oidcop/proto/core/v1"
 	"github.com/lstoll/oidcop/staticclients"
 	"github.com/tink-crypto/tink-go/v2/jwt"
@@ -112,7 +112,7 @@ func TestStartAuthorization(t *testing.T) {
 				"response_type": []string{"token"},
 				"redirect_uri":  []string{redirectURI},
 			},
-			WantReturnedErrMatch: matchAuthErrCode(authErrorCodeUnsupportedResponseType),
+			WantReturnedErrMatch: matchAuthErrCode(oauth2.AuthErrorCodeUnsupportedResponseType),
 			WantHTTPStatus:       302,
 		},
 	} {
@@ -409,8 +409,8 @@ func TestToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeSess(t, o.smgr)
 
-		treq := &tokenRequest{
-			GrantType:    GrantTypeAuthorizationCode,
+		treq := &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -431,8 +431,8 @@ func TestToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeSess(t, o.smgr)
 
-		treq := &tokenRequest{
-			GrantType:    GrantTypeAuthorizationCode,
+		treq := &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -455,8 +455,8 @@ func TestToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeSess(t, o.smgr)
 
-		treq := &tokenRequest{
-			GrantType:    GrantTypeAuthorizationCode,
+		treq := &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -473,8 +473,8 @@ func TestToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeSess(t, o.smgr)
 
-		treq := &tokenRequest{
-			GrantType:   GrantTypeAuthorizationCode,
+		treq := &oauth2.TokenRequest{
+			GrantType:   oauth2.GrantTypeAuthorizationCode,
 			Code:        codeToken,
 			RedirectURI: redirectURI,
 			// This is not the credentials the code should be tracking, but are
@@ -493,8 +493,8 @@ func TestToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeSess(t, o.smgr)
 
-		treq := &tokenRequest{
-			GrantType:    GrantTypeAuthorizationCode,
+		treq := &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -536,8 +536,8 @@ func TestToken(t *testing.T) {
 		}
 
 		// exchange the code for access/refresh tokens first
-		treq := &tokenRequest{
-			GrantType:    GrantTypeAuthorizationCode,
+		treq := &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -561,8 +561,8 @@ func TestToken(t *testing.T) {
 
 		// keep trying to refresh
 		for i := 0; i < 5; i++ {
-			treq = &tokenRequest{
-				GrantType:    GrantTypeRefreshToken,
+			treq = &oauth2.TokenRequest{
+				GrantType:    oauth2.GrantTypeRefreshToken,
 				RefreshToken: refreshToken,
 				ClientID:     clientID,
 				ClientSecret: clientSecret,
@@ -587,8 +587,8 @@ func TestToken(t *testing.T) {
 		// march to the future, when we should be expired
 		o.now = func() time.Time { return time.Now().Add(1 * time.Hour) }
 
-		treq = &tokenRequest{
-			GrantType:    GrantTypeRefreshToken,
+		treq = &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeRefreshToken,
 			RefreshToken: refreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
@@ -619,8 +619,8 @@ func TestToken(t *testing.T) {
 		}
 
 		// exchange the code for access/refresh tokens first
-		treq := &tokenRequest{
-			GrantType:    GrantTypeAuthorizationCode,
+		treq := &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -635,8 +635,8 @@ func TestToken(t *testing.T) {
 		// try and refresh, and observe intentional unauth error
 		returnErr = &unauthorizedErrImpl{error: errors.New(errDesc)}
 
-		treq = &tokenRequest{
-			GrantType:    GrantTypeRefreshToken,
+		treq = &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeRefreshToken,
 			RefreshToken: tresp.RefreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
@@ -658,8 +658,8 @@ func TestToken(t *testing.T) {
 		// refresh with generic err
 		returnErr = errors.New("boomtown")
 
-		treq = &tokenRequest{
-			GrantType:    GrantTypeRefreshToken,
+		treq = &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeRefreshToken,
 			RefreshToken: tresp.RefreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
@@ -670,7 +670,7 @@ func TestToken(t *testing.T) {
 		if err == nil {
 			t.Fatal("want error refreshing, got none")
 		}
-		if _, ok = err.(*httpError); !ok {
+		if _, ok = err.(*oauth2.HTTPError); !ok {
 			t.Fatalf("want http error, got %T", err)
 		}
 	})
@@ -682,7 +682,7 @@ func TestFetchCodeSession(t *testing.T) {
 		Name string
 		// Setup should return both a session to be persisted, and a token
 		// request to use.
-		Setup func(t *testing.T) (sess *sessionV2, tr *tokenRequest)
+		Setup func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest)
 		// WantErrMatch signifies that we expect an error. If we don't, it is
 		// expected the retrieved session matches the saved session.
 		WantErrMatch func(error) bool
@@ -691,7 +691,7 @@ func TestFetchCodeSession(t *testing.T) {
 	}{
 		{
 			Name: "Valid session, valid request",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *tokenRequest) {
+			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
 				sid := mustGenerateID()
 				u, s, err := newToken(sid, time.Now().Add(1*time.Minute))
 				if err != nil {
@@ -703,7 +703,7 @@ func TestFetchCodeSession(t *testing.T) {
 					AuthCode: s,
 				}
 
-				tr = &tokenRequest{
+				tr = &oauth2.TokenRequest{
 					Code: mustMarshal(u),
 				}
 
@@ -720,7 +720,7 @@ func TestFetchCodeSession(t *testing.T) {
 		},
 		{
 			Name: "Code that does not correspond to a session",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *tokenRequest) {
+			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
 				badsid := mustGenerateID()
 				u, _, err := newToken(badsid, time.Now().Add(1*time.Minute))
 				if err != nil {
@@ -738,7 +738,7 @@ func TestFetchCodeSession(t *testing.T) {
 					AuthCode: s,
 				}
 
-				tr = &tokenRequest{
+				tr = &oauth2.TokenRequest{
 					Code: mustMarshal(u),
 				}
 
@@ -748,7 +748,7 @@ func TestFetchCodeSession(t *testing.T) {
 		},
 		{
 			Name: "Token with bad data",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *tokenRequest) {
+			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
 				sid := mustGenerateID()
 				u, s, err := newToken(sid, time.Now().Add(1*time.Minute))
 				if err != nil {
@@ -763,7 +763,7 @@ func TestFetchCodeSession(t *testing.T) {
 					AuthCode: s,
 				}
 
-				tr = &tokenRequest{
+				tr = &oauth2.TokenRequest{
 					Code: mustMarshal(u),
 				}
 
@@ -773,7 +773,7 @@ func TestFetchCodeSession(t *testing.T) {
 		},
 		{
 			Name: "Code that has expiration time in the past",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *tokenRequest) {
+			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
 				sid := mustGenerateID()
 				u, s, err := newToken(sid, time.Now().Add(-1*time.Minute))
 				if err != nil {
@@ -786,7 +786,7 @@ func TestFetchCodeSession(t *testing.T) {
 					Expiry:   time.Now().Add(1 * time.Minute),
 				}
 
-				tr = &tokenRequest{
+				tr = &oauth2.TokenRequest{
 					Code: mustMarshal(u),
 				}
 
@@ -830,7 +830,7 @@ func TestFetchRefreshSession(t *testing.T) {
 		Name string
 		// Setup should return both a session to be persisted, and a token
 		// request to use.
-		Setup func(t *testing.T) (sess *sessionV2, tr *tokenRequest)
+		Setup func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest)
 		// WantErrMatch signifies that we expect an error. If we don't, it is
 		// expected the retrieved session matches the saved session.
 		WantErrMatch func(error) bool
@@ -839,7 +839,7 @@ func TestFetchRefreshSession(t *testing.T) {
 	}{
 		{
 			Name: "Valid refresh token for a session",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *tokenRequest) {
+			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
 				sid := mustGenerateID()
 				u, s, err := newToken(sid, time.Now().Add(1*time.Minute))
 				if err != nil {
@@ -852,7 +852,7 @@ func TestFetchRefreshSession(t *testing.T) {
 					Expiry:       time.Now().Add(1 * time.Minute),
 				}
 
-				tr = &tokenRequest{
+				tr = &oauth2.TokenRequest{
 					RefreshToken: mustMarshal(u),
 				}
 
@@ -1043,9 +1043,9 @@ func checkErrMatcher(t *testing.T, matcher func(error) bool, err error) {
 	}
 }
 
-func matchAuthErrCode(code authErrorCode) func(error) bool {
+func matchAuthErrCode(code oauth2.AuthErrorCode) func(error) bool {
 	return func(err error) bool {
-		aerr, ok := err.(*authError)
+		aerr, ok := err.(*oauth2.AuthError)
 		if !ok {
 			return false
 		}
@@ -1065,7 +1065,7 @@ func matchTokenErrCode(code oauth2.TokenErrorCode) func(error) bool {
 
 func matchHTTPErrStatus(code int) func(error) bool {
 	return func(err error) bool {
-		herr, ok := err.(*httpError)
+		herr, ok := err.(*oauth2.HTTPError)
 		if !ok {
 			return false
 		}

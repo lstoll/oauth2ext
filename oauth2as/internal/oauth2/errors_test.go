@@ -1,4 +1,4 @@
-package oidcop
+package oauth2
 
 import (
 	"encoding/json"
@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/lstoll/oidcop/oauth2"
 	"golang.org/x/text/language"
 	"golang.org/x/text/search"
 )
@@ -35,7 +34,7 @@ func TestWriteError(t *testing.T) {
 		},
 		{
 			Name: "HTTP error should never expose internal details",
-			Err:  &httpError{Cause: errors.New("cause"), CauseMsg: "causemsg"},
+			Err:  &HTTPError{Cause: errors.New("cause"), CauseMsg: "causemsg"},
 			Cmp: func(t *testing.T, rec *httptest.ResponseRecorder) {
 				if containsInsensitive(rec.Body.String(), "cause") {
 					t.Error("generic error response body should never expose error details to user")
@@ -47,7 +46,7 @@ func TestWriteError(t *testing.T) {
 		},
 		{
 			Name: "HTTP error should pass through status",
-			Err:  &httpError{Code: http.StatusNotImplemented},
+			Err:  &HTTPError{Code: http.StatusNotImplemented},
 			Cmp: func(t *testing.T, rec *httptest.ResponseRecorder) {
 				if rec.Code != http.StatusNotImplemented {
 					t.Error("error status should be 501")
@@ -56,7 +55,7 @@ func TestWriteError(t *testing.T) {
 		},
 		{
 			Name: "HTTP error should pass message to user",
-			Err:  &httpError{Message: "usermessage"},
+			Err:  &HTTPError{Message: "usermessage"},
 			Cmp: func(t *testing.T, rec *httptest.ResponseRecorder) {
 				if !containsInsensitive(rec.Body.String(), "usermessage") {
 					t.Error("http error should pass message to user")
@@ -65,7 +64,7 @@ func TestWriteError(t *testing.T) {
 		},
 		{
 			Name: "Auth error should redirect to the given callback passing details",
-			Err:  &authError{State: "state", Code: authErrorCodeAccessDenied, Description: "access denied", RedirectURI: "https://callback"},
+			Err:  &AuthError{State: "state", Code: AuthErrorCodeAccessDenied, Description: "access denied", RedirectURI: "https://callback"},
 			Cmp: func(t *testing.T, rec *httptest.ResponseRecorder) {
 				if rec.Code != 302 {
 					t.Errorf("want 302 redir, got %d", rec.Code)
@@ -87,8 +86,8 @@ func TestWriteError(t *testing.T) {
 				if q.Get("state") != "state" {
 					t.Errorf("want state, got: %s", q.Get("state"))
 				}
-				if q.Get("error") != string(authErrorCodeAccessDenied) {
-					t.Errorf("want error %s, got: %s", string(authErrorCodeAccessDenied), q.Get("error"))
+				if q.Get("error") != string(AuthErrorCodeAccessDenied) {
+					t.Errorf("want error %s, got: %s", string(AuthErrorCodeAccessDenied), q.Get("error"))
 				}
 				if q.Get("error_description") != "access denied" {
 					t.Errorf("want error \"access denied\", got: %s", q.Get("error_description"))
@@ -97,20 +96,20 @@ func TestWriteError(t *testing.T) {
 		},
 		{
 			Name: "Token error should return JSON details",
-			Err:  &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "grant is bad", ErrorURI: "https://error/info"},
+			Err:  &TokenError{ErrorCode: TokenErrorCodeInvalidGrant, Description: "grant is bad", ErrorURI: "https://error/info"},
 			Cmp: func(t *testing.T, rec *httptest.ResponseRecorder) {
 				if rec.Code != http.StatusBadRequest {
 					t.Errorf("want 400, got %d", rec.Code)
 				}
 
-				te := &oauth2.TokenError{}
+				te := &TokenError{}
 
 				if err := json.NewDecoder(rec.Body).Decode(te); err != nil {
 					t.Fatalf("failed to unmarshal response JSON: %v", err)
 				}
 
-				if te.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
-					t.Errorf("want code %s, got %s", oauth2.TokenErrorCodeInvalidClient, te.ErrorCode)
+				if te.ErrorCode != TokenErrorCodeInvalidGrant {
+					t.Errorf("want code %s, got %s", TokenErrorCodeInvalidClient, te.ErrorCode)
 				}
 
 				if te.Description != "grant is bad" {
@@ -120,7 +119,7 @@ func TestWriteError(t *testing.T) {
 		},
 		{
 			Name: "Token error can set www-authenticate header",
-			Err:  &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidClient, WWWAuthenticate: "Basic"},
+			Err:  &TokenError{ErrorCode: TokenErrorCodeInvalidClient, WWWAuthenticate: "Basic"},
 			Cmp: func(t *testing.T, rec *httptest.ResponseRecorder) {
 				if rec.Code != http.StatusUnauthorized {
 					t.Errorf("want 401, got %d", rec.Code)
@@ -133,7 +132,7 @@ func TestWriteError(t *testing.T) {
 		},
 		{
 			Name: "HTTP error can set WWW-Authenticate header",
-			Err:  &httpError{Message: "usermessage", Code: 401, WWWAuthenticate: "error"},
+			Err:  &HTTPError{Message: "usermessage", Code: 401, WWWAuthenticate: "error"},
 			Cmp: func(t *testing.T, rec *httptest.ResponseRecorder) {
 				if rec.Code != http.StatusUnauthorized {
 					t.Errorf("want 401, got %d", rec.Code)
@@ -149,7 +148,7 @@ func TestWriteError(t *testing.T) {
 			req := httptest.NewRequest("GET", "/", nil)
 			rec := httptest.NewRecorder()
 
-			err := writeError(rec, req, tc.Err)
+			err := WriteError(rec, req, tc.Err)
 			if err != nil {
 				t.Fatalf("unexpected error calling writeError: %v", err)
 			}
@@ -162,22 +161,22 @@ func TestWriteError(t *testing.T) {
 func TestBearerError(t *testing.T) {
 	for _, tc := range []struct {
 		Name  string
-		Error *bearerError
+		Error *BearerError
 		Want  string
 	}{
 		{
 			Name:  "Empty",
-			Error: &bearerError{},
+			Error: &BearerError{},
 			Want:  "Bearer ",
 		},
 		{
 			Name:  "Everything",
-			Error: &bearerError{Realm: "realm", Code: bearerErrorCodeInvalidRequest, Description: "everything in here"},
+			Error: &BearerError{Realm: "realm", Code: BearerErrorCodeInvalidRequest, Description: "everything in here"},
 			Want:  `Bearer realm="realm" error="invalid_request" error_description="everything in here"`,
 		},
 		{
 			Name:  "Code only",
-			Error: &bearerError{Code: bearerErrorCodeInvalidToken},
+			Error: &BearerError{Code: BearerErrorCodeInvalidToken},
 			Want:  `Bearer error="invalid_token"`,
 		},
 	} {
