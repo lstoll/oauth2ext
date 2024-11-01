@@ -28,6 +28,7 @@ type baseOpts struct {
 	PortHigh     int
 	Offline      bool
 	SkipCache    bool
+	Scopes       string
 }
 
 type rawOpts struct {
@@ -52,6 +53,7 @@ func main() {
 	baseFs.IntVar(&baseFlags.PortHigh, "port-high", 0, "Highest TCP port to bind on localhost for callbacks. By default, a port will be randomly assigned by the operating system.")
 	baseFs.BoolVar(&baseFlags.Offline, "offline", baseFlags.Offline, "Offline use (request refresh token). This token will be cached locally, can be used to avoid re-launching the auth flow when the token expires")
 	baseFs.BoolVar(&baseFlags.SkipCache, "skip-cache", baseFlags.SkipCache, "Do not perform any local caching on token")
+	baseFs.StringVar(&baseFlags.Scopes, "scopes", baseFlags.Scopes, "Comma separated list of extra scopes to request")
 
 	var subcommands []*subCommand
 
@@ -145,6 +147,9 @@ func main() {
 	scopes := []string{oidc.ScopeOpenID}
 	if baseFlags.Offline {
 		scopes = append(scopes, "offline")
+	}
+	if baseFlags.Scopes != "" {
+		scopes = append(scopes, strings.Split(baseFlags.Scopes, ",")...)
 	}
 
 	oa2Cfg := oauth2.Config{
