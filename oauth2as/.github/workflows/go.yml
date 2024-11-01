@@ -8,7 +8,7 @@ jobs:
     steps:
 
     - name: Set up Go stable
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version: stable
       id: go
@@ -26,6 +26,6 @@ jobs:
       run: make test
 
     - name: Lint
-      uses: golangci/golangci-lint-action@v3
+      uses: golangci/golangci-lint-action@v6
       with:
         version: latest
