@@ -1,4 +1,4 @@
-package oidcop
+package oauth2
 
 import (
 	"encoding/json"
@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/lstoll/oidcop/oauth2"
 )
 
 func TestParseToken(t *testing.T) {
@@ -18,8 +17,8 @@ func TestParseToken(t *testing.T) {
 		Name        string
 		Req         func() *http.Request
 		WantErr     bool
-		WantErrCode oauth2.TokenErrorCode
-		Want        *tokenRequest
+		WantErrCode TokenErrorCode
+		Want        *TokenRequest
 	}{
 		{
 			Name: "Bad method",
@@ -37,7 +36,7 @@ func TestParseToken(t *testing.T) {
 				"client_secret": "secret",
 				"grant_type":    "authorization_code",
 			}),
-			Want: &tokenRequest{
+			Want: &TokenRequest{
 				GrantType:    GrantTypeAuthorizationCode,
 				Code:         "acode",
 				RedirectURI:  "https://redirect",
@@ -56,7 +55,7 @@ func TestParseToken(t *testing.T) {
 				req.SetBasicAuth("clientuser", "clientsecret")
 				return req
 			},
-			Want: &tokenRequest{
+			Want: &TokenRequest{
 				GrantType:    GrantTypeAuthorizationCode,
 				Code:         "acode",
 				RedirectURI:  "https://redirect",
@@ -73,7 +72,7 @@ func TestParseToken(t *testing.T) {
 				"client_secret": "secret",
 			}),
 			WantErr:     true,
-			WantErrCode: oauth2.TokenErrorCodeInvalidGrant,
+			WantErrCode: TokenErrorCodeInvalidGrant,
 		},
 		{
 			Name: "Valid refresh request succeeds",
@@ -83,7 +82,7 @@ func TestParseToken(t *testing.T) {
 				"client_id":     "client",
 				"client_secret": "secret",
 			}),
-			Want: &tokenRequest{
+			Want: &TokenRequest{
 				GrantType:    GrantTypeRefreshToken,
 				RefreshToken: "refreshtok",
 				ClientID:     "client",
@@ -98,7 +97,7 @@ func TestParseToken(t *testing.T) {
 				"client_secret": "secret",
 			}),
 			WantErr:     true,
-			WantErrCode: oauth2.TokenErrorCodeInvalidRequest,
+			WantErrCode: TokenErrorCodeInvalidRequest,
 		},
 		{
 			Name: "Escaped basic auth creds", // https://tools.ietf.org/html/rfc6749#section-2.3.1
@@ -112,7 +111,7 @@ func TestParseToken(t *testing.T) {
 				req.SetBasicAuth(url.QueryEscape("cl#i$nt"), url.QueryEscape("sec=ret%"))
 				return req
 			},
-			Want: &tokenRequest{
+			Want: &TokenRequest{
 				GrantType:    GrantTypeAuthorizationCode,
 				Code:         "acode",
 				RedirectURI:  "https://redirect",
@@ -122,15 +121,15 @@ func TestParseToken(t *testing.T) {
 		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
-			resp, err := parseTokenRequest(tc.Req())
+			resp, err := ParseTokenRequest(tc.Req())
 			if tc.WantErr && err == nil {
 				t.Fatal("want err, got none")
 			}
 			if !tc.WantErr && err != nil {
 				t.Fatalf("want no error, got: %v", err)
 			}
-			if tc.WantErrCode != oauth2.TokenErrorCode("") {
-				terr, ok := err.(*oauth2.TokenError)
+			if tc.WantErrCode != TokenErrorCode("") {
+				terr, ok := err.(*TokenError)
 				if !ok {
 					t.Fatalf("want tokenError, got: %v of type %T", err, err)
 				}
@@ -162,12 +161,12 @@ func queryReq(query map[string]string) func() *http.Request {
 func TestWriteTokenResponse(t *testing.T) {
 	for _, tc := range []struct {
 		Name string
-		Resp *tokenResponse
+		Resp *TokenResponse
 		Want map[string]interface{}
 	}{
 		{
 			Name: "valid response",
-			Resp: &tokenResponse{
+			Resp: &TokenResponse{
 				AccessToken:  "access",
 				TokenType:    "Bearer",
 				ExpiresIn:    1 * time.Minute,
@@ -190,7 +189,7 @@ func TestWriteTokenResponse(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			w := httptest.NewRecorder()
 
-			_ = writeTokenResponse(w, tc.Resp)
+			_ = WriteTokenResponse(w, tc.Resp)
 
 			if w.Result().StatusCode != 200 {
 				t.Errorf("want OK status, got %d", w.Result().StatusCode)

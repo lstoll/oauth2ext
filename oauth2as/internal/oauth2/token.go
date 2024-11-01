@@ -1,4 +1,4 @@
-package oidcop
+package oauth2
 
 import (
 	"encoding/json"
@@ -7,8 +7,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/lstoll/oidcop/oauth2"
 )
 
 type GrantType string
@@ -18,7 +16,7 @@ const (
 	GrantTypeRefreshToken      GrantType = "refresh_token"
 )
 
-type tokenRequest struct {
+type TokenRequest struct {
 	GrantType    GrantType
 	Code         string
 	RefreshToken string
@@ -30,15 +28,15 @@ type tokenRequest struct {
 	CodeVerifier string
 }
 
-// parseTokenRequest parses the information from a request for an access token.
+// ParseTokenRequest parses the information from a request for an access token.
 //
 // https://tools.ietf.org/html/rfc6749#section-4.1.3
-func parseTokenRequest(req *http.Request) (*tokenRequest, error) {
+func ParseTokenRequest(req *http.Request) (*TokenRequest, error) {
 	if req.Method != http.MethodPost {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "method must be POST"}
+		return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "method must be POST"}
 	}
 
-	tr := &tokenRequest{
+	tr := &TokenRequest{
 		RedirectURI:  req.FormValue("redirect_uri"),
 		Code:         req.FormValue("code"),
 		RefreshToken: req.FormValue("refresh_token"),
@@ -52,11 +50,11 @@ func parseTokenRequest(req *http.Request) (*tokenRequest, error) {
 		var err error
 		tr.ClientID, err = url.QueryUnescape(cid)
 		if err != nil {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid encoding for client id"}
+			return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "invalid encoding for client id"}
 		}
 		tr.ClientSecret, err = url.QueryUnescape(cs)
 		if err != nil {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid encoding for client secret"}
+			return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "invalid encoding for client secret"}
 		}
 
 	} else {
@@ -67,32 +65,32 @@ func parseTokenRequest(req *http.Request) (*tokenRequest, error) {
 	switch req.FormValue("grant_type") {
 	case string(GrantTypeAuthorizationCode):
 		if tr.Code == "" {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "code is required for authorization_code grant"}
+			return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "code is required for authorization_code grant"}
 		}
 		if tr.RedirectURI == "" {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "redirect_uri is required for authorization_code grant"}
+			return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "redirect_uri is required for authorization_code grant"}
 		}
 		tr.GrantType = GrantTypeAuthorizationCode
 
 	case string(GrantTypeRefreshToken):
 		// https://tools.ietf.org/html/rfc6749#section-6
 		if tr.RefreshToken == "" {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "refresh_token is required for refresh grant"}
+			return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "refresh_token is required for refresh grant"}
 		}
 		tr.GrantType = GrantTypeRefreshToken
 
 	default:
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: fmt.Sprintf("grant_type must be %s", GrantTypeAuthorizationCode)}
+		return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidGrant, Description: fmt.Sprintf("grant_type must be %s", GrantTypeAuthorizationCode)}
 	}
 
 	return tr, nil
 }
 
-// https://tools.ietf.org/html/rfc6749#section-5.1
+// TokenResponse ref: https://tools.ietf.org/html/rfc6749#section-5.1
 //
 // this does eventually end up as JSON, but because of how we want to handle the
 // extra params bit we don't tag this struct
-type tokenResponse struct {
+type TokenResponse struct {
 	AccessToken  string
 	TokenType    string
 	ExpiresIn    time.Duration
@@ -101,10 +99,10 @@ type tokenResponse struct {
 	ExtraParams  map[string]interface{}
 }
 
-// writeTokenResponse sends a response for the token endpoint.
+// WriteTokenResponse sends a response for the token endpoint.
 //
 // https://tools.ietf.org/html/rfc6749#section-5.1
-func writeTokenResponse(w http.ResponseWriter, resp *tokenResponse) error {
+func WriteTokenResponse(w http.ResponseWriter, resp *TokenResponse) error {
 	w.Header().Add("Content-Type", "application/json;charset=UTF-8")
 
 	respJSON := resp.ExtraParams

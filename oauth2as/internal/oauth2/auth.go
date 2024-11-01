@@ -1,4 +1,4 @@
-package oidcop
+package oauth2
 
 import (
 	"fmt"
@@ -8,23 +8,23 @@ import (
 	"time"
 )
 
-type responseType string
+type ResponseType string
 
 const (
-	responseTypeCode     responseType = "code"
-	responseTypeImplicit responseType = "token"
+	ResponseTypeCode     ResponseType = "code"
+	ResponseTypeImplicit ResponseType = "token"
 
-	codeChallengeMethodS256 = "S256"
+	CodeChallengeMethodS256 = "S256"
 )
 
-type authRequest struct {
+type AuthRequest struct {
 	ClientID string
 	// RedirectURI the client specified. This is an OPTIONAL field, if not
 	// passed will be set to the zero value
 	RedirectURI  string
 	State        string
 	Scopes       []string
-	ResponseType responseType
+	ResponseType ResponseType
 	// CodeChallenge is the PKCE code challenge. If it is provided, it will be
 	// S256 format.
 	CodeChallenge string
@@ -33,16 +33,16 @@ type authRequest struct {
 	Raw url.Values
 }
 
-// parseAuthRequest can be used to process an oauth2 authentication request,
+// ParseAuthRequest can be used to process an oauth2 authentication request,
 // returning information about it. It can handle both the code and implicit auth
 // types. If an error is returned, it should be passed to the user via
 // writeError
 //
 // https://tools.ietf.org/html/rfc6749#section-4.1.1
 // https://tools.ietf.org/html/rfc6749#section-4.2.1
-func parseAuthRequest(req *http.Request) (authReq *authRequest, err error) {
+func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 	if req.Method != http.MethodGet && req.Method != http.MethodPost {
-		return nil, &httpError{Code: http.StatusBadRequest, Message: "method must be POST or GET"}
+		return nil, &HTTPError{Code: http.StatusBadRequest, Message: "method must be POST or GET"}
 	}
 
 	rts := req.FormValue("response_type")
@@ -53,41 +53,41 @@ func parseAuthRequest(req *http.Request) (authReq *authRequest, err error) {
 	codeChallenge := req.FormValue("code_challenge")
 	codeChallengeMethod := req.FormValue("code_challenge_method")
 
-	var rt responseType
+	var rt ResponseType
 	switch rts {
-	case string(responseTypeCode):
-		rt = responseTypeCode
-	case string(responseTypeImplicit):
-		rt = responseTypeImplicit
+	case string(ResponseTypeCode):
+		rt = ResponseTypeCode
+	case string(ResponseTypeImplicit):
+		rt = ResponseTypeImplicit
 	default:
-		return nil, &authError{
+		return nil, &AuthError{
 			State:       state,
-			Code:        authErrorCodeInvalidRequest,
+			Code:        AuthErrorCodeInvalidRequest,
 			Description: `response_type must be "code" or "token"`,
 			RedirectURI: ruri,
 		}
 	}
 
 	if cid == "" {
-		return nil, &authError{
+		return nil, &AuthError{
 			State:       state,
-			Code:        authErrorCodeInvalidRequest,
+			Code:        AuthErrorCodeInvalidRequest,
 			Description: "client_id must be specified",
 			RedirectURI: ruri,
 		}
 	}
 
-	if codeChallenge != "" && codeChallengeMethod != codeChallengeMethodS256 {
-		return nil, &authError{
+	if codeChallenge != "" && codeChallengeMethod != CodeChallengeMethodS256 {
+		return nil, &AuthError{
 			State:       state,
-			Code:        authErrorCodeInvalidRequest,
-			Description: fmt.Sprintf(`only code_challenge type "%s" supported`, codeChallengeMethodS256),
+			Code:        AuthErrorCodeInvalidRequest,
+			Description: fmt.Sprintf(`only code_challenge type "%s" supported`, CodeChallengeMethodS256),
 			RedirectURI: ruri,
 		}
 
 	}
 
-	return &authRequest{
+	return &AuthRequest{
 		ClientID:      cid,
 		RedirectURI:   ruri,
 		State:         state,
@@ -98,17 +98,17 @@ func parseAuthRequest(req *http.Request) (authReq *authRequest, err error) {
 	}, nil
 }
 
-type codeAuthResponse struct {
+type CodeAuthResponse struct {
 	RedirectURI *url.URL
 	State       string
 	Code        string
 }
 
-// sendCodeAuthResponse sends the appropriate response to an auth request of
+// SendCodeAuthResponse sends the appropriate response to an auth request of
 // response_type code, aka "Code flow"
 //
 // https://tools.ietf.org/html/rfc6749#section-4.1.2
-func sendCodeAuthResponse(w http.ResponseWriter, req *http.Request, resp *codeAuthResponse) {
+func SendCodeAuthResponse(w http.ResponseWriter, req *http.Request, resp *CodeAuthResponse) {
 	redir := authResponse(resp.RedirectURI, resp.State)
 	v := redir.Query()
 	v.Add("code", resp.Code)
@@ -116,26 +116,26 @@ func sendCodeAuthResponse(w http.ResponseWriter, req *http.Request, resp *codeAu
 	http.Redirect(w, req, redir.String(), http.StatusFound)
 }
 
-type tokenType string
+type TokenType string
 
 const ( // https://tools.ietf.org/html/rfc6749#section-7.1 , https://tools.ietf.org/html/rfc6750
-	tokenTypeBearer tokenType = "Bearer"
+	TokenTypeBearer TokenType = "Bearer"
 )
 
-type tokenAuthResponse struct {
+type TokenAuthResponse struct {
 	RedirectURI *url.URL
 	State       string
 	Token       string
-	TokenType   tokenType
+	TokenType   TokenType
 	Scopes      []string
 	ExpiresIn   time.Duration
 }
 
-// sendTokenAuthResponse sends the appropriate response to an auth request of
+// SendTokenAuthResponse sends the appropriate response to an auth request of
 // response_type token, aka "Implicit flow"
 //
 // https://tools.ietf.org/html/rfc6749#section-4.2.2
-func sendTokenAuthResponse(w http.ResponseWriter, req *http.Request, resp *tokenAuthResponse) {
+func SendTokenAuthResponse(w http.ResponseWriter, req *http.Request, resp *TokenAuthResponse) {
 	redir := authResponse(resp.RedirectURI, resp.State)
 	v := redir.Query()
 	v.Add("access_token", resp.Token)

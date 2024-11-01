@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidcop/oauth2"
+	"github.com/lstoll/oidcop/internal"
+	"github.com/lstoll/oidcop/internal/oauth2"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
@@ -152,15 +152,15 @@ type AuthorizationRequest struct {
 // https://openid.net/specs/openid-connect-core-1_0.html#CodeFlowAuth
 // https://openid.net/specs/openid-connect-core-1_0.html#ImplicitFlowAuth
 func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) (*AuthorizationRequest, error) {
-	authreq, err := parseAuthRequest(req)
+	authreq, err := oauth2.ParseAuthRequest(req)
 	if err != nil {
-		_ = writeError(w, req, err)
+		_ = oauth2.WriteError(w, req, err)
 		return nil, fmt.Errorf("failed to parse auth endpoint request: %w", err)
 	}
 
 	redir, err := url.Parse(authreq.RedirectURI)
 	if err != nil {
-		return nil, writeHTTPError(w, req, http.StatusInternalServerError, "redirect_uri is in an invalid format", err, "failed to parse redirect URI")
+		return nil, oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "redirect_uri is in an invalid format", err, "failed to parse redirect URI")
 	}
 
 	// If a non valid client ID or redirect URI is specified, we should return
@@ -170,18 +170,18 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) (*Au
 
 	cidok, err := o.clients.IsValidClientID(authreq.ClientID)
 	if err != nil {
-		return nil, writeHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource check client ID")
+		return nil, oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource check client ID")
 	}
 	if !cidok {
-		return nil, writeHTTPError(w, req, http.StatusBadRequest, "Client ID is not valid", nil, "")
+		return nil, oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Client ID is not valid", nil, "")
 	}
 
 	redirok, err := o.clients.ValidateClientRedirectURI(authreq.ClientID, authreq.RedirectURI)
 	if err != nil {
-		return nil, writeHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource redirect URI validation")
+		return nil, oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource redirect URI validation")
 	}
 	if !redirok {
-		return nil, writeHTTPError(w, req, http.StatusBadRequest, "Invalid redirect URI", nil, "")
+		return nil, oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Invalid redirect URI", nil, "")
 	}
 
 	ar := &sessAuthRequest{
@@ -193,10 +193,10 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) (*Au
 	}
 
 	switch authreq.ResponseType {
-	case responseTypeCode:
+	case oauth2.ResponseTypeCode:
 		ar.ResponseType = authRequestResponseTypeCode
 	default:
-		return nil, writeAuthError(w, req, redir, authErrorCodeUnsupportedResponseType, authreq.State, "response type must be code", nil)
+		return nil, oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeUnsupportedResponseType, authreq.State, "response type must be code", nil)
 	}
 
 	sess := &sessionV2{
@@ -208,7 +208,7 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) (*Au
 	}
 
 	if err := putSession(req.Context(), o.smgr, sess); err != nil {
-		return nil, writeAuthError(w, req, redir, authErrorCodeErrServerError, authreq.State, "failed to persist session", err)
+		return nil, oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeErrServerError, authreq.State, "failed to persist session", err)
 	}
 
 	areq := &AuthorizationRequest{
@@ -250,10 +250,10 @@ type Authorization struct {
 func (o *OIDC) FinishAuthorization(w http.ResponseWriter, req *http.Request, sessionID string, auth *Authorization) error {
 	sess, err := getSession(req.Context(), o.smgr, sessionID)
 	if err != nil {
-		return writeHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to get session")
+		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to get session")
 	}
 	if sess == nil {
-		return writeHTTPError(w, req, http.StatusForbidden, "Access Denied", err, "session not found in storage")
+		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "Access Denied", err, "session not found in storage")
 	}
 
 	var openidScope bool
@@ -263,7 +263,7 @@ func (o *OIDC) FinishAuthorization(w http.ResponseWriter, req *http.Request, ses
 		}
 	}
 	if !openidScope {
-		return writeHTTPError(w, req, http.StatusForbidden, "Access Denied", err, "openid scope was not granted")
+		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "Access Denied", err, "openid scope was not granted")
 
 	}
 
@@ -278,7 +278,7 @@ func (o *OIDC) FinishAuthorization(w http.ResponseWriter, req *http.Request, ses
 	case authRequestResponseTypeCode:
 		return o.finishCodeAuthorization(w, req, sess)
 	default:
-		return writeHTTPError(w, req, http.StatusInternalServerError, "internal error", nil, fmt.Sprintf("unknown ResponseType %s", sess.Request.ResponseType))
+		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", nil, fmt.Sprintf("unknown ResponseType %s", sess.Request.ResponseType))
 	}
 }
 
@@ -287,12 +287,12 @@ func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request,
 
 	ucode, scode, err := newToken(session.ID, codeExp)
 	if err != nil {
-		return writeHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to generate code token")
+		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to generate code token")
 	}
 
 	code, err := marshalToken(ucode)
 	if err != nil {
-		return writeHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to marshal code token")
+		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to marshal code token")
 	}
 
 	session.AuthCode = scode
@@ -301,21 +301,21 @@ func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request,
 	session.Expiry = codeExp
 
 	if err := putSession(req.Context(), o.smgr, session); err != nil {
-		return writeHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to put authReq to storage")
+		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to put authReq to storage")
 	}
 
 	redir, err := url.Parse(session.Request.RedirectURI)
 	if err != nil {
-		return writeHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to parse authreq's URI")
+		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to parse authreq's URI")
 	}
 
-	codeResp := &codeAuthResponse{
+	codeResp := &oauth2.CodeAuthResponse{
 		RedirectURI: redir,
 		State:       session.Request.State,
 		Code:        code,
 	}
 
-	sendCodeAuthResponse(w, req, codeResp)
+	oauth2.SendCodeAuthResponse(w, req, codeResp)
 
 	return nil
 }
@@ -331,7 +331,7 @@ type TokenRequest struct {
 	Authorization Authorization
 	// GrantType indicates the grant that was requested for this invocation of
 	// the token endpoint
-	GrantType GrantType
+	GrantType oauth2.GrantType
 	// SessionRefreshable is true if the offline_access scope was permitted for
 	// the user, i.e this session should issue refresh tokens
 	SessionRefreshable bool
@@ -400,7 +400,7 @@ func (t *TokenRequest) PrefillAccessToken(sub string, expires time.Time) oidc.Ac
 		IssuedAt:       oidc.NewUnixTime(t.now()),
 		AuthTime:       oidc.NewUnixTime(t.AuthTime),
 		Scope:          strings.Join(t.Authorization.Scopes, " "),
-		JWTID:          uuid.NewString(),
+		JWTID:          internal.MustUUIDv4(),
 		ClientID:       t.ClientID,
 		LoginSessionID: t.SessionID,
 		Extra:          map[string]interface{}{},
@@ -456,36 +456,36 @@ type unauthorizedErr interface {
 // https://openid.net/specs/openid-connect-core-1_0.html#TokenEndpoint
 // https://openid.net/specs/openid-connect-core-1_0.html#RefreshTokens
 func (o *OIDC) Token(w http.ResponseWriter, req *http.Request, handler func(req *TokenRequest) (*TokenResponse, error)) error {
-	treq, err := parseTokenRequest(req)
+	treq, err := oauth2.ParseTokenRequest(req)
 	if err != nil {
-		_ = writeError(w, req, err)
+		_ = oauth2.WriteError(w, req, err)
 		return err
 	}
 
 	resp, err := o.token(req.Context(), treq, handler)
 	if err != nil {
-		_ = writeError(w, req, err)
+		_ = oauth2.WriteError(w, req, err)
 		return err
 	}
 
-	if err := writeTokenResponse(w, resp); err != nil {
-		_ = writeError(w, req, err)
+	if err := oauth2.WriteTokenResponse(w, resp); err != nil {
+		_ = oauth2.WriteError(w, req, err)
 		return err
 	}
 
 	return nil
 }
 
-func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *TokenRequest) (*TokenResponse, error)) (*tokenResponse, error) {
+func (o *OIDC) token(ctx context.Context, req *oauth2.TokenRequest, handler func(req *TokenRequest) (*TokenResponse, error)) (*oauth2.TokenResponse, error) {
 	var sess *sessionV2
 	var err error
 
 	var isRefresh bool
 
 	switch req.GrantType {
-	case GrantTypeAuthorizationCode:
+	case oauth2.GrantTypeAuthorizationCode:
 		sess, err = o.fetchCodeSession(ctx, req)
-	case GrantTypeRefreshToken:
+	case oauth2.GrantTypeRefreshToken:
 		isRefresh = true
 		sess, err = o.fetchRefreshSession(ctx, req)
 
@@ -508,7 +508,7 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 	// validate the client
 	cok, err := o.clients.ValidateClientSecret(req.ClientID, req.ClientSecret)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check client id & secret", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check client id & secret", Cause: err}
 
 	}
 	if !cok {
@@ -516,12 +516,12 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 	}
 
 	// PKCE only applies on the authorization code grant type
-	if req.GrantType == GrantTypeAuthorizationCode {
+	if req.GrantType == oauth2.GrantTypeAuthorizationCode {
 		// If the client is public and we require pkce, reject it if there's no
 		// verifier.
 		reqPKCE, err := o.clients.RequiresPKCE(req.ClientID)
 		if err != nil {
-			return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check if client is public", Cause: err}
+			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check if client is public", Cause: err}
 		}
 		if reqPKCE && req.CodeVerifier == "" {
 			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
@@ -537,7 +537,7 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 
 	// Call the handler with information about the request, and get the response.
 	if sess.Authorization == nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "session authorization is nil"}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "session authorization is nil"}
 	}
 
 	tr := &TokenRequest{
@@ -565,15 +565,15 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 		if errors.As(err, &uaerr); uaerr != nil && uaerr.Unauthorized() {
 			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: uaerr.Error()}
 		}
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
 	if tresp.IDToken.Expiry == 0 {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "id token cannot have a 0 expiry"}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "id token cannot have a 0 expiry"}
 	}
 
 	if tresp.IssueRefreshToken && tresp.RefreshTokenValidUntil.Before(o.now()) {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "refresh token must be valid > now"}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "refresh token must be valid > now"}
 	}
 
 	// If we're allowing refresh, issue one of those too.
@@ -582,7 +582,7 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 	if tresp.IssueRefreshToken {
 		urefreshtok, srefreshtok, err := newToken(sess.ID, tresp.RefreshTokenValidUntil)
 		if err != nil {
-			return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to generate access token", Cause: err}
+			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to generate access token", Cause: err}
 		}
 		sess.Expiry = srefreshtok.Expiry
 		sess.RefreshToken = srefreshtok
@@ -590,7 +590,7 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 
 		refreshTok, err = marshalToken(urefreshtok)
 		if err != nil {
-			return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to marshal refresh token", Cause: err}
+			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to marshal refresh token", Cause: err}
 		}
 	} else {
 		// clear any token
@@ -601,40 +601,40 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 	sess.Stage = sessionStageAccessTokenIssued
 
 	if err := putSession(ctx, o.smgr, sess); err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to put access token", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to put access token", Cause: err}
 	}
 
 	h, err := o.keysetHandle.Handle(ctx)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting handle", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting handle", Cause: err}
 	}
 
 	signer, err := jwt.NewSigner(h)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating signer from handle", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating signer from handle", Cause: err}
 	}
 
 	rawIDJWT, err := idClaimsToRawJWT(tresp.IDToken)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping id claims to jwt", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping id claims to jwt", Cause: err}
 	}
 
 	sidt, err := signer.SignAndEncode(rawIDJWT)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign id token", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign id token", Cause: err}
 	}
 
 	rawATJWT, err := accessTokenClaimsToRawJWT(tresp.AccessToken)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping access claims to jwt", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping access claims to jwt", Cause: err}
 	}
 
 	sat, err := signer.SignAndEncode(rawATJWT)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign access token", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign access token", Cause: err}
 	}
 
-	return &tokenResponse{
+	return &oauth2.TokenResponse{
 		AccessToken:  sat,
 		RefreshToken: refreshTok,
 		TokenType:    "bearer",
@@ -646,7 +646,7 @@ func (o *OIDC) token(ctx context.Context, req *tokenRequest, handler func(req *T
 }
 
 // fetchCodeSession handles loading the session for a code grant.
-func (o *OIDC) fetchCodeSession(ctx context.Context, treq *tokenRequest) (*sessionV2, error) {
+func (o *OIDC) fetchCodeSession(ctx context.Context, treq *oauth2.TokenRequest) (*sessionV2, error) {
 	ucode, err := unmarshalToken(treq.Code)
 	if err != nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid code", Cause: err}
@@ -654,7 +654,7 @@ func (o *OIDC) fetchCodeSession(ctx context.Context, treq *tokenRequest) (*sessi
 
 	sess, err := getSession(ctx, o.smgr, ucode.SessionId)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get session from storage", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get session from storage", Cause: err}
 	}
 	if sess == nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "sesion expired"}
@@ -664,7 +664,7 @@ func (o *OIDC) fetchCodeSession(ctx context.Context, treq *tokenRequest) (*sessi
 		// Drop the session too, assume we're under some kind of replay.
 		// https://tools.ietf.org/html/rfc6819#section-4.4.1.1
 		if err := o.smgr.DeleteSession(ctx, sess.ID); err != nil {
-			return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
+			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
 		}
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
 	}
@@ -676,7 +676,7 @@ func (o *OIDC) fetchCodeSession(ctx context.Context, treq *tokenRequest) (*sessi
 	if !ok {
 		// if we're passed an invalid code, assume we're under attack and drop the session
 		if err := o.smgr.DeleteSession(ctx, sess.ID); err != nil {
-			return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
+			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
 		}
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code", Cause: err}
 	}
@@ -687,7 +687,7 @@ func (o *OIDC) fetchCodeSession(ctx context.Context, treq *tokenRequest) (*sessi
 }
 
 // fetchCodeSession handles loading the session for a refresh grant.
-func (o *OIDC) fetchRefreshSession(ctx context.Context, treq *tokenRequest) (*sessionV2, error) {
+func (o *OIDC) fetchRefreshSession(ctx context.Context, treq *oauth2.TokenRequest) (*sessionV2, error) {
 	urefresh, err := unmarshalToken(treq.RefreshToken)
 	if err != nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid refresh token", Cause: err}
@@ -695,7 +695,7 @@ func (o *OIDC) fetchRefreshSession(ctx context.Context, treq *tokenRequest) (*se
 
 	sess, err := getSession(ctx, o.smgr, urefresh.SessionId)
 	if err != nil {
-		return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get session from storage", Cause: err}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get session from storage", Cause: err}
 	}
 	if sess == nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired", Cause: err}
@@ -707,7 +707,7 @@ func (o *OIDC) fetchRefreshSession(ctx context.Context, treq *tokenRequest) (*se
 
 	if o.now().After(sess.Expiry) || o.now().After(sess.RefreshToken.Expiry) {
 		if err := o.smgr.DeleteSession(ctx, sess.ID); err != nil {
-			return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
+			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
 		}
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
 	}
@@ -719,7 +719,7 @@ func (o *OIDC) fetchRefreshSession(ctx context.Context, treq *tokenRequest) (*se
 	if !ok {
 		// if we're passed an invalid refresh token, assume we're under attack and drop the session
 		if err := o.smgr.DeleteSession(ctx, sess.ID); err != nil {
-			return nil, &httpError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
+			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
 		}
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token", Cause: err}
 	}
@@ -747,29 +747,29 @@ type UserinfoRequest struct {
 func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w io.Writer, uireq *UserinfoRequest) error) error {
 	authSp := strings.SplitN(req.Header.Get("authorization"), " ", 2)
 	if !strings.EqualFold(authSp[0], "bearer") || len(authSp) != 2 {
-		be := &bearerError{} // no content, just request auth
-		herr := &httpError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), CauseMsg: "malformed Authorization header"}
-		_ = writeError(w, req, herr)
+		be := &oauth2.BearerError{} // no content, just request auth
+		herr := &oauth2.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), CauseMsg: "malformed Authorization header"}
+		_ = oauth2.WriteError(w, req, herr)
 		return herr
 	}
 
 	h, err := o.keysetHandle.Handle(req.Context())
 	if err != nil {
-		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
-		_ = writeError(w, req, herr)
+		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
+		_ = oauth2.WriteError(w, req, herr)
 		return herr
 	}
 	ph, err := h.Public()
 	if err != nil {
-		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
-		_ = writeError(w, req, herr)
+		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
+		_ = oauth2.WriteError(w, req, herr)
 		return herr
 	}
 
 	jwtVerifier, err := jwt.NewVerifier(ph)
 	if err != nil {
-		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
-		_ = writeError(w, req, herr)
+		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
+		_ = oauth2.WriteError(w, req, herr)
 		return herr
 	}
 
@@ -778,23 +778,23 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w
 		IgnoreAudiences: true, // we don't care about the audience here, this is just introspecting the user
 	})
 	if err != nil {
-		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
-		_ = writeError(w, req, herr)
+		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
+		_ = oauth2.WriteError(w, req, herr)
 		return herr
 	}
 
 	jwt, err := jwtVerifier.VerifyAndDecode(authSp[1], jwtValidator)
 	if err != nil {
-		be := &bearerError{Code: bearerErrorCodeInvalidRequest, Description: "invalid access token"}
-		herr := &httpError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), Cause: err}
-		_ = writeError(w, req, herr)
+		be := &oauth2.BearerError{Code: oauth2.BearerErrorCodeInvalidRequest, Description: "invalid access token"}
+		herr := &oauth2.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), Cause: err}
+		_ = oauth2.WriteError(w, req, herr)
 		return herr
 	}
 
 	sub, err := jwt.Subject()
 	if err != nil {
-		herr := &httpError{Code: http.StatusInternalServerError, Cause: err}
-		_ = writeError(w, req, herr)
+		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
+		_ = oauth2.WriteError(w, req, herr)
 		return herr
 	}
 
@@ -806,8 +806,8 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w
 	w.Header().Set("Content-Type", "application/json")
 
 	if err := handler(w, uireq); err != nil {
-		herr := &httpError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error in user handler"}
-		_ = writeError(w, req, herr)
+		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error in user handler"}
+		_ = oauth2.WriteError(w, req, herr)
 		return herr
 	}
 
