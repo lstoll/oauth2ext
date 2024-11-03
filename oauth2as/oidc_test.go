@@ -311,7 +311,7 @@ func TestIDTokenPrefill(t *testing.T) {
 				ACR:      "acr",
 				Nonce:    "nonce",
 				AMR:      []string{"amr"},
-				Extra:    map[string]interface{}{},
+				// Extra:    map[string]interface{}{},
 			},
 		},
 	} {
@@ -921,7 +921,7 @@ func TestUserinfo(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		rawATJWT, err := accessTokenClaimsToRawJWT(cl)
+		rawATJWT, err := cl.ToJWT(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -953,7 +953,7 @@ func TestUserinfo(t *testing.T) {
 				return signAccessToken(oidc.AccessTokenClaims{
 					Issuer:  issuer,
 					Subject: "sub",
-					Expiry:  oidc.NewUnixTime(time.Now().Add(1 * time.Minute)),
+					Expiry:  oidc.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,
@@ -967,7 +967,7 @@ func TestUserinfo(t *testing.T) {
 				return signAccessToken(oidc.AccessTokenClaims{
 					Issuer:  "http://other",
 					Subject: "sub",
-					Expiry:  oidc.NewUnixTime(time.Now().Add(1 * time.Minute)),
+					Expiry:  oidc.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,
@@ -979,7 +979,7 @@ func TestUserinfo(t *testing.T) {
 				return signAccessToken(oidc.AccessTokenClaims{
 					Issuer:  issuer,
 					Subject: "sub",
-					Expiry:  oidc.NewUnixTime(time.Now().Add(-1 * time.Minute)),
+					Expiry:  oidc.UnixTime(time.Now().Add(-1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,

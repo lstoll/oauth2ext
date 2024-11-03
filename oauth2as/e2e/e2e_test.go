@@ -205,7 +205,7 @@ func TestE2E(t *testing.T) {
 
 			ts := o2.TokenSource(ctx, tok)
 
-			uir, err := provider.Userinfo(ctx, ts)
+			_, uir, err := provider.Userinfo(ctx, ts)
 			if err != nil {
 				t.Fatalf("error fetching userinfo: %v", err)
 			}
@@ -221,7 +221,7 @@ func TestE2E(t *testing.T) {
 				}
 				tok.Expiry = time.Now().Add(-1 * time.Second) // needs to line up with remote change, else we won't refresh
 
-				uir, err := provider.Userinfo(ctx, ts)
+				_, uir, err := provider.Userinfo(ctx, ts)
 				if err != nil {
 					t.Fatalf("error fetching userinfo: %v", err)
 				}
@@ -328,21 +328,21 @@ func (s *stubSMGR) expireAccessTokens(_ context.Context) error {
 }
 
 var (
-	th   *keyset.Handle
-	thMu sync.Mutex
+	th     *keyset.Handle
+	thOnce sync.Once
 )
 
 func testKeysetHandle() oidcop.KeysetHandle {
-	thMu.Lock()
-	defer thMu.Unlock()
-	// we only make one, because it's slow
-	if th == nil {
-		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
-		if err != nil {
-			panic(err)
+	thOnce.Do(func() {
+		// we only make one, because it's slow
+		if th == nil {
+			h, err := keyset.NewHandle(jwt.ES256Template())
+			if err != nil {
+				panic(err)
+			}
+			th = h
 		}
-		th = h
-	}
+	})
 
 	return oidcop.NewStaticKeysetHandle(th)
 }

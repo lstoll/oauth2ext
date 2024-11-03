@@ -361,17 +361,18 @@ type TokenRequest struct {
 // * Auth Time (auth_time) time set
 // * Nonce that was originally passed in, if there was one
 func (t *TokenRequest) PrefillIDToken(sub string, expires time.Time) oidc.IDClaims {
+	// TODO
+	// Extra:    map[string]interface{}{},
 	return oidc.IDClaims{
 		Issuer:   t.issuer,
 		Subject:  sub,
-		Expiry:   oidc.NewUnixTime(expires),
+		Expiry:   oidc.UnixTime(expires.Unix()),
 		Audience: oidc.StrOrSlice{t.ClientID},
 		ACR:      t.Authorization.ACR,
 		AMR:      t.Authorization.AMR,
-		IssuedAt: oidc.NewUnixTime(t.now()),
-		AuthTime: oidc.NewUnixTime(t.AuthTime),
+		IssuedAt: oidc.UnixTime(t.now().Unix()),
+		AuthTime: oidc.UnixTime(t.AuthTime.Unix()),
 		Nonce:    t.Nonce,
-		Extra:    map[string]interface{}{},
 	}
 }
 
@@ -390,20 +391,21 @@ func (t *TokenRequest) PrefillIDToken(sub string, expires time.Time) oidc.IDClai
 // * Randomly generated JWTID (uuid v4)
 // * Client ID for this request
 func (t *TokenRequest) PrefillAccessToken(sub string, expires time.Time) oidc.AccessTokenClaims {
+	// TODO -
+	// LoginSessionID: t.SessionID,
+	// Extra:          map[string]interface{}{},
 	return oidc.AccessTokenClaims{
-		Issuer:         t.issuer,
-		Subject:        sub,
-		Expiry:         oidc.NewUnixTime(expires),
-		Audience:       oidc.StrOrSlice{t.ClientID},
-		ACR:            t.Authorization.ACR,
-		AMR:            t.Authorization.AMR,
-		IssuedAt:       oidc.NewUnixTime(t.now()),
-		AuthTime:       oidc.NewUnixTime(t.AuthTime),
-		Scope:          strings.Join(t.Authorization.Scopes, " "),
-		JWTID:          internal.MustUUIDv4(),
-		ClientID:       t.ClientID,
-		LoginSessionID: t.SessionID,
-		Extra:          map[string]interface{}{},
+		Issuer:   t.issuer,
+		Subject:  sub,
+		Expiry:   oidc.UnixTime(expires.Unix()),
+		Audience: oidc.StrOrSlice{t.ClientID},
+		ACR:      t.Authorization.ACR,
+		AMR:      t.Authorization.AMR,
+		IssuedAt: oidc.UnixTime(t.now().Unix()),
+		AuthTime: oidc.UnixTime(t.AuthTime.Unix()),
+		Scope:    strings.Join(t.Authorization.Scopes, " "),
+		JWTID:    internal.MustUUIDv4(),
+		ClientID: t.ClientID,
 	}
 }
 
@@ -614,7 +616,7 @@ func (o *OIDC) token(ctx context.Context, req *oauth2.TokenRequest, handler func
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating signer from handle", Cause: err}
 	}
 
-	rawIDJWT, err := idClaimsToRawJWT(tresp.IDToken)
+	rawIDJWT, err := tresp.IDToken.ToJWT(nil)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping id claims to jwt", Cause: err}
 	}
@@ -624,7 +626,7 @@ func (o *OIDC) token(ctx context.Context, req *oauth2.TokenRequest, handler func
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign id token", Cause: err}
 	}
 
-	rawATJWT, err := accessTokenClaimsToRawJWT(tresp.AccessToken)
+	rawATJWT, err := tresp.AccessToken.ToJWT(nil)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping access claims to jwt", Cause: err}
 	}
@@ -753,6 +755,8 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w
 		return herr
 	}
 
+	// TODO - replace this verification logic with oidc.Provider
+
 	h, err := o.keysetHandle.Handle(req.Context())
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
@@ -774,8 +778,9 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w
 	}
 
 	jwtValidator, err := jwt.NewValidator(&jwt.ValidatorOpts{
-		ExpectedIssuer:  &o.issuer,
-		IgnoreAudiences: true, // we don't care about the audience here, this is just introspecting the user
+		ExpectedIssuer:     &o.issuer,
+		IgnoreAudiences:    true, // we don't care about the audience here, this is just introspecting the user
+		ExpectedTypeHeader: ptrOrNil("at+jwt"),
 	})
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
@@ -831,117 +836,10 @@ func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
 	return computedChallenge == storedCodeChallenge
 }
 
-func idClaimsToRawJWT(claims oidc.IDClaims) (*jwt.RawJWT, error) {
-	var exp *time.Time
-	if claims.Expiry != 0 {
-		t := claims.Expiry.Time()
-		exp = &t
+func ptrOrNil[T comparable](v T) *T {
+	var e T
+	if v == e {
+		return nil
 	}
-	var nbf *time.Time
-	if claims.NotBefore != 0 {
-		t := claims.NotBefore.Time()
-		nbf = &t
-	}
-	var iat *time.Time
-	if claims.IssuedAt != 0 {
-		t := claims.IssuedAt.Time()
-		iat = &t
-	}
-
-	opts := &jwt.RawJWTOptions{
-		Issuer:       &claims.Issuer,
-		Subject:      &claims.Subject,
-		Audiences:    claims.Audience,
-		ExpiresAt:    exp,
-		NotBefore:    nbf,
-		IssuedAt:     iat,
-		CustomClaims: map[string]interface{}{},
-	}
-	if claims.AuthTime != 0 {
-		opts.CustomClaims["auth_time"] = int(claims.AuthTime)
-	}
-	if claims.Nonce != "" {
-		opts.CustomClaims["nonce"] = claims.Nonce
-	}
-	if claims.ACR != "" {
-		opts.CustomClaims["acr"] = claims.ACR
-	}
-	if claims.AMR != nil {
-		opts.CustomClaims["amr"] = claims.AMR
-	}
-	if claims.AZP != "" {
-		opts.CustomClaims["azp"] = claims.AZP
-	}
-	for k, v := range claims.Extra {
-		opts.CustomClaims[k] = v
-	}
-
-	raw, err := jwt.NewRawJWT(opts)
-	if err != nil {
-		return nil, fmt.Errorf("constructing raw JWT from claims: %w", err)
-	}
-
-	return raw, nil
-}
-
-func accessTokenClaimsToRawJWT(claims oidc.AccessTokenClaims) (*jwt.RawJWT, error) {
-	var exp *time.Time
-	if claims.Expiry != 0 {
-		t := claims.Expiry.Time()
-		exp = &t
-	}
-	var iat *time.Time
-	if claims.IssuedAt != 0 {
-		t := claims.IssuedAt.Time()
-		iat = &t
-	}
-	var jti *string
-	if claims.JWTID != "" {
-		jti = &claims.JWTID
-	}
-
-	opts := &jwt.RawJWTOptions{
-		Issuer:       &claims.Issuer,
-		Subject:      &claims.Subject,
-		Audiences:    claims.Audience,
-		ExpiresAt:    exp,
-		IssuedAt:     iat,
-		JWTID:        jti,
-		CustomClaims: map[string]interface{}{},
-	}
-	if claims.AuthTime != 0 {
-		opts.CustomClaims["auth_time"] = int(claims.AuthTime)
-	}
-	if claims.ACR != "" {
-		opts.CustomClaims["acr"] = claims.ACR
-	}
-	if claims.AMR != nil {
-		opts.CustomClaims["amr"] = claims.AMR
-	}
-	if claims.ClientID != "" {
-		opts.CustomClaims["client_id"] = claims.ClientID
-	}
-	if claims.Scope != "" {
-		opts.CustomClaims["scope"] = claims.Scope
-	}
-	if len(claims.Groups) != 0 {
-		opts.CustomClaims["groups"] = claims.Groups
-	}
-	if len(claims.Roles) != 0 {
-		opts.CustomClaims["roles"] = claims.Roles
-	}
-	if len(claims.Entitlements) != 0 {
-		opts.CustomClaims["entitlements"] = claims.Entitlements
-	}
-
-	for k, v := range claims.Extra {
-		opts.CustomClaims[k] = v
-	}
-
-	raw, err := jwt.NewRawJWT(opts)
-	if err != nil {
-		return nil, fmt.Errorf("constructing raw JWT from claims: %w", err)
-	}
-
-	return raw, nil
+	return &v
 }
