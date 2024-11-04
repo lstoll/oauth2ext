@@ -241,20 +241,25 @@ func (o *OIDC) FinishAuthorization(w http.ResponseWriter, req *http.Request, aut
 		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "Access Denied", err, "openid scope was not granted")
 	}
 
+	stgauth := auth.toStorage(authreq.ID, authreq.ClientID, o.now(), authreq.Nonce)
+	if err := o.storage.PutAuthorization(req.Context(), stgauth); err != nil {
+		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to save authorization")
+	}
+
 	switch authreq.ResponseType {
 	case storage.AuthRequestResponseTypeCode:
-		return o.finishCodeAuthorization(w, req, authreq, auth)
+		return o.finishCodeAuthorization(w, req, authreq, stgauth)
 	default:
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", nil, fmt.Sprintf("unknown ResponseType %s", authreq.ResponseType))
 	}
 }
 
-func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request, authReq *storage.AuthRequest, auth *Authorization) error {
+func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request, authReq *storage.AuthRequest, auth *storage.Authorization) error {
 	ac := &storage.AuthCode{
-		ID:            uuid.Must(uuid.NewRandom()),
-		Authorization: auth.toStorage(authReq.ID, authReq.ClientID, o.now(), authReq.Nonce),
-		CodeChallenge: authReq.CodeChallenge,
-		Expiry:        o.now().Add(o.codeValidityTime),
+		ID:              uuid.Must(uuid.NewRandom()),
+		AuthorizationID: auth.ID,
+		CodeChallenge:   authReq.CodeChallenge,
+		Expiry:          o.now().Add(o.codeValidityTime),
 	}
 
 	ucode, scode, err := newToken(ac.ID)
@@ -338,7 +343,7 @@ func (o *OIDC) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth
 	if err != nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid code", Cause: err}
 	}
-	ac, err := o.storage.GetAuthCode(ctx, id) // TODO
+	ac, auth, err := o.storage.GetAuthCode(ctx, id) // TODO
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get code from storage", Cause: err}
 	}
@@ -366,7 +371,7 @@ func (o *OIDC) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth
 	}
 
 	// we have a validated code.
-	if err := o.validateTokenClient(ctx, treq, ac.Authorization.ClientID); err != nil {
+	if err := o.validateTokenClient(ctx, treq, auth.ClientID); err != nil {
 		return nil, err
 	}
 
@@ -389,7 +394,7 @@ func (o *OIDC) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth
 
 	// we have a validated request. Call out to the handler to get the details.
 	tr := &TokenRequest{
-		Authorization: *ac.Authorization,
+		Authorization: *auth,
 	}
 
 	tresp, err := o.handler.Token(tr)
@@ -401,7 +406,7 @@ func (o *OIDC) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	return o.buildTokenResponse(ctx, ac.Authorization, nil, tresp)
+	return o.buildTokenResponse(ctx, auth, nil, tresp)
 }
 
 func (o *OIDC) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
@@ -409,7 +414,7 @@ func (o *OIDC) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *
 	if err != nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid refresh token", Cause: err}
 	}
-	rsess, err := o.storage.GetRefreshSession(ctx, id)
+	rsess, auth, err := o.storage.GetRefreshSession(ctx, id)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get refresh session from storage", Cause: err}
 	}
@@ -449,7 +454,7 @@ func (o *OIDC) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *
 
 	// we have a validated request. Call out to the handler to get the details.
 	tr := &RefreshTokenRequest{
-		Authorization: *rsess.Authorization,
+		Authorization: *auth,
 	}
 
 	tresp, err := o.handler.RefreshToken(tr)
@@ -461,7 +466,7 @@ func (o *OIDC) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	return o.buildTokenResponse(ctx, rsess.Authorization, nil, tresp)
+	return o.buildTokenResponse(ctx, auth, nil, tresp)
 }
 
 // buildTokenResponse creates the oauth token response for code and refresh.
@@ -478,9 +483,9 @@ func (o *OIDC) buildTokenResponse(ctx context.Context, auth *storage.Authorizati
 		// it does
 		if refreshSess == nil {
 			refreshSess = &storage.RefreshSession{
-				ID:            uuid.Must(uuid.NewRandom()),
-				Authorization: auth,
-				Expiry:        refreshExpiry,
+				ID:              uuid.Must(uuid.NewRandom()),
+				AuthorizationID: auth.ID,
+				Expiry:          refreshExpiry,
 			}
 		}
 

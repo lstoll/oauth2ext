@@ -27,11 +27,13 @@ type Storage interface {
 	PutAuthRequest(ctx context.Context, ar *AuthRequest) error
 	DeleteAuthRequest(ctx context.Context, id uuid.UUID) error
 
-	GetAuthCode(ctx context.Context, id uuid.UUID) (*AuthCode, error)
+	PutAuthorization(ctx context.Context, a *Authorization) error
+
+	GetAuthCode(ctx context.Context, id uuid.UUID) (*AuthCode, *Authorization, error)
 	PutAuthCode(ctx context.Context, ac *AuthCode) error
 	DeleteAuthCode(ctx context.Context, id uuid.UUID) error
 
-	GetRefreshSession(ctx context.Context, id uuid.UUID) (*RefreshSession, error)
+	GetRefreshSession(ctx context.Context, id uuid.UUID) (*RefreshSession, *Authorization, error)
 	PutRefreshSession(ctx context.Context, ac *RefreshSession) error
 	DeleteRefreshSession(ctx context.Context, id uuid.UUID) error
 }
@@ -66,34 +68,36 @@ type AuthRequest struct {
 	// ID is the unique identifier for this request.
 	ID uuid.UUID `json:"id,omitempty"`
 	// ClientID requested for this request.
-	ClientID string `json:"client_id,omitempty"`
+	ClientID string `json:"clientID,omitempty"`
 
-	RedirectURI string `json:"redirect_uri,omitempty"`
+	RedirectURI string `json:"redirectURI,omitempty"`
 
 	State        string                  `json:"state,omitempty"`
 	Scopes       []string                `json:"scopes,omitempty"`
 	Nonce        string                  `json:"nonce,omitempty"`
-	ResponseType AuthRequestResponseType `json:"response_type,omitempty"`
+	ResponseType AuthRequestResponseType `json:"responseType,omitempty"`
 	// CodeChallenge is the PKCE code challenge, if it was passed when the flow
 	// was started.
-	CodeChallenge string   `json:"code_challenge,omitempty"`
-	ACRValues     []string `json:"acr_values,omitempty"`
+	CodeChallenge string   `json:"codeChallenge,omitempty"`
+	ACRValues     []string `json:"acrValues,omitempty"`
 	// Expiry time of this request
 	Expiry time.Time `json:"expiry,omitempty"`
 }
 
 // Authorization tracks the information a session was actually authorized for.
 // It is accessible from the token and refresh calls.
+//
+// These are stored separately and not deleted by this implementation.
 type Authorization struct {
 	// ID is a unqique identifier for this authorization
 	ID uuid.UUID `json:"id"`
 	// RequestID contains the ID of the request this authorization was generated
 	// from, for audit purposes.
-	AuthReqID uuid.UUID `json:"auth_req_id"`
+	AuthReqID uuid.UUID `json:"AuthReqID"`
 	// Subject that was authenticated
 	Subject string `json:"sub"`
 	// ClientID that this authentication is for
-	ClientID string `json:"client_id,omitempty"`
+	ClientID string `json:"clientID,omitempty"`
 	// Scopes are the list of scopes this session was granted
 	Scopes []string `json:"scopes"`
 	// ACR is the Authentication Context Class Reference the session was
@@ -115,13 +119,13 @@ type Authorization struct {
 // exchanged the code for a token yet
 type AuthCode struct {
 	ID uuid.UUID `json:"id"`
-	// Authorization data for this code.
-	Authorization *Authorization `json:"authorization,omitempty"`
+	// AuthorizationID links this code to the authorization that produced it.
+	AuthorizationID uuid.UUID `json:"authorizationID,omitempty"`
 	// Code is the server part of the bcrypt code
 	Code []byte `json:"code,omitempty"`
 	// CodeChallenge is the PKCE code challenge, if it was passed when the flow
 	// was started.
-	CodeChallenge string `json:"code_challenge,omitempty"`
+	CodeChallenge string `json:"codeChallenge,omitempty"`
 
 	Expiry time.Time `json:"expiry,omitempty"`
 }
@@ -130,8 +134,8 @@ type AuthCode struct {
 // that is refreshable.
 type RefreshSession struct {
 	ID uuid.UUID `json:"id,omitempty"`
-	// Authorization data for this code.
-	Authorization *Authorization `json:"authorization,omitempty"`
+	// AuthorizationID links this code to the authorization that produced it.
+	AuthorizationID uuid.UUID `json:"authorizationID,omitempty"`
 	// The currently valid refresh token for this session.
 	RefreshToken []byte `json:"refresh_token,omitempty"`
 	// The time the whole session should be expired at. It should be garbage
