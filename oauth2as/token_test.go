@@ -2,15 +2,14 @@ package oidcop
 
 import (
 	"testing"
-	"time"
 
-	"google.golang.org/protobuf/proto"
+	"github.com/google/uuid"
 )
 
 func TestTokens(t *testing.T) {
-	sessID := mustGenerateID()
+	sessID := uuid.Must(uuid.NewRandom())
 
-	utok, stok, err := newToken(sessID, time.Now().Add(1*time.Minute))
+	utok, stok, err := newToken(sessID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +21,7 @@ func TestTokens(t *testing.T) {
 	}
 
 	// parse it back, maje sure they compare
-	gotTok, err := unmarshalToken(utokstr)
+	_, gotTok, err := unmarshalToken(utokstr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,35 +34,16 @@ func TestTokens(t *testing.T) {
 		t.Error("want: tokens to be equal, got not equal")
 	}
 
-	utok2, _, err := newToken(sessID, time.Now().Add(1*time.Minute))
+	utok2, _, err := newToken(sessID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	eq, err = tokensMatch(utok2, stok)
+	eq, err = tokensMatch(utok2.Token, stok)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if eq {
 		t.Error("want: tokens to not be equal, got equal")
-	}
-}
-
-func TestUnmarshalToken(t *testing.T) {
-	encodedURLToken := "ChZXb2ozLXFJS0xEbzg5aDlaYXNaTmF3EjAezFlLpPCa5dMEOTNT0rpUnQUQrFZnKxV4AMvV2UzI7HXlLSSem-PVW-68oJDOA08"
-	encodedStdToken := "ChZXb2ozLXFJS0xEbzg5aDlaYXNaTmF3EjAezFlLpPCa5dMEOTNT0rpUnQUQrFZnKxV4AMvV2UzI7HXlLSSem+PVW+68oJDOA08"
-
-	urlToken, err := unmarshalToken(encodedURLToken)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	stdToken, err := unmarshalToken(encodedStdToken)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !proto.Equal(urlToken, stdToken) {
-		t.Error("want: url encoded and std encoded tokens to be equal, got not equal")
 	}
 }

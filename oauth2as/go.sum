@@ -1,5 +1,9 @@
+crawshaw.dev/jsonfile v0.0.0-20240206193014-699d1dad804e h1:6uFwG2+DRyGcpVzlXMRCP/8DX7jKwTq1jQRFsdbWmU0=
+crawshaw.dev/jsonfile v0.0.0-20240206193014-699d1dad804e/go.mod h1:rWYpwcta+HEXjFjbDiSFGqzhZ5KPlNhit+irVCFLQAI=
 github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
+github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
+github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/lstoll/oidc v1.0.0-beta.1 h1:5a6F79z/bpYQBN7f74qaIKfPWUQWiPUMMgbju9JVjpE=
 github.com/lstoll/oidc v1.0.0-beta.1/go.mod h1:U1AgOYqjOJW2kELYUKlCeRH/tCoEjwovTp7eJajqrNM=
 github.com/tink-crypto/tink-go/v2 v2.2.0 h1:L2Da0F2Udh2agtKztdr69mV/KpnY3/lGTkMgLTVIXlA=

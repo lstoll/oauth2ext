@@ -6,15 +6,16 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidcop/internal"
 	"github.com/lstoll/oidcop/internal/oauth2"
+	"github.com/lstoll/oidcop/storage"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
@@ -83,23 +84,28 @@ type OIDCOpt func(*OIDC)
 // OIDC can be used to handle the various parts of the OIDC auth flow.
 type OIDC struct {
 	issuer       string
-	smgr         SessionManager
+	storage      storage.Storage
 	clients      ClientSource
 	keysetHandle KeysetHandle
 
-	authValidityTime time.Duration
-	codeValidityTime time.Duration
+	handler AuthHandlers
+
+	authValidityTime    time.Duration
+	codeValidityTime    time.Duration
+	idTokenValidity     time.Duration
+	accessTokenValidity time.Duration
+	refreshMaxValidity  time.Duration
 
 	now func() time.Time
 }
 
-func New(cfg *Config, smgr SessionManager, clientSource ClientSource, keysetHandle KeysetHandle, opts ...OIDCOpt) (*OIDC, error) {
+func New(cfg *Config, storage storage.Storage, clientSource ClientSource, keysetHandle KeysetHandle, opts ...OIDCOpt) (*OIDC, error) {
 	if cfg.Issuer == "" {
 		return nil, fmt.Errorf("issuer must be provided")
 	}
 
 	o := &OIDC{
-		smgr:         smgr,
+		storage:      storage,
 		clients:      clientSource,
 		keysetHandle: keysetHandle,
 
@@ -124,23 +130,6 @@ func New(cfg *Config, smgr SessionManager, clientSource ClientSource, keysetHand
 	return o, nil
 }
 
-// AuthorizationRequest details the information the user starting the
-// authorization flow requested
-type AuthorizationRequest struct {
-	// SessionID that was generated for this session. This should be tracked
-	// throughout the authentication process
-	SessionID string
-	// ACRValues are the authentication context class reference values the
-	// caller requested
-	//
-	// https://openid.net/specs/openid-connect-core-1_0.html#acrSemantics
-	ACRValues []string
-	// Scopes that have been requested
-	Scopes []string
-	// ClientID that started this request
-	ClientID string
-}
-
 // StartAuthorization can be used to handle a request to the auth endpoint. It
 // will parse and validate the incoming request, returning a unique identifier.
 // If an error was returned, it should be assumed that this has been returned to
@@ -151,16 +140,17 @@ type AuthorizationRequest struct {
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#CodeFlowAuth
 // https://openid.net/specs/openid-connect-core-1_0.html#ImplicitFlowAuth
-func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) (*AuthorizationRequest, error) {
+func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 	authreq, err := oauth2.ParseAuthRequest(req)
 	if err != nil {
 		_ = oauth2.WriteError(w, req, err)
-		return nil, fmt.Errorf("failed to parse auth endpoint request: %w", err)
+		return
 	}
 
 	redir, err := url.Parse(authreq.RedirectURI)
 	if err != nil {
-		return nil, oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "redirect_uri is in an invalid format", err, "failed to parse redirect URI")
+		oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "redirect_uri is in an invalid format", err, "failed to parse redirect URI")
+		return
 	}
 
 	// If a non valid client ID or redirect URI is specified, we should return
@@ -170,90 +160,75 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) (*Au
 
 	cidok, err := o.clients.IsValidClientID(authreq.ClientID)
 	if err != nil {
-		return nil, oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource check client ID")
+		oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource check client ID")
+		return
 	}
 	if !cidok {
-		return nil, oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Client ID is not valid", nil, "")
+		oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Client ID is not valid", nil, "")
+		return
 	}
 
 	redirok, err := o.clients.ValidateClientRedirectURI(authreq.ClientID, authreq.RedirectURI)
 	if err != nil {
-		return nil, oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource redirect URI validation")
+		oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource redirect URI validation")
+		return
 	}
 	if !redirok {
-		return nil, oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Invalid redirect URI", nil, "")
+		oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Invalid redirect URI", nil, "")
+		return
 	}
 
-	ar := &sessAuthRequest{
+	ar := &storage.AuthRequest{
+		ID:            uuid.Must(uuid.NewRandom()),
 		RedirectURI:   redir.String(),
 		State:         authreq.State,
 		Scopes:        authreq.Scopes,
 		Nonce:         authreq.Raw.Get("nonce"),
 		CodeChallenge: authreq.CodeChallenge,
+		Expiry:        o.now().Add(o.authValidityTime),
+	}
+	if authreq.Raw.Get("acr_values") != "" {
+		ar.ACRValues = strings.Split(authreq.Raw.Get("acr_values"), " ")
 	}
 
 	switch authreq.ResponseType {
 	case oauth2.ResponseTypeCode:
-		ar.ResponseType = authRequestResponseTypeCode
+		ar.ResponseType = storage.AuthRequestResponseTypeCode
 	default:
-		return nil, oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeUnsupportedResponseType, authreq.State, "response type must be code", nil)
+		oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeUnsupportedResponseType, authreq.State, "response type must be code", nil)
+		return
 	}
 
-	sess := &sessionV2{
-		ID:       o.smgr.NewID(),
-		Stage:    sessionStageRequested,
-		ClientID: authreq.ClientID,
-		Request:  ar,
-		Expiry:   o.now().Add(o.authValidityTime),
-	}
-
-	if err := putSession(req.Context(), o.smgr, sess); err != nil {
-		return nil, oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeErrServerError, authreq.State, "failed to persist session", err)
+	if err := o.storage.PutAuthRequest(req.Context(), ar); err != nil {
+		oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeErrServerError, authreq.State, "failed to persist session", err)
+		return
 	}
 
 	areq := &AuthorizationRequest{
-		SessionID: sess.ID,
-		Scopes:    authreq.Scopes,
-		ClientID:  authreq.ClientID,
+		ID:        ar.ID,
+		Scopes:    ar.Scopes,
+		ClientID:  ar.ClientID,
+		ACRValues: ar.ACRValues,
 	}
 	if authreq.Raw.Get("acr_values") != "" {
 		areq.ACRValues = strings.Split(authreq.Raw.Get("acr_values"), " ")
 	}
-	return areq, nil
+
+	o.handler.StartAuthorization(w, req, areq)
 }
 
-// Authorization tracks the information a session was actually authorized for
-type Authorization struct {
-	// Scopes are the list of scopes this session was granted
-	Scopes []string
-	// ACR is the Authentication Context Class Reference the session was
-	// authenticated with
-	ACR string
-	// AMR are the Authentication Methods Reference the session was
-	// authenticated with
-	AMR []string
-}
-
-// FinishAuthorization should be called once the consumer has validated the
-// identity of the user. This will return the appropriate response directly to
-// the passed http context, which should be considered finalized when this is
-// called. Note: This does not have to be the same http request in which
-// Authorization was started, but the session ID field will need to be tracked and
-// consistent.
-//
-// The scopes this request has been granted with should be included. Metadata
-// can be passed, that will be made available to requests to userinfo and token
-// issue/refresh. This is application-specific, and should be used to track
-// information needed to serve those endpoints.
-//
-// https://openid.net/specs/openid-connect-core-1_0.html#IDToken
-func (o *OIDC) FinishAuthorization(w http.ResponseWriter, req *http.Request, sessionID string, auth *Authorization) error {
-	sess, err := getSession(req.Context(), o.smgr, sessionID)
+// TODO - set a authroizer on the handles.
+func (o *OIDC) FinishAuthorization(w http.ResponseWriter, req *http.Request, authReqID uuid.UUID, auth *Authorization) error {
+	authreq, err := o.storage.GetAuthRequest(req.Context(), authReqID)
 	if err != nil {
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to get session")
 	}
-	if sess == nil {
+	if authreq == nil {
 		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "Access Denied", err, "session not found in storage")
+	}
+
+	if err := o.storage.DeleteAuthRequest(req.Context(), authreq.ID); err != nil {
+		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "internal error", err, "deleting auth request failed")
 	}
 
 	var openidScope bool
@@ -264,28 +239,25 @@ func (o *OIDC) FinishAuthorization(w http.ResponseWriter, req *http.Request, ses
 	}
 	if !openidScope {
 		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "Access Denied", err, "openid scope was not granted")
-
 	}
 
-	sess.Authorization = &sessAuthorization{
-		Scopes:       auth.Scopes,
-		ACR:          auth.ACR,
-		AMR:          auth.AMR,
-		AuthorizedAt: o.now(),
-	}
-
-	switch sess.Request.ResponseType {
-	case authRequestResponseTypeCode:
-		return o.finishCodeAuthorization(w, req, sess)
+	switch authreq.ResponseType {
+	case storage.AuthRequestResponseTypeCode:
+		return o.finishCodeAuthorization(w, req, authreq, auth)
 	default:
-		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", nil, fmt.Sprintf("unknown ResponseType %s", sess.Request.ResponseType))
+		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", nil, fmt.Sprintf("unknown ResponseType %s", authreq.ResponseType))
 	}
 }
 
-func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request, session *sessionV2) error {
-	codeExp := o.now().Add(o.codeValidityTime)
+func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request, authReq *storage.AuthRequest, auth *Authorization) error {
+	ac := &storage.AuthCode{
+		ID:            uuid.Must(uuid.NewRandom()),
+		Authorization: auth.toStorage(authReq.ID, authReq.ClientID, o.now(), authReq.Nonce),
+		CodeChallenge: authReq.CodeChallenge,
+		Expiry:        o.now().Add(o.codeValidityTime),
+	}
 
-	ucode, scode, err := newToken(session.ID, codeExp)
+	ucode, scode, err := newToken(ac.ID)
 	if err != nil {
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to generate code token")
 	}
@@ -295,147 +267,26 @@ func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request,
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to marshal code token")
 	}
 
-	session.AuthCode = scode
-	session.Stage = sessionStageCode
-	// switch expiry to the max lifetime of the code
-	session.Expiry = codeExp
+	ac.Code = scode
 
-	if err := putSession(req.Context(), o.smgr, session); err != nil {
-		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to put authReq to storage")
+	if err := o.storage.PutAuthCode(req.Context(), ac); err != nil {
+		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to save auth code")
 	}
 
-	redir, err := url.Parse(session.Request.RedirectURI)
+	redir, err := url.Parse(authReq.RedirectURI)
 	if err != nil {
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to parse authreq's URI")
 	}
 
 	codeResp := &oauth2.CodeAuthResponse{
 		RedirectURI: redir,
-		State:       session.Request.State,
+		State:       authReq.State,
 		Code:        code,
 	}
 
 	oauth2.SendCodeAuthResponse(w, req, codeResp)
 
 	return nil
-}
-
-// TokenRequest encapsulates the information from the request to the token
-// endpoint. This is passed to the handler, to generate an appropriate response.
-type TokenRequest struct {
-	// SessionID of the session this request corresponds to
-	SessionID string
-	// ClientID of the client this session is bound to.
-	ClientID string
-	// Authorization information this session was authorized with
-	Authorization Authorization
-	// GrantType indicates the grant that was requested for this invocation of
-	// the token endpoint
-	GrantType oauth2.GrantType
-	// SessionRefreshable is true if the offline_access scope was permitted for
-	// the user, i.e this session should issue refresh tokens
-	SessionRefreshable bool
-	// IsRefresh is true if the token endpoint was called with the refresh token
-	// grant (i.e called with a refresh, rather than access token)
-	IsRefresh bool
-	// Nonce from the authentication request, if specified
-	Nonce string
-	// AuthTime Time when the End-User authentication occurred
-	AuthTime time.Time
-
-	issuer  string
-	authReq *sessAuthRequest
-	now     func() time.Time
-}
-
-// PrefillIDToken can be used to create a basic ID token containing all required
-// claims, mapped with information from this request. The issuer and subject
-// will be set as provided, and the token's expiry will be set to the
-// appropriate time base on the validity period
-//
-// Aside from the explicitly passed fields, the following information will be set:
-// * Audience (aud) will contain the Client ID
-// * ACR claim set
-// * AMR claim set
-// * Issued At (iat) time set
-// * Auth Time (auth_time) time set
-// * Nonce that was originally passed in, if there was one
-func (t *TokenRequest) PrefillIDToken(sub string, expires time.Time) oidc.IDClaims {
-	// TODO
-	// Extra:    map[string]interface{}{},
-	return oidc.IDClaims{
-		Issuer:   t.issuer,
-		Subject:  sub,
-		Expiry:   oidc.UnixTime(expires.Unix()),
-		Audience: oidc.StrOrSlice{t.ClientID},
-		ACR:      t.Authorization.ACR,
-		AMR:      t.Authorization.AMR,
-		IssuedAt: oidc.UnixTime(t.now().Unix()),
-		AuthTime: oidc.UnixTime(t.AuthTime.Unix()),
-		Nonce:    t.Nonce,
-	}
-}
-
-// PrefillAccessToken can be used to create a basic access token containing all
-// required claims, mapped with information from this request. The issuer and
-// subject will be set as provided, and the token's expiry will be set to the
-// appropriate time base on the validity period
-//
-// Aside from the explicitly passed fields, the following information will be set:
-// * Audience (aud) will contain the Client ID
-// * ACR claim set
-// * AMR claim set
-// * Issued At (iat) time set
-// * Auth Time (auth_time) time set
-// * Scope from the Authorization
-// * Randomly generated JWTID (uuid v4)
-// * Client ID for this request
-func (t *TokenRequest) PrefillAccessToken(sub string, expires time.Time) oidc.AccessTokenClaims {
-	// TODO -
-	// LoginSessionID: t.SessionID,
-	// Extra:          map[string]interface{}{},
-	return oidc.AccessTokenClaims{
-		Issuer:   t.issuer,
-		Subject:  sub,
-		Expiry:   oidc.UnixTime(expires.Unix()),
-		Audience: oidc.StrOrSlice{t.ClientID},
-		ACR:      t.Authorization.ACR,
-		AMR:      t.Authorization.AMR,
-		IssuedAt: oidc.UnixTime(t.now().Unix()),
-		AuthTime: oidc.UnixTime(t.AuthTime.Unix()),
-		Scope:    strings.Join(t.Authorization.Scopes, " "),
-		JWTID:    internal.MustUUIDv4(),
-		ClientID: t.ClientID,
-	}
-}
-
-// TokenResponse is returned by the token endpoint handler, indicating what it
-// should actually return to the user.
-type TokenResponse struct {
-	// IssueRefreshToken indicates if we should issue a refresh token.
-	IssueRefreshToken bool
-
-	// AccessToken is returned as the access token for the request to this
-	// endpoint. It is up to the application to store _all_ the desired
-	// information in the token correctly, and to obey the OAuth2 JWT profile
-	// spec (https://datatracker.ietf.org/doc/html/rfc9068). The handler will
-	// make no changes to this token.
-	AccessToken oidc.AccessTokenClaims
-
-	// IDToken is returned as the id_token for the request to this endpoint. It
-	// is up to the application to store _all_ the desired information in the
-	// token correctly, and to obey the OIDC spec. The handler will make no
-	// changes to this token.
-	IDToken oidc.IDClaims
-
-	// RefreshTokenValidUntil indicates how long the returned refresh token should
-	// be valid for, assuming one is issued.
-	RefreshTokenValidUntil time.Time
-}
-
-type unauthorizedErr interface {
-	error
-	Unauthorized() bool
 }
 
 // Token is used to handle the access token endpoint for code flow requests.
@@ -457,17 +308,21 @@ type unauthorizedErr interface {
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#TokenEndpoint
 // https://openid.net/specs/openid-connect-core-1_0.html#RefreshTokens
-func (o *OIDC) Token(w http.ResponseWriter, req *http.Request, handler func(req *TokenRequest) (*TokenResponse, error)) error {
+func (o *OIDC) Token(w http.ResponseWriter, req *http.Request) error {
 	treq, err := oauth2.ParseTokenRequest(req)
 	if err != nil {
 		_ = oauth2.WriteError(w, req, err)
 		return err
 	}
 
-	resp, err := o.token(req.Context(), treq, handler)
-	if err != nil {
-		_ = oauth2.WriteError(w, req, err)
-		return err
+	var resp *oauth2.TokenResponse
+	switch treq.GrantType {
+	case oauth2.GrantTypeAuthorizationCode:
+		resp, err = o.codeToken(req.Context(), treq)
+	case oauth2.GrantTypeRefreshToken:
+		resp, err = o.refreshToken(req.Context(), treq)
+	default:
+		err = &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid grant type", Cause: fmt.Errorf("grant type %s not handled", treq.GrantType)}
 	}
 
 	if err := oauth2.WriteTokenResponse(w, resp); err != nil {
@@ -478,90 +333,66 @@ func (o *OIDC) Token(w http.ResponseWriter, req *http.Request, handler func(req 
 	return nil
 }
 
-func (o *OIDC) token(ctx context.Context, req *oauth2.TokenRequest, handler func(req *TokenRequest) (*TokenResponse, error)) (*oauth2.TokenResponse, error) {
-	var sess *sessionV2
-	var err error
-
-	var isRefresh bool
-
-	switch req.GrantType {
-	case oauth2.GrantTypeAuthorizationCode:
-		sess, err = o.fetchCodeSession(ctx, req)
-	case oauth2.GrantTypeRefreshToken:
-		isRefresh = true
-		sess, err = o.fetchRefreshSession(ctx, req)
-
-	default:
-		err = &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid grant type", Cause: fmt.Errorf("grant type %s not handled", req.GrantType)}
-	}
+func (o *OIDC) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth2.TokenResponse, error) {
+	id, utok, err := unmarshalToken(treq.Code)
 	if err != nil {
-		return nil, err
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid code", Cause: err}
+	}
+	ac, err := o.storage.GetAuthCode(ctx, id) // TODO
+	if err != nil {
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get code from storage", Cause: err}
+	}
+	if ac == nil {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
 	}
 
-	if o.now().After(sess.Expiry) {
+	// discard the auth code now, it can only be used once regardless of it's
+	// validity.
+	if err := o.storage.DeleteAuthCode(ctx, id); err != nil {
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
+	}
+
+	// storage should take care of this, but an extra check doesn't hurt
+	if o.now().After(ac.Expiry) {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
 	}
 
-	// check to see if we're working with the same client
-	if sess.ClientID != req.ClientID {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
-	}
-
-	// validate the client
-	cok, err := o.clients.ValidateClientSecret(req.ClientID, req.ClientSecret)
+	ok, err := tokensMatch(utok, ac.Code)
 	if err != nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check client id & secret", Cause: err}
-
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid code", Cause: err}
 	}
-	if !cok {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "Invalid client secret"}
+	if !ok {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code", Cause: err}
 	}
 
-	// PKCE only applies on the authorization code grant type
-	if req.GrantType == oauth2.GrantTypeAuthorizationCode {
-		// If the client is public and we require pkce, reject it if there's no
-		// verifier.
-		reqPKCE, err := o.clients.RequiresPKCE(req.ClientID)
-		if err != nil {
-			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check if client is public", Cause: err}
+	// we have a validated code.
+	if err := o.validateTokenClient(ctx, treq, ac.Authorization.ClientID); err != nil {
+		return nil, err
+	}
+
+	// If the client is public and we require pkce, reject it if there's no
+	// verifier.
+	reqPKCE, err := o.clients.RequiresPKCE(treq.ClientID)
+	if err != nil {
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check if client is public", Cause: err}
+	}
+	if reqPKCE && treq.CodeVerifier == "" {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
+	}
+
+	// Verify the code verifier against the session data
+	if treq.CodeVerifier != "" {
+		if !verifyCodeChallenge(treq.CodeVerifier, ac.CodeChallenge) {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE verification failed"}
 		}
-		if reqPKCE && req.CodeVerifier == "" {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
-		}
-
-		// Verify the code verifier against the session data
-		if req.CodeVerifier != "" {
-			if !verifyCodeChallenge(req.CodeVerifier, sess.Request.CodeChallenge) {
-				return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE verification failed"}
-			}
-		}
 	}
 
-	// Call the handler with information about the request, and get the response.
-	if sess.Authorization == nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "session authorization is nil"}
-	}
-
+	// we have a validated request. Call out to the handler to get the details.
 	tr := &TokenRequest{
-		SessionID: sess.ID,
-		ClientID:  req.ClientID,
-		Authorization: Authorization{
-			Scopes: sess.Authorization.Scopes,
-			ACR:    sess.Authorization.ACR,
-			AMR:    sess.Authorization.AMR,
-		},
-		GrantType:          req.GrantType,
-		SessionRefreshable: strsContains(sess.Authorization.Scopes, "offline_access"),
-		IsRefresh:          isRefresh,
-		Nonce:              sess.Request.Nonce,
-		AuthTime:           sess.Authorization.AuthorizedAt,
-
-		issuer:  o.issuer,
-		authReq: sess.Request,
-		now:     o.now,
+		Authorization: *ac.Authorization,
 	}
 
-	tresp, err := handler(tr)
+	tresp, err := o.handler.Token(tr)
 	if err != nil {
 		var uaerr unauthorizedErr
 		if errors.As(err, &uaerr); uaerr != nil && uaerr.Unauthorized() {
@@ -570,40 +401,121 @@ func (o *OIDC) token(ctx context.Context, req *oauth2.TokenRequest, handler func
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	if tresp.IDToken.Expiry == 0 {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "id token cannot have a 0 expiry"}
+	return o.buildTokenResponse(ctx, ac.Authorization, nil, tresp)
+}
+
+func (o *OIDC) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
+	id, utok, err := unmarshalToken(treq.RefreshToken)
+	if err != nil {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid refresh token", Cause: err}
+	}
+	rsess, err := o.storage.GetRefreshSession(ctx, id)
+	if err != nil {
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get refresh session from storage", Cause: err}
+	}
+	if rsess == nil {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 	}
 
-	if tresp.IssueRefreshToken && tresp.RefreshTokenValidUntil.Before(o.now()) {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "refresh token must be valid > now"}
+	// queue a delete the session. This is done to ensure each refresh token can only
+	// attempt to be used once, regardless of the outcome of the process. The ID
+	// is sufficently random to make this a not-usable attack vector. If the refresh
+	// succeeds, abort the deferred deletion.
+	defer func() {
+		if retErr != nil {
+			if err := o.storage.DeleteRefreshSession(ctx, rsess.ID); err != nil {
+				retErr = &oauth2.HTTPError{
+					Code:     http.StatusInternalServerError,
+					Message:  "internal error",
+					CauseMsg: retErr.Error() + " - subsequent refresh session delete failed",
+					Cause:    errors.Join(retErr, err),
+				}
+			}
+		}
+	}()
+
+	// storage should take care of this, but an extra check doesn't hurt
+	if o.now().After(rsess.Expiry) {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
 	}
 
-	// If we're allowing refresh, issue one of those too.
-	// do this after, as it'll set a longer expiration on the session
+	ok, err := tokensMatch(utok, rsess.RefreshToken)
+	if err != nil {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid code", Cause: err}
+	}
+	if !ok || len(rsess.RefreshToken) == 0 {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code", Cause: err}
+	}
+
+	// we have a validated request. Call out to the handler to get the details.
+	tr := &RefreshTokenRequest{
+		Authorization: *rsess.Authorization,
+	}
+
+	tresp, err := o.handler.RefreshToken(tr)
+	if err != nil {
+		var uaerr unauthorizedErr
+		if errors.As(err, &uaerr); uaerr != nil && uaerr.Unauthorized() {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: uaerr.Error()}
+		}
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
+	}
+
+	return o.buildTokenResponse(ctx, rsess.Authorization, nil, tresp)
+}
+
+// buildTokenResponse creates the oauth token response for code and refresh.
+// refreshSession can be nil, if it is and we should issue a refresh token, a
+// new refresh session will be created.
+func (o *OIDC) buildTokenResponse(ctx context.Context, auth *storage.Authorization, refreshSess *storage.RefreshSession, tresp *TokenResponse) (*oauth2.TokenResponse, error) {
 	var refreshTok string
-	if tresp.IssueRefreshToken {
-		urefreshtok, srefreshtok, err := newToken(sess.ID, tresp.RefreshTokenValidUntil)
+	if !tresp.OverrideRefreshTokenIssuance && slices.Contains(auth.Scopes, oidc.ScopeOffline) {
+		refreshExpiry := tresp.RefreshTokenValidUntil
+		if refreshExpiry.IsZero() {
+			refreshExpiry = auth.AuthenticatedAt.Add(o.refreshMaxValidity)
+		}
+		// build a refresh token, and a session if it doesn't exist. Update if
+		// it does
+		if refreshSess == nil {
+			refreshSess = &storage.RefreshSession{
+				ID:            uuid.Must(uuid.NewRandom()),
+				Authorization: auth,
+				Expiry:        refreshExpiry,
+			}
+		}
+
+		urefreshtok, srefreshtok, err := newToken(refreshSess.ID)
 		if err != nil {
 			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to generate access token", Cause: err}
 		}
-		sess.Expiry = srefreshtok.Expiry
-		sess.RefreshToken = srefreshtok
-		sess.Stage = sessionStageRefreshable
+		refreshSess.RefreshToken = srefreshtok
 
 		refreshTok, err = marshalToken(urefreshtok)
 		if err != nil {
 			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to marshal refresh token", Cause: err}
 		}
-	} else {
-		// clear any token
-		sess.RefreshToken = nil
+
+		if err := o.storage.PutRefreshSession(ctx, refreshSess); err != nil {
+			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to update refresh session", Cause: err}
+		}
+	} else if refreshSess != nil {
+		if err := o.storage.DeleteRefreshSession(ctx, refreshSess.ID); err != nil {
+			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete refresh session", Cause: err}
+		}
 	}
 
-	// update the session stage before we put it, we will be issuing a token.
-	sess.Stage = sessionStageAccessTokenIssued
+	idExp := tresp.IDTokenExpiry
+	if idExp.IsZero() {
+		idExp = o.now().Add(o.idTokenValidity)
+	}
+	atExp := tresp.AccessTokenExpiry
+	if atExp.IsZero() {
+		atExp = o.now().Add(o.accessTokenValidity)
+	}
 
-	if err := putSession(ctx, o.smgr, sess); err != nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to put access token", Cause: err}
+	rawid, rawat, err := o.buildIDAccessTokens(auth, *tresp.Identity, tresp.AccessTokenExtraClaims, idExp, atExp)
+	if err != nil {
+		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating raw JWTs", Cause: err}
 	}
 
 	h, err := o.keysetHandle.Handle(ctx)
@@ -616,22 +528,12 @@ func (o *OIDC) token(ctx context.Context, req *oauth2.TokenRequest, handler func
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating signer from handle", Cause: err}
 	}
 
-	rawIDJWT, err := tresp.IDToken.ToJWT(nil)
-	if err != nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping id claims to jwt", Cause: err}
-	}
-
-	sidt, err := signer.SignAndEncode(rawIDJWT)
+	sidt, err := signer.SignAndEncode(rawid)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign id token", Cause: err}
 	}
 
-	rawATJWT, err := tresp.AccessToken.ToJWT(nil)
-	if err != nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "mapping access claims to jwt", Cause: err}
-	}
-
-	sat, err := signer.SignAndEncode(rawATJWT)
+	sat, err := signer.SignAndEncode(rawat)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign access token", Cause: err}
 	}
@@ -640,104 +542,33 @@ func (o *OIDC) token(ctx context.Context, req *oauth2.TokenRequest, handler func
 		AccessToken:  sat,
 		RefreshToken: refreshTok,
 		TokenType:    "bearer",
-		ExpiresIn:    tresp.AccessToken.Expiry.Time().Sub(o.now()),
+		ExpiresIn:    atExp.Sub(o.now()),
 		ExtraParams: map[string]interface{}{
 			"id_token": string(sidt),
 		},
 	}, nil
 }
 
-// fetchCodeSession handles loading the session for a code grant.
-func (o *OIDC) fetchCodeSession(ctx context.Context, treq *oauth2.TokenRequest) (*sessionV2, error) {
-	ucode, err := unmarshalToken(treq.Code)
+func (o *OIDC) validateTokenClient(ctx context.Context, req *oauth2.TokenRequest, wantClientID string) error {
+	// check to see if we're working with the same client
+	if wantClientID != req.ClientID {
+		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
+	}
+
+	// validate the client
+	cok, err := o.clients.ValidateClientSecret(req.ClientID, req.ClientSecret)
 	if err != nil {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid code", Cause: err}
+		return &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check client id & secret", Cause: err}
+
+	}
+	if !cok {
+		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "Invalid client secret"}
 	}
 
-	sess, err := getSession(ctx, o.smgr, ucode.SessionId)
-	if err != nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get session from storage", Cause: err}
-	}
-	if sess == nil {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "sesion expired"}
-	}
+	// TODO - check redirect url. We don't allow wildcards etc, but still worth doing.
+	// https://www.rfc-editor.org/rfc/rfc6749#section-10.6
 
-	if sess.AuthCodeRedeemed || o.now().After(sess.AuthCode.Expiry) {
-		// Drop the session too, assume we're under some kind of replay.
-		// https://tools.ietf.org/html/rfc6819#section-4.4.1.1
-		if err := o.smgr.DeleteSession(ctx, sess.ID); err != nil {
-			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
-		}
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
-	}
-
-	ok, err := tokensMatch(ucode, sess.AuthCode)
-	if err != nil {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid code", Cause: err}
-	}
-	if !ok {
-		// if we're passed an invalid code, assume we're under attack and drop the session
-		if err := o.smgr.DeleteSession(ctx, sess.ID); err != nil {
-			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
-		}
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code", Cause: err}
-	}
-
-	sess.AuthCodeRedeemed = true
-
-	return sess, nil
-}
-
-// fetchCodeSession handles loading the session for a refresh grant.
-func (o *OIDC) fetchRefreshSession(ctx context.Context, treq *oauth2.TokenRequest) (*sessionV2, error) {
-	urefresh, err := unmarshalToken(treq.RefreshToken)
-	if err != nil {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid refresh token", Cause: err}
-	}
-
-	sess, err := getSession(ctx, o.smgr, urefresh.SessionId)
-	if err != nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get session from storage", Cause: err}
-	}
-	if sess == nil {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired", Cause: err}
-	}
-
-	if sess.RefreshToken == nil {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "no refresh token issued for session"}
-	}
-
-	if o.now().After(sess.Expiry) || o.now().After(sess.RefreshToken.Expiry) {
-		if err := o.smgr.DeleteSession(ctx, sess.ID); err != nil {
-			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
-		}
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
-	}
-
-	ok, err := tokensMatch(urefresh, sess.RefreshToken)
-	if err != nil {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid refresh token", Cause: err}
-	}
-	if !ok {
-		// if we're passed an invalid refresh token, assume we're under attack and drop the session
-		if err := o.smgr.DeleteSession(ctx, sess.ID); err != nil {
-			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
-		}
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token", Cause: err}
-	}
-
-	// Drop the current token, it's been redeemed. The caller can decide to
-	// issue a new one.
-	sess.RefreshToken = nil
-
-	return sess, nil
-}
-
-// UserinfoRequest contains information about this request to the UserInfo
-// endpoint
-type UserinfoRequest struct {
-	// Subject is the sub of the user this request is for.
-	Subject string
+	return nil
 }
 
 // Userinfo can handle a request to the userinfo endpoint. If the request is not
@@ -746,7 +577,7 @@ type UserinfoRequest struct {
 // appropriate response data in JSON format to the passed writer.
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#UserInfoResponse
-func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w io.Writer, uireq *UserinfoRequest) error) error {
+func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) error {
 	authSp := strings.SplitN(req.Header.Get("authorization"), " ", 2)
 	if !strings.EqualFold(authSp[0], "bearer") || len(authSp) != 2 {
 		be := &oauth2.BearerError{} // no content, just request auth
@@ -756,6 +587,8 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w
 	}
 
 	// TODO - replace this verification logic with oidc.Provider
+
+	// TODO - check the audience is the issuer, as we have hardcoded.
 
 	h, err := o.keysetHandle.Handle(req.Context())
 	if err != nil {
@@ -810,13 +643,22 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request, handler func(w
 
 	w.Header().Set("Content-Type", "application/json")
 
-	if err := handler(w, uireq); err != nil {
+	uiresp, err := o.handler.Userinfo(w, uireq)
+	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error in user handler"}
 		_ = oauth2.WriteError(w, req, herr)
 		return herr
 	}
 
+	// TODO - build response, respect scopes, etc
+	_ = uiresp
+
 	return nil
+}
+
+type unauthorizedErr interface {
+	error
+	Unauthorized() bool
 }
 
 func strsContains(strs []string, s string) bool {

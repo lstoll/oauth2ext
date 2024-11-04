@@ -43,7 +43,7 @@ func TestStartAuthorization(t *testing.T) {
 		Query                url.Values
 		WantReturnedErrMatch func(error) bool
 		WantHTTPStatus       int
-		CheckResponse        func(*testing.T, SessionManager, *AuthorizationRequest)
+		CheckResponse        func(*testing.T, Storage, *AuthorizationRequest)
 	}{
 		{
 			Name: "Bad client ID should return error directly",
@@ -72,7 +72,7 @@ func TestStartAuthorization(t *testing.T) {
 				"response_type": []string{"code"},
 				"redirect_uri":  []string{redirectURI},
 			},
-			CheckResponse: func(t *testing.T, smgr SessionManager, areq *AuthorizationRequest) {
+			CheckResponse: func(t *testing.T, smgr Storage, areq *AuthorizationRequest) {
 				if len(areq.ACRValues) > 0 {
 					t.Errorf("want 0 acr_values, got: %d", len(areq.ACRValues))
 				}
@@ -96,7 +96,7 @@ func TestStartAuthorization(t *testing.T) {
 				"redirect_uri":  []string{redirectURI},
 				"acr_values":    []string{"mfa smfa"},
 			},
-			CheckResponse: func(t *testing.T, smgr SessionManager, areq *AuthorizationRequest) {
+			CheckResponse: func(t *testing.T, smgr Storage, areq *AuthorizationRequest) {
 				if len(areq.ACRValues) != 2 {
 					t.Errorf("want 2 acr_values, got: %d", len(areq.ACRValues))
 				}
@@ -159,10 +159,10 @@ func TestStartAuthorization(t *testing.T) {
 func TestFinishAuthorization(t *testing.T) {
 	sessID := mustGenerateID()
 
-	sess := sessionV2{
+	sess := RefreshSession{
 		ID:       sessID,
 		ClientID: "client-id",
-		Request: &sessAuthRequest{
+		Request: &AuthRequest{
 			RedirectURI:  "https://redir",
 			State:        "state",
 			Scopes:       []string{"openid"},
@@ -176,13 +176,13 @@ func TestFinishAuthorization(t *testing.T) {
 		SessionID            string
 		WantReturnedErrMatch func(error) bool
 		WantHTTPStatus       int
-		Check                func(t *testing.T, smgr SessionManager, rec *httptest.ResponseRecorder)
+		Check                func(t *testing.T, smgr Storage, rec *httptest.ResponseRecorder)
 	}{
 		{
 			Name:           "Redirects to the correct location",
 			SessionID:      sessID,
 			WantHTTPStatus: 302,
-			Check: func(t *testing.T, smgr SessionManager, rec *httptest.ResponseRecorder) {
+			Check: func(t *testing.T, smgr Storage, rec *httptest.ResponseRecorder) {
 				loc := rec.Header().Get("location")
 
 				// strip query to compare base URL
@@ -222,7 +222,7 @@ func TestFinishAuthorization(t *testing.T) {
 			Name:                 "Invalid request ID fails",
 			SessionID:            mustGenerateID(),
 			WantReturnedErrMatch: matchHTTPErrStatus(403),
-			Check: func(t *testing.T, smgr SessionManager, _ *httptest.ResponseRecorder) {
+			Check: func(t *testing.T, smgr Storage, _ *httptest.ResponseRecorder) {
 				gotSess := &versionedSession{}
 				ok, err := smgr.GetSession(context.Background(), sessID, gotSess)
 				if err != nil {
@@ -367,7 +367,7 @@ func TestToken(t *testing.T) {
 		}
 	}
 
-	newCodeSess := func(t *testing.T, smgr SessionManager) (usertok string) {
+	newCodeSess := func(t *testing.T, smgr Storage) (usertok string) {
 		t.Helper()
 
 		utok, stok, err := newToken(mustGenerateID(), time.Now().Add(1*time.Minute))
@@ -380,13 +380,13 @@ func TestToken(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		sess := &sessionV2{
+		sess := &RefreshSession{
 			ID:            utok.SessionId,
 			AuthCode:      stok,
 			Authorization: &sessAuthorization{},
 			ClientID:      clientID,
 			Expiry:        time.Now().Add(1 * time.Minute),
-			Request:       &sessAuthRequest{},
+			Request:       &AuthRequest{},
 		}
 
 		if err := putSession(context.Background(), smgr, sess); err != nil {
@@ -682,23 +682,23 @@ func TestFetchCodeSession(t *testing.T) {
 		Name string
 		// Setup should return both a session to be persisted, and a token
 		// request to use.
-		Setup func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest)
+		Setup func(t *testing.T) (sess *RefreshSession, tr *oauth2.TokenRequest)
 		// WantErrMatch signifies that we expect an error. If we don't, it is
 		// expected the retrieved session matches the saved session.
 		WantErrMatch func(error) bool
 		// Cmp compares the sessions. If nil, a simple proto.Equal is performed
-		Cmp func(t *testing.T, stored, returned *sessionV2)
+		Cmp func(t *testing.T, stored, returned *RefreshSession)
 	}{
 		{
 			Name: "Valid session, valid request",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
+			Setup: func(t *testing.T) (sess *RefreshSession, tr *oauth2.TokenRequest) {
 				sid := mustGenerateID()
 				u, s, err := newToken(sid, time.Now().Add(1*time.Minute))
 				if err != nil {
 					t.Fatal(err)
 				}
 
-				sess = &sessionV2{
+				sess = &RefreshSession{
 					ID:       sid,
 					AuthCode: s,
 				}
@@ -709,7 +709,7 @@ func TestFetchCodeSession(t *testing.T) {
 
 				return sess, tr
 			},
-			Cmp: func(t *testing.T, stored, returned *sessionV2) {
+			Cmp: func(t *testing.T, stored, returned *RefreshSession) {
 				if !returned.AuthCodeRedeemed {
 					t.Error("auth code should be marked as redeemed")
 				}
@@ -720,7 +720,7 @@ func TestFetchCodeSession(t *testing.T) {
 		},
 		{
 			Name: "Code that does not correspond to a session",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
+			Setup: func(t *testing.T) (sess *RefreshSession, tr *oauth2.TokenRequest) {
 				badsid := mustGenerateID()
 				u, _, err := newToken(badsid, time.Now().Add(1*time.Minute))
 				if err != nil {
@@ -733,7 +733,7 @@ func TestFetchCodeSession(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				sess = &sessionV2{
+				sess = &RefreshSession{
 					ID:       goodsid,
 					AuthCode: s,
 				}
@@ -748,7 +748,7 @@ func TestFetchCodeSession(t *testing.T) {
 		},
 		{
 			Name: "Token with bad data",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
+			Setup: func(t *testing.T) (sess *RefreshSession, tr *oauth2.TokenRequest) {
 				sid := mustGenerateID()
 				u, s, err := newToken(sid, time.Now().Add(1*time.Minute))
 				if err != nil {
@@ -758,7 +758,7 @@ func TestFetchCodeSession(t *testing.T) {
 				// tamper with u by changing the actual token data
 				u.Token = []byte("willnotmatch")
 
-				sess = &sessionV2{
+				sess = &RefreshSession{
 					ID:       sid,
 					AuthCode: s,
 				}
@@ -773,14 +773,14 @@ func TestFetchCodeSession(t *testing.T) {
 		},
 		{
 			Name: "Code that has expiration time in the past",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
+			Setup: func(t *testing.T) (sess *RefreshSession, tr *oauth2.TokenRequest) {
 				sid := mustGenerateID()
 				u, s, err := newToken(sid, time.Now().Add(-1*time.Minute))
 				if err != nil {
 					t.Fatal(err)
 				}
 
-				sess = &sessionV2{
+				sess = &RefreshSession{
 					ID:       sid,
 					AuthCode: s,
 					Expiry:   time.Now().Add(1 * time.Minute),
@@ -830,23 +830,23 @@ func TestFetchRefreshSession(t *testing.T) {
 		Name string
 		// Setup should return both a session to be persisted, and a token
 		// request to use.
-		Setup func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest)
+		Setup func(t *testing.T) (sess *RefreshSession, tr *oauth2.TokenRequest)
 		// WantErrMatch signifies that we expect an error. If we don't, it is
 		// expected the retrieved session matches the saved session.
 		WantErrMatch func(error) bool
 		// Cmp compares the sessions. If nil, a simple proto.Equal is performed
-		Cmp func(t *testing.T, stored, returned *sessionV2)
+		Cmp func(t *testing.T, stored, returned *RefreshSession)
 	}{
 		{
 			Name: "Valid refresh token for a session",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
+			Setup: func(t *testing.T) (sess *RefreshSession, tr *oauth2.TokenRequest) {
 				sid := mustGenerateID()
 				u, s, err := newToken(sid, time.Now().Add(1*time.Minute))
 				if err != nil {
 					t.Fatal(err)
 				}
 
-				sess = &sessionV2{
+				sess = &RefreshSession{
 					ID:           sid,
 					RefreshToken: s,
 					Expiry:       time.Now().Add(1 * time.Minute),
@@ -858,7 +858,7 @@ func TestFetchRefreshSession(t *testing.T) {
 
 				return sess, tr
 			},
-			Cmp: func(t *testing.T, stored, returned *sessionV2) {
+			Cmp: func(t *testing.T, stored, returned *RefreshSession) {
 				if returned.RefreshToken != nil {
 					t.Error("refresh token should be cleared")
 				}

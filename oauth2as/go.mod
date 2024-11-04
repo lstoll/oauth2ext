@@ -11,3 +11,7 @@ require (
 	golang.org/x/text v0.19.0
 	google.golang.org/protobuf v1.35.1
 )
+
+require github.com/google/uuid v1.6.0
+
+require crawshaw.dev/jsonfile v0.0.0-20240206193014-699d1dad804e // indirect

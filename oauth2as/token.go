@@ -4,20 +4,25 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"slices"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/lstoll/oidc"
 	corev1 "github.com/lstoll/oidcop/proto/core/v1"
+	"github.com/lstoll/oidcop/storage"
+	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	tokenLen = 48
+	tokenLen = 32
 )
 
 // newToken generates a fresh token, from random data. The user and stored
 // states are returned.
-func newToken(sessID string, expires time.Time) (*corev1.UserToken, *accessToken, error) {
+func newToken(id uuid.UUID) (_ *corev1.UserToken, serverPart []byte, _ error) {
 	b := make([]byte, tokenLen)
 	if _, err := rand.Read(b); err != nil {
 		return nil, nil, fmt.Errorf("error reading random data: %w", err)
@@ -30,21 +35,16 @@ func newToken(sessID string, expires time.Time) (*corev1.UserToken, *accessToken
 
 	ut := &corev1.UserToken{
 		Token:     b,
-		SessionId: sessID,
+		SessionId: id.String(), // TODO - re-work proto, make this proper
 	}
 
-	st := &accessToken{
-		Bcrypted: bc,
-		Expiry:   expires,
-	}
-
-	return ut, st, nil
+	return ut, bc, nil
 }
 
 // tokensMatch compares a deserialized user token, and it's corresponding stored
 // token. if the user token value hashes to the same value on the server.
-func tokensMatch(user *corev1.UserToken, stored *accessToken) (bool, error) {
-	err := bcrypt.CompareHashAndPassword(stored.Bcrypted, user.Token)
+func tokensMatch(user []byte, stored []byte) (bool, error) {
+	err := bcrypt.CompareHashAndPassword(stored, user)
 	if err == nil {
 		// no error in comparison, they match
 		return true, nil
@@ -65,18 +65,65 @@ func marshalToken(user *corev1.UserToken) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-func unmarshalToken(tok string) (*corev1.UserToken, error) {
+func unmarshalToken(tok string) (id uuid.UUID, b []byte, _ error) {
 	b, err := base64.RawURLEncoding.DecodeString(tok)
-	if _, ok := err.(base64.CorruptInputError); ok {
-		// token may have been encoded with previously used base64.RawStdEncoding encoder
-		b, err = base64.RawStdEncoding.DecodeString(tok)
-	}
 	if err != nil {
-		return nil, fmt.Errorf("base64 decode of token failed: %w", err)
+		return uuid.Nil, nil, fmt.Errorf("base64 decode of token failed: %w", err)
 	}
 	ut := &corev1.UserToken{}
 	if err := proto.Unmarshal(b, ut); err != nil {
-		return nil, fmt.Errorf("proto decoding of token failed: %w", err)
+		return uuid.Nil, nil, fmt.Errorf("proto decoding of token failed: %w", err)
 	}
-	return ut, err
+	uid, err := uuid.Parse(ut.SessionId)
+	if err != nil {
+		return uuid.Nil, nil, fmt.Errorf("%s is not a UUID", ut.SessionId)
+	}
+	return uid, ut.Token, err
+}
+
+func (o *OIDC) buildIDAccessTokens(auth *storage.Authorization, identity Identity, extraAccessClaims map[string]any, idExp, atExp time.Time) (id *jwt.RawJWT, access *jwt.RawJWT, _ error) {
+	idc := oidc.IDClaims{
+		Issuer:   o.issuer,
+		Subject:  auth.Subject,
+		Expiry:   oidc.UnixTime(idExp.Unix()),
+		Audience: oidc.StrOrSlice{auth.ClientID},
+		ACR:      auth.ACR,
+		AMR:      auth.AMR,
+		IssuedAt: oidc.UnixTime(o.now().Unix()),
+		AuthTime: oidc.UnixTime(auth.AuthenticatedAt.Unix()),
+		Nonce:    auth.Nonce,
+	}
+	if slices.Contains(auth.Scopes, oidc.ScopeEmail) {
+		// TODO - fill
+	}
+	if slices.Contains(auth.Scopes, oidc.ScopeProfile) {
+		// TODO - fill
+	}
+	idjwt, err := idc.ToJWT(identity.ExtraClaims)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating identity token jwt: %w", err)
+	}
+
+	ac := oidc.AccessTokenClaims{
+		Issuer:   o.issuer,
+		Subject:  auth.Subject,
+		ClientID: auth.ClientID,
+		Expiry:   oidc.UnixTime(atExp.Unix()),
+		// TODO - what do we actually want to do here. Is this going to be just
+		// an identity server, or do we actually want to extend to access? For
+		// now, just make it for the issuer and verify that on userinfo.
+		Audience: oidc.StrOrSlice{o.issuer},
+		ACR:      auth.ACR,
+		AMR:      auth.AMR,
+		IssuedAt: oidc.UnixTime(o.now().Unix()),
+		AuthTime: oidc.UnixTime(auth.AuthenticatedAt.Unix()),
+		JWTID:    uuid.Must(uuid.NewRandom()).String(),
+		// TODO - groups/roles etc? Or are these just "extra"
+	}
+	acjwt, err := ac.ToJWT(extraAccessClaims)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating access token jwt: %w", err)
+	}
+
+	return idjwt, acjwt, nil
 }
