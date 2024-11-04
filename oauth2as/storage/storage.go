@@ -113,6 +113,10 @@ type Authorization struct {
 	// Metadata can optionally contain serialized data, that will be made
 	// accessible across calls. This library will not maipulate the data.
 	Metadata json.RawMessage `json:"metadata"`
+
+	// TODO - some kind of expiry field, to enable GC or whatever. Or maybe
+	// leave that up to implementations to find if it's unreferenced? and if
+	// that's the case, document that.
 }
 
 // AuthCode tracks the stage where a user is authenticated, but has not
