@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"time"
 
 	"crawshaw.dev/jsonfile"
 	"github.com/google/uuid"
@@ -32,7 +33,7 @@ func (j *JSONFile) GetAuthRequest(ctx context.Context, id uuid.UUID) (*AuthReque
 	var got *AuthRequest
 	j.db.Read(func(data *jsonFileSchema) {
 		for _, ar := range data.AuthRequests {
-			if ar.ID == id {
+			if ar.ID == id && !time.Now().After(ar.Expiry) {
 				got = &ar
 				break
 			}
@@ -90,7 +91,7 @@ func (j *JSONFile) GetAuthCode(ctx context.Context, id uuid.UUID) (*AuthCode, *A
 	)
 	j.db.Read(func(data *jsonFileSchema) {
 		for _, ac := range data.AuthCodes {
-			if ac.ID == id {
+			if ac.ID == id && !time.Now().After(ac.Expiry) {
 				gotAc = &ac
 				break
 			}
@@ -135,7 +136,7 @@ func (j *JSONFile) GetRefreshSession(ctx context.Context, id uuid.UUID) (*Refres
 	)
 	j.db.Read(func(data *jsonFileSchema) {
 		for _, rs := range data.RefreshSessions {
-			if rs.ID == id {
+			if rs.ID == id && !time.Now().After(rs.Expiry) {
 				gotRs = &rs
 				break
 			}

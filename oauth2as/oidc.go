@@ -217,8 +217,16 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 	o.handler.StartAuthorization(w, req, areq)
 }
 
+type authorizer struct {
+	o *OIDC
+}
+
+func (a *authorizer) Authorize(w http.ResponseWriter, r *http.Request, authReqID uuid.UUID, auth *Authorization) error {
+	return a.o.finishAuthorization(w, r, authReqID, auth)
+}
+
 // TODO - set a authroizer on the handles.
-func (o *OIDC) FinishAuthorization(w http.ResponseWriter, req *http.Request, authReqID uuid.UUID, auth *Authorization) error {
+func (o *OIDC) finishAuthorization(w http.ResponseWriter, req *http.Request, authReqID uuid.UUID, auth *Authorization) error {
 	authreq, err := o.storage.GetAuthRequest(req.Context(), authReqID)
 	if err != nil {
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to get session")
@@ -466,7 +474,7 @@ func (o *OIDC) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	return o.buildTokenResponse(ctx, auth, nil, tresp)
+	return o.buildTokenResponse(ctx, auth, rsess, tresp)
 }
 
 // buildTokenResponse creates the oauth token response for code and refresh.
@@ -474,18 +482,23 @@ func (o *OIDC) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *
 // new refresh session will be created.
 func (o *OIDC) buildTokenResponse(ctx context.Context, auth *storage.Authorization, refreshSess *storage.RefreshSession, tresp *TokenResponse) (*oauth2.TokenResponse, error) {
 	var refreshTok string
-	if !tresp.OverrideRefreshTokenIssuance && slices.Contains(auth.Scopes, oidc.ScopeOffline) {
-		refreshExpiry := tresp.RefreshTokenValidUntil
-		if refreshExpiry.IsZero() {
-			refreshExpiry = auth.AuthenticatedAt.Add(o.refreshMaxValidity)
-		}
-		// build a refresh token, and a session if it doesn't exist. Update if
-		// it does
+	if !tresp.OverrideRefreshTokenIssuance && slices.Contains(auth.Scopes, oidc.ScopeOfflineAccess) {
 		if refreshSess == nil {
+			// code request with refresh allowed, build a new session.
+			refreshExpiry := tresp.RefreshTokenValidUntil
+			if refreshExpiry.IsZero() {
+				refreshExpiry = auth.AuthenticatedAt.Add(o.refreshMaxValidity)
+			}
 			refreshSess = &storage.RefreshSession{
 				ID:              uuid.Must(uuid.NewRandom()),
 				AuthorizationID: auth.ID,
 				Expiry:          refreshExpiry,
+			}
+		} else {
+			// if it is an existing session, only update the expiry if it was
+			// overriden.
+			if !tresp.RefreshTokenValidUntil.IsZero() {
+				refreshSess.Expiry = tresp.RefreshTokenValidUntil
 			}
 		}
 
