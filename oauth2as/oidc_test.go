@@ -156,8 +156,10 @@ func TestStartAuthorization(t *testing.T) {
 				clients: clientSource,
 				storage: s,
 
-				authValidityTime: 1 * time.Minute,
-				codeValidityTime: 1 * time.Minute,
+				opts: Options{
+					AuthValidityTime: 1 * time.Minute,
+					CodeValidityTime: 1 * time.Minute,
+				},
 
 				now: time.Now,
 			}
@@ -286,8 +288,10 @@ func TestFinishAuthorization(t *testing.T) {
 				storage: s,
 				now:     time.Now,
 
-				authValidityTime: 1 * time.Minute,
-				codeValidityTime: 1 * time.Minute,
+				opts: Options{
+					AuthValidityTime: 1 * time.Minute,
+					CodeValidityTime: 1 * time.Minute,
+				},
 			}
 			authorizer := &authorizer{o: oidcs}
 
@@ -336,8 +340,8 @@ func TestCodeToken(t *testing.T) {
 		return &OIDC{
 			issuer: issuer,
 
-			storage:      s,
-			keysetHandle: testKeysetHandle(),
+			storage: s,
+			keyset:  testKeysets(),
 
 			handler: &authFnHandlers{
 				token: func(req *TokenRequest) (*TokenResponse, error) {
@@ -548,8 +552,8 @@ func TestRefreshToken(t *testing.T) {
 		return &OIDC{
 			issuer: issuer,
 
-			storage:      s,
-			keysetHandle: testKeysetHandle(),
+			storage: s,
+			keyset:  testKeysets(),
 
 			handler: &authFnHandlers{
 				refreshToken: func(req *RefreshTokenRequest) (*TokenResponse, error) {
@@ -574,7 +578,11 @@ func TestRefreshToken(t *testing.T) {
 				},
 			},
 
-			refreshMaxValidity: 6 * time.Hour,
+			opts: Options{
+				AuthValidityTime: 1 * time.Minute,
+				CodeValidityTime: 1 * time.Minute,
+				MaxRefreshTime:   6 * time.Hour,
+			},
 
 			now: time.Now,
 		}
@@ -752,7 +760,7 @@ func TestUserinfo(t *testing.T) {
 	}
 
 	signAccessToken := func(cl oidc.AccessTokenClaims) string {
-		h, err := testKeysetHandle().Handle(context.TODO())
+		h, err := testKeysets()[SigningAlgRS256](context.TODO())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -840,15 +848,15 @@ func TestUserinfo(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			oidc, err := New(&Config{Issuer: issuer}, s, &staticclients.Clients{}, testKeysetHandle())
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			oidc.handler = &authFnHandlers{
+			handlers := &authFnHandlers{
 				userinfo: func(w io.Writer, uireq *UserinfoRequest) (*UserinfoResponse, error) {
 					return nil, nil
 				},
+			}
+
+			oidc, err := New(issuer, s, &staticclients.Clients{}, testKeysets(), handlers, nil)
+			if err != nil {
+				t.Fatal(err)
 			}
 
 			at := tc.Setup(t)
@@ -933,7 +941,7 @@ var (
 	thMu sync.Mutex
 )
 
-func testKeysetHandle() KeysetHandle {
+func testKeysets() map[SigningAlg]HandleFn {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
@@ -945,5 +953,7 @@ func testKeysetHandle() KeysetHandle {
 		th = h
 	}
 
-	return NewStaticKeysetHandle(th)
+	return map[SigningAlg]HandleFn{
+		SigningAlgRS256: StaticHandleFn(th),
+	}
 }

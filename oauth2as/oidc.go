@@ -18,24 +18,35 @@ import (
 	"github.com/lstoll/oidcop/storage"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
+	tinkpb "github.com/tink-crypto/tink-go/v2/proto/tink_go_proto"
 )
 
-// KeysetHandle is used to get the current handle for a signing keyset. It
-// should contain private key material suitable for JWT signing
-type KeysetHandle interface {
-	Handle(context.Context) (*keyset.Handle, error)
+// HandleFn is used to get a tink handle for a keyset, when it is needed.
+type HandleFn func(context.Context) (*keyset.Handle, error)
+
+// StaticHandleFn is a convenience method to create a HandleFn from a fixed
+// keyset handle.
+func StaticHandleFn(h *keyset.Handle) HandleFn {
+	return HandleFn(func(context.Context) (*keyset.Handle, error) { return h, nil })
 }
 
-type staticKeysetHandle struct {
-	h *keyset.Handle
-}
+// SigningAlg represents supported JWT signing algorithms
+type SigningAlg string
 
-func (s *staticKeysetHandle) Handle(context.Context) (*keyset.Handle, error) {
-	return s.h, nil
-}
+const (
+	SigningAlgRS256 = "RS256"
+	SigningAlgES256 = "ES256"
+)
 
-func NewStaticKeysetHandle(h *keyset.Handle) KeysetHandle {
-	return &staticKeysetHandle{h: h}
+func (s SigningAlg) Template() *tinkpb.KeyTemplate {
+	switch s {
+	case SigningAlgRS256:
+		return jwt.RS256_2048_F4_Key_Template()
+	case SigningAlgES256:
+		return jwt.ES256Template()
+	default:
+		panic(fmt.Sprintf("invalid signing alg %s", s))
+	}
 }
 
 // ClientSource is used for validating client informantion for the general flow
@@ -57,74 +68,103 @@ type ClientSource interface {
 const (
 	// DefaultAuthValidityTime is used if the AuthValidityTime is not
 	// configured.
-	DefaultAuthValidityTime = 1 * time.Hour
+	DefaultAuthValidityTime = 10 * time.Minute
 	// DefaultCodeValidityTime is used if the CodeValidityTime is not
 	// configured.
 	DefaultCodeValidityTime = 60 * time.Second
+	// DefaultIDTokenValidity is the default IDTokenValidity time.
+	DefaultIDTokenValidity = 1 * time.Hour
+	// DefaultsAccessTokenValidity is the default AccessTokenValdity time.
+	DefaultsAccessTokenValidity = 1 * time.Hour
+	// DefaultMaxRefreshTime is the default value sessions are refreshable for.
+	DefaultMaxRefreshTime = 30 * 24 * time.Hour
 )
 
-// Config sets configuration values for the OIDC flow implementation
-type Config struct {
+// Options sets configuration values for the OIDC flow implementation
+type Options struct {
 	// Issuer is the issuer we are serving for.
 	Issuer string
 	// AuthValidityTime is the maximum time an authorization flow/AuthID is
 	// valid. This is the time from Starting to Finishing the authorization. The
 	// optimal time here will be application specific, and should encompass how
 	// long the app expects a user to complete the "upstream" authorization
-	// process.
+	// process. Defaults to DefaultAuthValidityTime
 	AuthValidityTime time.Duration
 	// CodeValidityTime is the maximum time the authorization code is valid,
 	// before it is exchanged for a token (code flow). This should be a short
-	// value, as the exhange should generally not take long
+	// value, as the exhange should generally not take long. Defaults to DefaultCodeValidityTime.
 	CodeValidityTime time.Duration
-}
+	// IDTokenValidity sets the default validity for issued ID tokens. This can
+	// be overriden on a per-request basis.
+	IDTokenValidity time.Duration
+	// AccessTokenValidity sets the default validity for issued access tokens.
+	// This can be overriden on a per-request basis. Must be equal or less to
+	// the IDTokenValitity time.
+	AccessTokenValidity time.Duration
+	// MaxRefreshTime sets the longest time a session can be refreshed for, from
+	// the time it was created. This can be overriden on a per-request basis.
+	// Defaults to DefaultMaxRefreshTime. Any refesh token may be considered
+	// valid up until this time.
+	MaxRefreshTime time.Duration
 
-type OIDCOpt func(*OIDC)
+	// TODO - do we want to consider splitting the max refresh time, and how
+	// long any single refresh token is valid for?
+}
 
 // OIDC can be used to handle the various parts of the OIDC auth flow.
 type OIDC struct {
-	issuer       string
-	storage      storage.Storage
-	clients      ClientSource
-	keysetHandle KeysetHandle
-
+	issuer  string
+	storage storage.Storage
+	clients ClientSource
+	keyset  map[SigningAlg]HandleFn
 	handler AuthHandlers
-
-	authValidityTime    time.Duration
-	codeValidityTime    time.Duration
-	idTokenValidity     time.Duration
-	accessTokenValidity time.Duration
-	refreshMaxValidity  time.Duration
+	opts    Options
 
 	now func() time.Time
 }
 
-func New(cfg *Config, storage storage.Storage, clientSource ClientSource, keysetHandle KeysetHandle, opts ...OIDCOpt) (*OIDC, error) {
-	if cfg.Issuer == "" {
+func New(issuer string, storage storage.Storage, clientSource ClientSource, keyset map[SigningAlg]HandleFn, handlers AuthHandlers, opts *Options) (*OIDC, error) {
+	if issuer == "" {
 		return nil, fmt.Errorf("issuer must be provided")
+	}
+	if opts == nil {
+		opts = &Options{}
+	}
+
+	if _, ok := keyset[SigningAlgRS256]; !ok {
+		return nil, errors.New("keyset must contain a RS256 handle")
 	}
 
 	o := &OIDC{
-		storage:      storage,
-		clients:      clientSource,
-		keysetHandle: keysetHandle,
+		issuer:  issuer,
+		storage: storage,
+		clients: clientSource,
+		handler: handlers,
+		keyset:  keyset,
 
-		issuer:           cfg.Issuer,
-		authValidityTime: cfg.AuthValidityTime,
-		codeValidityTime: cfg.CodeValidityTime,
+		opts: *opts,
 
 		now: time.Now,
 	}
 
-	for _, opt := range opts {
-		opt(o)
+	if o.opts.AuthValidityTime == time.Duration(0) {
+		o.opts.AuthValidityTime = DefaultAuthValidityTime
+	}
+	if o.opts.CodeValidityTime == time.Duration(0) {
+		o.opts.CodeValidityTime = DefaultCodeValidityTime
+	}
+	if o.opts.IDTokenValidity == time.Duration(0) {
+		o.opts.IDTokenValidity = DefaultIDTokenValidity
+	}
+	if o.opts.AccessTokenValidity == time.Duration(0) {
+		o.opts.AccessTokenValidity = DefaultsAccessTokenValidity
+	}
+	if o.opts.MaxRefreshTime == time.Duration(0) {
+		o.opts.MaxRefreshTime = DefaultMaxRefreshTime
 	}
 
-	if o.authValidityTime == time.Duration(0) {
-		o.authValidityTime = DefaultAuthValidityTime
-	}
-	if o.codeValidityTime == time.Duration(0) {
-		o.codeValidityTime = DefaultCodeValidityTime
+	if o.opts.AccessTokenValidity < o.opts.IDTokenValidity {
+		return nil, fmt.Errorf("ID token validity must be equal or greater to the access token validity period")
 	}
 
 	return o, nil
@@ -185,7 +225,7 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 		Scopes:        authreq.Scopes,
 		Nonce:         authreq.Raw.Get("nonce"),
 		CodeChallenge: authreq.CodeChallenge,
-		Expiry:        o.now().Add(o.authValidityTime),
+		Expiry:        o.now().Add(o.opts.AuthValidityTime),
 	}
 	if authreq.Raw.Get("acr_values") != "" {
 		ar.ACRValues = strings.Split(authreq.Raw.Get("acr_values"), " ")
@@ -267,7 +307,7 @@ func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request,
 		ID:              uuid.Must(uuid.NewRandom()),
 		AuthorizationID: auth.ID,
 		CodeChallenge:   authReq.CodeChallenge,
-		Expiry:          o.now().Add(o.codeValidityTime),
+		Expiry:          o.now().Add(o.opts.CodeValidityTime),
 	}
 
 	ucode, scode, err := newToken(ac.ID)
@@ -487,7 +527,7 @@ func (o *OIDC) buildTokenResponse(ctx context.Context, auth *storage.Authorizati
 			// code request with refresh allowed, build a new session.
 			refreshExpiry := tresp.RefreshTokenValidUntil
 			if refreshExpiry.IsZero() {
-				refreshExpiry = auth.AuthenticatedAt.Add(o.refreshMaxValidity)
+				refreshExpiry = auth.AuthenticatedAt.Add(o.opts.MaxRefreshTime)
 			}
 			refreshSess = &storage.RefreshSession{
 				ID:              uuid.Must(uuid.NewRandom()),
@@ -524,11 +564,11 @@ func (o *OIDC) buildTokenResponse(ctx context.Context, auth *storage.Authorizati
 
 	idExp := tresp.IDTokenExpiry
 	if idExp.IsZero() {
-		idExp = o.now().Add(o.idTokenValidity)
+		idExp = o.now().Add(o.opts.IDTokenValidity)
 	}
 	atExp := tresp.AccessTokenExpiry
 	if atExp.IsZero() {
-		atExp = o.now().Add(o.accessTokenValidity)
+		atExp = o.now().Add(o.opts.AccessTokenValidity)
 	}
 
 	rawid, rawat, err := o.buildIDAccessTokens(auth, *tresp.Identity, tresp.AccessTokenExtraClaims, idExp, atExp)
@@ -536,7 +576,7 @@ func (o *OIDC) buildTokenResponse(ctx context.Context, auth *storage.Authorizati
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating raw JWTs", Cause: err}
 	}
 
-	h, err := o.keysetHandle.Handle(ctx)
+	h, err := o.keyset[SigningAlgRS256](ctx)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting handle", Cause: err}
 	}
@@ -608,7 +648,7 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) error {
 
 	// TODO - check the audience is the issuer, as we have hardcoded.
 
-	h, err := o.keysetHandle.Handle(req.Context())
+	h, err := o.keyset[SigningAlgRS256](req.Context())
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
 		_ = oauth2.WriteError(w, req, herr)
