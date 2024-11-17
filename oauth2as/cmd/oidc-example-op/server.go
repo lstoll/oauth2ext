@@ -4,27 +4,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"log"
+	"io"
+	"log/slog"
 	"strings"
-	"sync"
-	"time"
 
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/lstoll/oidcop"
 )
 
 const (
-	sessIDCookie = "sessID"
+	authReqIDCookieName = "authReqID"
 )
 
+type metadata struct {
+	Userinfo map[string]any `json:"userinfo"`
+}
+
+var _ oidcop.AuthHandlers = (*server)(nil)
+
 type server struct {
-	oidc            *oidcop.OIDC
-	mux             *http.ServeMux
-	muxSetup        sync.Once
-	storage         *storage
-	tokenValidFor   time.Duration
-	refreshValidFor time.Duration
+	authorizer oidcop.Authorizer
 }
 
 const loginPage = `<!DOCTYPE html>
@@ -48,27 +49,26 @@ const loginPage = `<!DOCTYPE html>
 
 var loginTmpl = template.Must(template.New("loginPage").Parse(loginPage))
 
-func (s *server) authorization(w http.ResponseWriter, req *http.Request) {
-	ar, err := s.oidc.StartAuthorization(w, req)
-	if err != nil {
-		return
-	}
+func (s *server) SetAuthorizer(at oidcop.Authorizer) {
+	s.authorizer = at
+}
 
+func (s *server) StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *oidcop.AuthorizationRequest) {
 	// set a cookie with the auth ID, so we can track it.
 	aidc := &http.Cookie{
-		Name:   sessIDCookie,
-		Value:  ar.SessionID,
+		Name:   authReqIDCookieName,
+		Value:  authReq.ID.String(),
 		MaxAge: 600,
 	}
 	http.SetCookie(w, aidc)
 
 	var acr string
-	if len(ar.ACRValues) > 0 {
-		acr = ar.ACRValues[0]
+	if len(authReq.ACRValues) > 0 {
+		acr = authReq.ACRValues[0]
 	}
 	tmplData := map[string]interface{}{
 		"acr":    acr,
-		"scopes": strings.Join(ar.Scopes, " "),
+		"scopes": strings.Join(authReq.Scopes, " "),
 	}
 
 	if err := loginTmpl.Execute(w, tmplData); err != nil {
@@ -78,9 +78,14 @@ func (s *server) authorization(w http.ResponseWriter, req *http.Request) {
 }
 
 func (s *server) finishAuthorization(w http.ResponseWriter, req *http.Request) {
-	sessID, err := req.Cookie(sessIDCookie)
+	authReqCookie, err := req.Cookie(authReqIDCookieName)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to get auth id cookie: %v", err), http.StatusInternalServerError)
+		return
+	}
+	authReqUUID, err := uuid.Parse(authReqCookie.Value)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid auth req ID format: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -89,60 +94,45 @@ func (s *server) finishAuthorization(w http.ResponseWriter, req *http.Request) {
 		amr = strings.Split(req.FormValue("amr"), ",")
 	}
 
-	auth := &oidcop.Authorization{
-		Scopes: strings.Split(req.FormValue("scopes"), " "),
-		ACR:    req.FormValue("acr"),
-		AMR:    amr,
-	}
-
-	// We have the session ID. This is stable for the session, so we can track
-	// whatever we want along with it. We always get the session ID in later
-	// requests, so we can always pull things out
-
 	meta := &metadata{
-		Subject:  req.FormValue("subject"),
 		Userinfo: map[string]interface{}{},
 	}
 	if err := json.Unmarshal([]byte(req.FormValue("userinfo")), &meta.Userinfo); err != nil {
 		http.Error(w, fmt.Sprintf("failed to unmarshal userinfo: %v", err), http.StatusInternalServerError)
 		return
 	}
-	s.storage.sessions[sessID.Value].Meta = meta
-
-	// finalize it. this will redirect the user to the appropriate place
-	if err := s.oidc.FinishAuthorization(w, req, sessID.Value, auth); err != nil {
-		log.Printf("error finishing authorization: %v", err)
-	}
-}
-
-func (s *server) token(w http.ResponseWriter, req *http.Request) {
-	err := s.oidc.Token(w, req, func(tr *oidcop.TokenRequest) (*oidcop.TokenResponse, error) {
-		// This is how we could update our metadata
-		meta := s.storage.sessions[tr.SessionID].Meta
-		s.storage.sessions[tr.SessionID].Meta = meta
-
-		idt := tr.PrefillIDToken("subject", time.Now().Add(s.tokenValidFor))
-		at := tr.PrefillAccessToken("subject", time.Now().Add(s.tokenValidFor))
-
-		return &oidcop.TokenResponse{
-			RefreshTokenValidUntil: time.Now().Add(s.refreshValidFor),
-			IssueRefreshToken:      tr.SessionRefreshable, // always allow it if we want it
-			IDToken:                idt,
-			AccessToken:            at,
-		}, nil
-	})
+	mb, err := json.Marshal(meta)
 	if err != nil {
-		log.Printf("error in token endpoint: %v", err)
+		http.Error(w, fmt.Sprintf("failed to marshal metadata: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.authorizer.Authorize(w, req, authReqUUID, &oidcop.Authorization{
+		Subject:  req.FormValue("subject"),
+		Scopes:   strings.Split(req.FormValue("scopes"), " "),
+		ACR:      req.FormValue("acr"),
+		AMR:      amr,
+		Metadata: mb,
+	}); err != nil {
+		slog.ErrorContext(req.Context(), "error authorizing", "err", err)
+		http.Error(w, "error authorizing", http.StatusInternalServerError)
 	}
 }
 
-func (s *server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	s.muxSetup.Do(func() {
-		s.mux = http.NewServeMux()
-		s.mux.HandleFunc("/auth", s.authorization)
-		s.mux.HandleFunc("/finish", s.finishAuthorization)
-		s.mux.HandleFunc("/token", s.token)
-	})
+func (s *server) Token(req *oidcop.TokenRequest) (*oidcop.TokenResponse, error) {
+	return &oidcop.TokenResponse{
+		Identity: &oidcop.Identity{},
+	}, nil
+}
 
-	s.mux.ServeHTTP(w, req)
+func (s *server) RefreshToken(req *oidcop.RefreshTokenRequest) (*oidcop.TokenResponse, error) {
+	return &oidcop.TokenResponse{
+		Identity: &oidcop.Identity{},
+	}, nil
+}
+
+func (s *server) Userinfo(w io.Writer, uireq *oidcop.UserinfoRequest) (*oidcop.UserinfoResponse, error) {
+	return &oidcop.UserinfoResponse{
+		Identity: &oidcop.Identity{},
+	}, nil
 }
