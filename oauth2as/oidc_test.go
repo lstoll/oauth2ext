@@ -18,7 +18,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidcop/internal/oauth2"
-	corev1 "github.com/lstoll/oidcop/proto/core/v1"
 	"github.com/lstoll/oidcop/staticclients"
 	"github.com/lstoll/oidcop/storage"
 	"github.com/tink-crypto/tink-go/v2/jwt"
@@ -879,14 +878,6 @@ func TestUserinfo(t *testing.T) {
 	}
 }
 
-func mustMarshal(u *corev1.UserToken) string {
-	t, err := marshalToken(u)
-	if err != nil {
-		panic(err)
-	}
-	return t
-}
-
 func checkErrMatcher(t *testing.T, matcher func(error) bool, err error) {
 	t.Helper()
 	if err == nil && matcher != nil {
@@ -897,26 +888,6 @@ func checkErrMatcher(t *testing.T, matcher func(error) bool, err error) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		// we have an error and it matched
-	}
-}
-
-func matchAuthErrCode(code oauth2.AuthErrorCode) func(error) bool {
-	return func(err error) bool {
-		aerr, ok := err.(*oauth2.AuthError)
-		if !ok {
-			return false
-		}
-		return aerr.Code == code
-	}
-}
-
-func matchTokenErrCode(code oauth2.TokenErrorCode) func(error) bool {
-	return func(err error) bool {
-		terr, ok := err.(*oauth2.TokenError)
-		if !ok {
-			return false
-		}
-		return terr.ErrorCode == code
 	}
 }
 

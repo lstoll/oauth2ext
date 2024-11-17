@@ -106,7 +106,7 @@ type Authorization struct {
 	// AMR are the Authentication Methods Reference the session was
 	// authenticated with
 	AMR []string `json:"amr"`
-	// AuthenticatedAt is the time which authentication occured
+	// AuthenticatedAt is the time which authentication occurred
 	AuthenticatedAt time.Time
 	// Nonce that was provided during the flow
 	Nonce string `json:"nonce,omitempty"`

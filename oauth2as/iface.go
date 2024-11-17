@@ -73,8 +73,8 @@ type TokenRequest struct {
 	Authorization storage.Authorization
 }
 
-// TokenRequest encapsulates the information from the initial request to the token
-// endpoint. This is passed to the handler, to generate an appropriate response.
+// RefreshTokenRequest encapsulates the information for a request to refresh a
+// token.
 type RefreshTokenRequest struct {
 	// Authorization information this session was authorized with
 	Authorization storage.Authorization
@@ -125,8 +125,7 @@ type UserinfoRequest struct {
 	Subject string
 }
 
-// UserinfoRequest contains information about this request to the UserInfo
-// endpoint
+// UserinfoResponse contains information to response to the userinfo response.
 type UserinfoResponse struct {
 	// Subject is the sub of the user this request is for.
 	Identity *Identity

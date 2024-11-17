@@ -98,14 +98,14 @@ type Options struct {
 	// value, as the exhange should generally not take long. Defaults to DefaultCodeValidityTime.
 	CodeValidityTime time.Duration
 	// IDTokenValidity sets the default validity for issued ID tokens. This can
-	// be overriden on a per-request basis.
+	// be overridden on a per-request basis.
 	IDTokenValidity time.Duration
 	// AccessTokenValidity sets the default validity for issued access tokens.
-	// This can be overriden on a per-request basis. Must be equal or less to
+	// This can be overridden on a per-request basis. Must be equal or less to
 	// the IDTokenValitity time.
 	AccessTokenValidity time.Duration
 	// MaxRefreshTime sets the longest time a session can be refreshed for, from
-	// the time it was created. This can be overriden on a per-request basis.
+	// the time it was created. This can be overridden on a per-request basis.
 	// Defaults to DefaultMaxRefreshTime. Any refesh token may be considered
 	// valid up until this time.
 	MaxRefreshTime time.Duration
@@ -294,7 +294,7 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 
 	redir, err := url.Parse(authreq.RedirectURI)
 	if err != nil {
-		oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "redirect_uri is in an invalid format", err, "failed to parse redirect URI")
+		_ = oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "redirect_uri is in an invalid format", err, "failed to parse redirect URI")
 		return
 	}
 
@@ -305,21 +305,21 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 
 	cidok, err := o.clients.IsValidClientID(authreq.ClientID)
 	if err != nil {
-		oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource check client ID")
+		_ = oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource check client ID")
 		return
 	}
 	if !cidok {
-		oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Client ID is not valid", nil, "")
+		_ = oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Client ID is not valid", nil, "")
 		return
 	}
 
 	redirok, err := o.clients.ValidateClientRedirectURI(authreq.ClientID, authreq.RedirectURI)
 	if err != nil {
-		oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource redirect URI validation")
+		_ = oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource redirect URI validation")
 		return
 	}
 	if !redirok {
-		oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Invalid redirect URI", nil, "")
+		_ = oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Invalid redirect URI", nil, "")
 		return
 	}
 
@@ -341,12 +341,12 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 	case oauth2.ResponseTypeCode:
 		ar.ResponseType = storage.AuthRequestResponseTypeCode
 	default:
-		oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeUnsupportedResponseType, authreq.State, "response type must be code", nil)
+		_ = oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeUnsupportedResponseType, authreq.State, "response type must be code", nil)
 		return
 	}
 
 	if err := o.storage.PutAuthRequest(req.Context(), ar); err != nil {
-		oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeErrServerError, authreq.State, "failed to persist session", err)
+		_ = oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeErrServerError, authreq.State, "failed to persist session", err)
 		return
 	}
 
@@ -484,7 +484,7 @@ func (o *OIDC) Token(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if err := oauth2.WriteTokenResponse(w, resp); err != nil {
-		o.logger.ErrorContext(req.Context(), "error writing token repsonse", "grant-type", treq.GrantType, "err", err)
+		o.logger.ErrorContext(req.Context(), "error writing token response", "grant-type", treq.GrantType, "err", err)
 		_ = oauth2.WriteError(w, req, err)
 		return
 	}
@@ -576,7 +576,7 @@ func (o *OIDC) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *
 
 	// queue a delete the session. This is done to ensure each refresh token can only
 	// attempt to be used once, regardless of the outcome of the process. The ID
-	// is sufficently random to make this a not-usable attack vector. If the refresh
+	// is response random to make this a not-usable attack vector. If the refresh
 	// succeeds, abort the deferred deletion.
 	defer func() {
 		if retErr != nil {
@@ -640,7 +640,7 @@ func (o *OIDC) buildTokenResponse(ctx context.Context, auth *storage.Authorizati
 			}
 		} else {
 			// if it is an existing session, only update the expiry if it was
-			// overriden.
+			// overridden.
 			if !tresp.RefreshTokenValidUntil.IsZero() {
 				refreshSess.Expiry = tresp.RefreshTokenValidUntil
 			}

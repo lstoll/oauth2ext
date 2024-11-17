@@ -50,7 +50,9 @@ func main() {
 	}
 
 	m := http.NewServeMux()
-	core.AttachHandlers(m, nil)
+	if err := core.AttachHandlers(m, nil); err != nil {
+		log.Fatalf("failed to attach oidc handlers: %v", err)
+	}
 	m.HandleFunc("/finish", svr.finishAuthorization)
 
 	log.Printf("Listening on: %s", "localhost:8085")

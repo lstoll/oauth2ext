@@ -94,9 +94,11 @@ func (o *OIDC) buildIDAccessTokens(auth *storage.Authorization, identity Identit
 		Nonce:    auth.Nonce,
 	}
 	if slices.Contains(auth.Scopes, oidc.ScopeEmail) {
+		_ = ""
 		// TODO - fill
 	}
 	if slices.Contains(auth.Scopes, oidc.ScopeProfile) {
+		_ = ""
 		// TODO - fill
 	}
 	idjwt, err := idc.ToJWT(identity.ExtraClaims)
