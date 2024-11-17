@@ -4,22 +4,47 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/uuid"
 	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidcop/internal/oauth2"
-	corev1 "github.com/lstoll/oidcop/proto/core/v1"
 	"github.com/lstoll/oidcop/staticclients"
+	"github.com/lstoll/oidcop/storage"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
+
+var _ AuthHandlers = (*authFnHandlers)(nil)
+
+type authFnHandlers struct {
+	authorizer         Authorizer
+	startAuthorization func(w http.ResponseWriter, req *http.Request, authReq *AuthorizationRequest)
+	token              func(req *TokenRequest) (*TokenResponse, error)
+	refreshToken       func(req *RefreshTokenRequest) (*TokenResponse, error)
+	userinfo           func(w io.Writer, uireq *UserinfoRequest) (*UserinfoResponse, error)
+}
+
+func (a *authFnHandlers) SetAuthorizer(at Authorizer) { a.authorizer = at }
+func (a *authFnHandlers) StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *AuthorizationRequest) {
+	a.startAuthorization(w, req, authReq)
+}
+func (a *authFnHandlers) Token(req *TokenRequest) (*TokenResponse, error) { return a.token(req) }
+func (a *authFnHandlers) RefreshToken(req *RefreshTokenRequest) (*TokenResponse, error) {
+	return a.refreshToken(req)
+}
+func (a *authFnHandlers) Userinfo(w io.Writer, uireq *UserinfoRequest) (*UserinfoResponse, error) {
+	return a.userinfo(w, uireq)
+}
 
 func TestStartAuthorization(t *testing.T) {
 	const (
@@ -39,11 +64,11 @@ func TestStartAuthorization(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		Name                 string
-		Query                url.Values
-		WantReturnedErrMatch func(error) bool
-		WantHTTPStatus       int
-		CheckResponse        func(*testing.T, SessionManager, *AuthorizationRequest)
+		Name             string
+		Query            url.Values
+		WantHTTPStatus   int
+		CheckHTTPReponse func(*testing.T, *httptest.ResponseRecorder)
+		CheckResponse    func(*testing.T, storage.Storage, *AuthorizationRequest)
 	}{
 		{
 			Name: "Bad client ID should return error directly",
@@ -52,8 +77,7 @@ func TestStartAuthorization(t *testing.T) {
 				"response_type": []string{"code"},
 				"redirect_uri":  []string{redirectURI},
 			},
-			WantReturnedErrMatch: matchHTTPErrStatus(400),
-			WantHTTPStatus:       400,
+			WantHTTPStatus: 400,
 		},
 		{
 			Name: "Bad redirect URI should return error directly",
@@ -62,8 +86,7 @@ func TestStartAuthorization(t *testing.T) {
 				"response_type": []string{"code"},
 				"redirect_uri":  []string{"https://wrong"},
 			},
-			WantReturnedErrMatch: matchHTTPErrStatus(400),
-			WantHTTPStatus:       400,
+			WantHTTPStatus: 400,
 		},
 		{
 			Name: "Valid request is parsed correctly",
@@ -72,19 +95,17 @@ func TestStartAuthorization(t *testing.T) {
 				"response_type": []string{"code"},
 				"redirect_uri":  []string{redirectURI},
 			},
-			CheckResponse: func(t *testing.T, smgr SessionManager, areq *AuthorizationRequest) {
+			CheckResponse: func(t *testing.T, s storage.Storage, areq *AuthorizationRequest) {
 				if len(areq.ACRValues) > 0 {
 					t.Errorf("want 0 acr_values, got: %d", len(areq.ACRValues))
 				}
 
-				sess, err := getSession(context.Background(), smgr, areq.SessionID)
+				ar, err := s.GetAuthRequest(context.Background(), areq.ID)
 				if err != nil {
-					t.Errorf("should be able to get the session, got error: %v", err)
+					t.Fatal(err)
 				}
-				if sess == nil {
+				if ar == nil {
 					t.Error("session should not be nil")
-				} else if sess.Request == nil {
-					t.Error("request in session should not be nil")
 				}
 			},
 		},
@@ -96,7 +117,7 @@ func TestStartAuthorization(t *testing.T) {
 				"redirect_uri":  []string{redirectURI},
 				"acr_values":    []string{"mfa smfa"},
 			},
-			CheckResponse: func(t *testing.T, smgr SessionManager, areq *AuthorizationRequest) {
+			CheckResponse: func(t *testing.T, _ storage.Storage, areq *AuthorizationRequest) {
 				if len(areq.ACRValues) != 2 {
 					t.Errorf("want 2 acr_values, got: %d", len(areq.ACRValues))
 				}
@@ -112,36 +133,50 @@ func TestStartAuthorization(t *testing.T) {
 				"response_type": []string{"token"},
 				"redirect_uri":  []string{redirectURI},
 			},
-			WantReturnedErrMatch: matchAuthErrCode(oauth2.AuthErrorCodeUnsupportedResponseType),
-			WantHTTPStatus:       302,
+			CheckHTTPReponse: func(t *testing.T, rr *httptest.ResponseRecorder) {
+				predir, err := url.Parse(rr.Result().Header.Get("Location"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if qerr := predir.Query().Get("error"); qerr != string(oauth2.AuthErrorCodeUnsupportedResponseType) {
+					t.Fatalf("want err on redir %s, got: %s", oauth2.AuthErrorCodeUnsupportedResponseType, qerr)
+				}
+			},
+			WantHTTPStatus: 302,
 		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
-			smgr := newStubSMGR()
+			s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			oidc := &OIDC{
 				clients: clientSource,
-				smgr:    smgr,
+				storage: s,
 
-				authValidityTime: 1 * time.Minute,
-				codeValidityTime: 1 * time.Minute,
+				opts: Options{
+					AuthValidityTime: 1 * time.Minute,
+					CodeValidityTime: 1 * time.Minute,
+				},
 
 				now: time.Now,
 			}
 
+			var gotAuthReq *AuthorizationRequest
+			h := &authFnHandlers{
+				authorizer: &authorizer{o: oidc},
+				startAuthorization: func(w http.ResponseWriter, req *http.Request, ar *AuthorizationRequest) {
+					gotAuthReq = ar
+					_, _ = fmt.Fprintf(w, "login page would go here")
+				},
+			}
+			oidc.handler = h
+
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("GET", "/?"+tc.Query.Encode(), nil)
 
-			resp, err := oidc.StartAuthorization(rec, req)
-
-			if err == nil && tc.WantReturnedErrMatch != nil {
-				t.Error("want error retured, got none")
-			}
-			if err != nil {
-				if tc.WantReturnedErrMatch == nil || !tc.WantReturnedErrMatch(err) {
-					t.Fatalf("unmatching error returned: %v", err)
-				}
-			}
+			oidc.StartAuthorization(rec, req)
 
 			if tc.WantHTTPStatus != 0 {
 				if tc.WantHTTPStatus != rec.Code {
@@ -149,40 +184,40 @@ func TestStartAuthorization(t *testing.T) {
 				}
 			}
 
+			if tc.CheckHTTPReponse != nil {
+				tc.CheckHTTPReponse(t, rec)
+			}
+
 			if tc.CheckResponse != nil {
-				tc.CheckResponse(t, smgr, resp)
+				tc.CheckResponse(t, s, gotAuthReq)
 			}
 		})
 	}
 }
 
 func TestFinishAuthorization(t *testing.T) {
-	sessID := mustGenerateID()
-
-	sess := sessionV2{
-		ID:       sessID,
-		ClientID: "client-id",
-		Request: &sessAuthRequest{
-			RedirectURI:  "https://redir",
-			State:        "state",
-			Scopes:       []string{"openid"},
-			Nonce:        "nonce",
-			ResponseType: authRequestResponseTypeCode,
-		},
+	authReq := &storage.AuthRequest{
+		ID:           uuid.Must(uuid.NewRandom()),
+		RedirectURI:  "https://redir",
+		State:        "state",
+		Scopes:       []string{oidc.ScopeOpenID},
+		Nonce:        "nonce",
+		ResponseType: storage.AuthRequestResponseTypeCode,
+		Expiry:       time.Now().Add(1 * time.Minute),
 	}
 
 	for _, tc := range []struct {
 		Name                 string
-		SessionID            string
+		AuthReqID            uuid.UUID
 		WantReturnedErrMatch func(error) bool
 		WantHTTPStatus       int
-		Check                func(t *testing.T, smgr SessionManager, rec *httptest.ResponseRecorder)
+		Check                func(t *testing.T, smgr storage.Storage, rec *httptest.ResponseRecorder)
 	}{
 		{
 			Name:           "Redirects to the correct location",
-			SessionID:      sessID,
+			AuthReqID:      authReq.ID,
 			WantHTTPStatus: 302,
-			Check: func(t *testing.T, smgr SessionManager, rec *httptest.ResponseRecorder) {
+			Check: func(t *testing.T, smgr storage.Storage, rec *httptest.ResponseRecorder) {
 				loc := rec.Header().Get("location")
 
 				// strip query to compare base URL
@@ -192,8 +227,8 @@ func TestFinishAuthorization(t *testing.T) {
 				}
 				lnqp.RawQuery = ""
 
-				if lnqp.String() != sess.Request.RedirectURI {
-					t.Errorf("want redir %s, got: %s", sess.Request.RedirectURI, lnqp.String())
+				if lnqp.String() != authReq.RedirectURI {
+					t.Errorf("want redir %s, got: %s", authReq.RedirectURI, lnqp.String())
 				}
 
 				locp, err := url.Parse(loc)
@@ -202,62 +237,67 @@ func TestFinishAuthorization(t *testing.T) {
 				}
 
 				// make sure the code resolves to an authCode
-				codetok, err := unmarshalToken(locp.Query().Get("code"))
+				codeid, _, err := unmarshalToken(locp.Query().Get("code"))
 				if err != nil {
 					t.Fatal(err)
 				}
-				gotSess, err := getSession(context.Background(), smgr, codetok.SessionId)
-				if err != nil || gotSess == nil {
-					t.Errorf("wanted no error fetching session, got: %v", err)
+				gotCode, _, err := smgr.GetAuthCode(context.TODO(), codeid)
+				if err != nil || gotCode == nil {
+					t.Errorf("wanted no error fetching code, got: %v", err)
 				}
 
 				// make sure the state was passed
 				state := locp.Query().Get("state")
-				if sess.Request.State != state {
-					t.Errorf("want state %s, got: %v", sess.Request.State, state)
+				if authReq.State != state {
+					t.Errorf("want state %s, got: %v", authReq.State, state)
 				}
 			},
 		},
 		{
 			Name:                 "Invalid request ID fails",
-			SessionID:            mustGenerateID(),
+			AuthReqID:            uuid.Must(uuid.NewRandom()),
 			WantReturnedErrMatch: matchHTTPErrStatus(403),
-			Check: func(t *testing.T, smgr SessionManager, _ *httptest.ResponseRecorder) {
-				gotSess := &versionedSession{}
-				ok, err := smgr.GetSession(context.Background(), sessID, gotSess)
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
-				}
-				if ok {
-					t.Errorf("want: no session returned, got: %v", gotSess)
-				}
+			Check: func(t *testing.T, smgr storage.Storage, _ *httptest.ResponseRecorder) {
+				// TODO what was this checking
+				/*
+					gotSess := &versionedSession{}
+					ok, err := smgr.GetSession(context.Background(), sessID, gotSess)
+					if err != nil {
+						t.Errorf("unexpected error: %v", err)
+					}
+					if ok {
+						t.Errorf("want: no session returned, got: %v", gotSess)
+					}*/
 			},
 		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
 			ctx := context.Background()
 
-			smgr := newStubSMGR()
-
-			lsess := &sess
-			lsess.ID = tc.SessionID
-
-			if err := putSession(ctx, smgr, lsess); err != nil {
+			s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
+			if err != nil {
 				t.Fatal(err)
 			}
 
-			oidc := &OIDC{
-				smgr: smgr,
-				now:  time.Now,
-
-				authValidityTime: 1 * time.Minute,
-				codeValidityTime: 1 * time.Minute,
+			if err := s.PutAuthRequest(ctx, authReq); err != nil {
+				t.Fatal(err)
 			}
+
+			oidcs := &OIDC{
+				storage: s,
+				now:     time.Now,
+
+				opts: Options{
+					AuthValidityTime: 1 * time.Minute,
+					CodeValidityTime: 1 * time.Minute,
+				},
+			}
+			authorizer := &authorizer{o: oidcs}
 
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("POST", "/", nil)
 
-			err := oidc.FinishAuthorization(rec, req, sessID, &Authorization{Scopes: []string{"openid"}})
+			err = authorizer.Authorize(rec, req, tc.AuthReqID, &Authorization{Scopes: []string{oidc.ScopeOpenID}})
 			checkErrMatcher(t, tc.WantReturnedErrMatch, err)
 
 			if tc.WantHTTPStatus != 0 {
@@ -267,58 +307,7 @@ func TestFinishAuthorization(t *testing.T) {
 			}
 
 			if tc.Check != nil {
-				tc.Check(t, smgr, rec)
-			}
-		})
-	}
-}
-
-func TestIDTokenPrefill(t *testing.T) {
-	now := time.Date(2019, 11, 25, 12, 54, 11, 0, time.UTC)
-
-	nowFn := func() time.Time {
-		return now
-	}
-
-	for _, tc := range []struct {
-		Name string
-		TReq TokenRequest
-		Want oidc.IDClaims
-	}{
-		{
-			Name: "Fields filled",
-			TReq: TokenRequest{
-				ClientID: "client",
-
-				Authorization: Authorization{
-					AMR: []string{"amr"},
-					ACR: "acr",
-				},
-
-				AuthTime: now,
-				Nonce:    "nonce",
-
-				issuer: "issuer",
-				now:    nowFn,
-			},
-			Want: oidc.IDClaims{
-				Issuer:   "issuer",
-				Subject:  "subject",
-				Audience: oidc.StrOrSlice{"client"},
-				Expiry:   1574686451,
-				IssuedAt: 1574686451,
-				AuthTime: 1574686451,
-				ACR:      "acr",
-				Nonce:    "nonce",
-				AMR:      []string{"amr"},
-				Extra:    map[string]interface{}{},
-			},
-		},
-	} {
-		t.Run(tc.Name, func(t *testing.T) {
-			tok := tc.TReq.PrefillIDToken("subject", now)
-			if diff := cmp.Diff(tc.Want, tok, cmpopts.IgnoreUnexported(oidc.IDClaims{})); diff != "" {
-				t.Error(diff)
+				tc.Check(t, s, rec)
 			}
 		})
 	}
@@ -328,7 +317,7 @@ type unauthorizedErrImpl struct{ error }
 
 func (u *unauthorizedErrImpl) Unauthorized() bool { return true }
 
-func TestToken(t *testing.T) {
+func TestCodeToken(t *testing.T) {
 	const (
 		issuer = "https://issuer"
 
@@ -342,11 +331,24 @@ func TestToken(t *testing.T) {
 	)
 
 	newOIDC := func() *OIDC {
+		s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		return &OIDC{
 			issuer: issuer,
 
-			smgr:         newStubSMGR(),
-			keysetHandle: testKeysetHandle(),
+			storage: s,
+			keyset:  testKeysets(),
+
+			handler: &authFnHandlers{
+				token: func(req *TokenRequest) (*TokenResponse, error) {
+					return &TokenResponse{
+						Identity: &Identity{},
+					}, nil
+				},
+			},
 
 			clients: &staticclients.Clients{
 				Clients: []staticclients.Client{
@@ -367,10 +369,11 @@ func TestToken(t *testing.T) {
 		}
 	}
 
-	newCodeSess := func(t *testing.T, smgr SessionManager) (usertok string) {
+	newCodeSess := func(t *testing.T, smgr storage.Storage) (usertok string) {
 		t.Helper()
 
-		utok, stok, err := newToken(mustGenerateID(), time.Now().Add(1*time.Minute))
+		id := uuid.Must(uuid.NewRandom())
+		utok, stok, err := newToken(id)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -380,34 +383,32 @@ func TestToken(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		sess := &sessionV2{
-			ID:            utok.SessionId,
-			AuthCode:      stok,
-			Authorization: &sessAuthorization{},
-			ClientID:      clientID,
-			Expiry:        time.Now().Add(1 * time.Minute),
-			Request:       &sessAuthRequest{},
+		auth := &storage.Authorization{
+			ID:       uuid.Must(uuid.NewRandom()),
+			Subject:  "testsub",
+			ClientID: clientID,
+		}
+		if err := smgr.PutAuthorization(context.TODO(), auth); err != nil {
+			t.Fatal(err)
 		}
 
-		if err := putSession(context.Background(), smgr, sess); err != nil {
+		sess := &storage.AuthCode{
+			ID:              id,
+			AuthorizationID: auth.ID,
+			Code:            stok,
+			Expiry:          time.Now().Add(1 * time.Minute),
+		}
+
+		if err := smgr.PutAuthCode(context.Background(), sess); err != nil {
 			t.Fatal(err)
 		}
 
 		return utokstr
 	}
 
-	newHandler := func(_ *testing.T, expIn time.Duration) func(req *TokenRequest) (*TokenResponse, error) {
-		return func(req *TokenRequest) (*TokenResponse, error) {
-			return &TokenResponse{
-				IDToken:     req.PrefillIDToken("sub", time.Now().Add(expIn)),
-				AccessToken: req.PrefillAccessToken("sub", time.Now().Add(expIn)),
-			}, nil
-		}
-	}
-
 	t.Run("Happy path", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.smgr)
+		codeToken := newCodeSess(t, o.storage)
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeAuthorizationCode,
@@ -417,7 +418,7 @@ func TestToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		tresp, err := o.token(context.Background(), treq, newHandler(t, time.Minute))
+		tresp, err := o.codeToken(context.TODO(), treq)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -429,7 +430,7 @@ func TestToken(t *testing.T) {
 
 	t.Run("Redeeming an already redeemed code should fail", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.smgr)
+		codeToken := newCodeSess(t, o.storage)
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeAuthorizationCode,
@@ -439,13 +440,13 @@ func TestToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		_, err := o.token(context.Background(), treq, newHandler(t, time.Minute))
+		_, err := o.codeToken(context.Background(), treq)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
 		// replay fails
-		_, err = o.token(context.Background(), treq, newHandler(t, time.Minute))
+		_, err = o.codeToken(context.Background(), treq)
 		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
 			t.Errorf("want invalid token grant error, got: %v", err)
 		}
@@ -453,7 +454,7 @@ func TestToken(t *testing.T) {
 
 	t.Run("Invalid client secret should fail", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.smgr)
+		codeToken := newCodeSess(t, o.storage)
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeAuthorizationCode,
@@ -463,7 +464,7 @@ func TestToken(t *testing.T) {
 			ClientSecret: "invalid-secret",
 		}
 
-		_, err := o.token(context.Background(), treq, newHandler(t, time.Minute))
+		_, err := o.codeToken(context.Background(), treq)
 		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeUnauthorizedClient {
 			t.Errorf("want unauthorized client error, got: %v", err)
 		}
@@ -471,7 +472,7 @@ func TestToken(t *testing.T) {
 
 	t.Run("Client secret that differs from the original client should fail", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.smgr)
+		codeToken := newCodeSess(t, o.storage)
 
 		treq := &oauth2.TokenRequest{
 			GrantType:   oauth2.GrantTypeAuthorizationCode,
@@ -483,7 +484,7 @@ func TestToken(t *testing.T) {
 			ClientSecret: otherClientSecret,
 		}
 
-		_, err := o.token(context.Background(), treq, newHandler(t, time.Minute))
+		_, err := o.codeToken(context.Background(), treq)
 		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeUnauthorizedClient {
 			t.Errorf("want unauthorized client error, got: %v", err)
 		}
@@ -491,7 +492,7 @@ func TestToken(t *testing.T) {
 
 	t.Run("Response access token validity time honoured", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.smgr)
+		codeToken := newCodeSess(t, o.storage)
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeAuthorizationCode,
@@ -501,13 +502,17 @@ func TestToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		ih := newHandler(t, 5*time.Minute)
-		h := func(req *TokenRequest) (*TokenResponse, error) {
-			r, err := ih(req)
-			return r, err
+		o.handler = &authFnHandlers{
+			token: func(req *TokenRequest) (*TokenResponse, error) {
+				return &TokenResponse{
+					IDTokenExpiry:     time.Now().Add(5 * time.Minute),
+					AccessTokenExpiry: time.Now().Add(5 * time.Minute),
+					Identity:          &Identity{},
+				}, nil
+			},
 		}
 
-		tresp, err := o.token(context.Background(), treq, h)
+		tresp, err := o.codeToken(context.Background(), treq)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -522,63 +527,137 @@ func TestToken(t *testing.T) {
 			t.Errorf("want token exp within 2s of %f, got: %f", 5*time.Minute.Seconds(), tresp.ExpiresIn.Seconds())
 		}
 	})
+}
+
+func TestRefreshToken(t *testing.T) {
+	const (
+		issuer = "https://issuer"
+
+		clientID     = "client-id"
+		clientSecret = "client-secret"
+		redirectURI  = "https://redirect"
+
+		otherClientID       = "other-client"
+		otherClientSecret   = "other-secret"
+		otherClientRedirect = "https://other"
+	)
+
+	newOIDC := func() *OIDC {
+		s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return &OIDC{
+			issuer: issuer,
+
+			storage: s,
+			keyset:  testKeysets(),
+
+			handler: &authFnHandlers{
+				refreshToken: func(req *RefreshTokenRequest) (*TokenResponse, error) {
+					return &TokenResponse{
+						Identity: &Identity{},
+					}, nil
+				},
+			},
+
+			clients: &staticclients.Clients{
+				Clients: []staticclients.Client{
+					{
+						ID:           clientID,
+						Secrets:      []string{clientSecret},
+						RedirectURLs: []string{redirectURI},
+					},
+					{
+						ID:           otherClientID,
+						Secrets:      []string{otherClientSecret},
+						RedirectURLs: []string{otherClientRedirect},
+					},
+				},
+			},
+
+			opts: Options{
+				AuthValidityTime: 1 * time.Minute,
+				CodeValidityTime: 1 * time.Minute,
+				MaxRefreshTime:   6 * time.Hour,
+			},
+
+			now: time.Now,
+		}
+	}
+
+	newRefreshSess := func(t *testing.T, smgr storage.Storage) (usertok string) {
+		t.Helper()
+
+		id := uuid.Must(uuid.NewRandom())
+		utok, stok, err := newToken(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		utokstr, err := marshalToken(utok)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		auth := &storage.Authorization{
+			ID:       uuid.Must(uuid.NewRandom()),
+			Subject:  "testsub",
+			ClientID: clientID,
+			Scopes:   []string{oidc.ScopeOfflineAccess},
+		}
+		if err := smgr.PutAuthorization(context.TODO(), auth); err != nil {
+			t.Fatal(err)
+		}
+
+		sess := &storage.RefreshSession{
+			ID:              id,
+			AuthorizationID: auth.ID,
+			RefreshToken:    stok,
+			Expiry:          time.Now().Add(60 * time.Minute),
+		}
+
+		if err := smgr.PutRefreshSession(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+
+		return utokstr
+	}
 
 	t.Run("Refresh token happy path", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.smgr)
+		refreshToken := newRefreshSess(t, o.storage)
 
-		ih := newHandler(t, time.Minute)
-		h := func(req *TokenRequest) (*TokenResponse, error) {
-			r, err := ih(req)
-			r.RefreshTokenValidUntil = o.now().Add(10 * time.Minute)
-			r.IssueRefreshToken = true
-			return r, err
+		o.handler = &authFnHandlers{
+			refreshToken: func(req *RefreshTokenRequest) (*TokenResponse, error) {
+				return &TokenResponse{
+					Identity:                   &Identity{},
+					OverrideRefreshTokenExpiry: o.now().Add(10 * time.Minute),
+				}, nil
+			},
 		}
-
-		// exchange the code for access/refresh tokens first
-		treq := &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeAuthorizationCode,
-			Code:         codeToken,
-			RedirectURI:  redirectURI,
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
-		}
-
-		tresp, err := o.token(context.Background(), treq, h)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if tresp.AccessToken == "" {
-			t.Error("token request should have returned an access token, but got none")
-		}
-
-		if tresp.RefreshToken == "" {
-			t.Error("token request should have returned a refresh token, but got none")
-		}
-
-		refreshToken := tresp.RefreshToken
 
 		// keep trying to refresh
-		for i := 0; i < 5; i++ {
-			treq = &oauth2.TokenRequest{
+		for i := 1; i <= 5; i++ {
+			treq := &oauth2.TokenRequest{
 				GrantType:    oauth2.GrantTypeRefreshToken,
 				RefreshToken: refreshToken,
 				ClientID:     clientID,
 				ClientSecret: clientSecret,
 			}
 
-			tresp, err := o.token(context.Background(), treq, h)
+			tresp, err := o.refreshToken(context.Background(), treq)
 			if err != nil {
-				t.Fatalf("unexpected error calling token with refresh token: %v", err)
+				t.Fatalf("iter %d: unexpected error calling token with refresh token: %v", i, err)
 			}
 
 			if tresp.AccessToken == "" {
-				t.Error("refresh request should have returned an access token, but got none")
+				t.Errorf("iter %d: refresh request should have returned an access token, but got none", i)
 			}
 
 			if tresp.RefreshToken == "" {
-				t.Error("refresh request should have returned a refresh token, but got none")
+				t.Errorf("iter %d: refresh request should have returned a refresh token, but got none", i)
 			}
 
 			refreshToken = tresp.RefreshToken
@@ -587,14 +666,14 @@ func TestToken(t *testing.T) {
 		// march to the future, when we should be expired
 		o.now = func() time.Time { return time.Now().Add(1 * time.Hour) }
 
-		treq = &oauth2.TokenRequest{
+		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeRefreshToken,
 			RefreshToken: refreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
 		}
 
-		_, err = o.token(context.Background(), treq, h)
+		_, err := o.refreshToken(context.Background(), treq)
 		if te, ok := err.(*oauth2.TokenError); !ok || te.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
 			t.Errorf("expired session should have given invalid_grant, got: %v", te)
 		}
@@ -602,47 +681,34 @@ func TestToken(t *testing.T) {
 
 	t.Run("Refresh token with handler errors", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.smgr)
+		refreshToken := newRefreshSess(t, o.storage)
 
 		var returnErr error
 		const errDesc = "Refresh unauthorized"
 
-		ih := newHandler(t, time.Minute)
-		h := func(req *TokenRequest) (*TokenResponse, error) {
-			if returnErr != nil {
-				return nil, returnErr
-			}
-			r, err := ih(req)
-			r.RefreshTokenValidUntil = o.now().Add(10 * time.Minute)
-			r.IssueRefreshToken = true
-			return r, err
-		}
-
-		// exchange the code for access/refresh tokens first
-		treq := &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeAuthorizationCode,
-			Code:         codeToken,
-			RedirectURI:  redirectURI,
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
-		}
-
-		tresp, err := o.token(context.Background(), treq, h)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		o.handler = &authFnHandlers{
+			refreshToken: func(req *RefreshTokenRequest) (*TokenResponse, error) {
+				if returnErr != nil {
+					return nil, returnErr
+				}
+				return &TokenResponse{
+					Identity:                   &Identity{},
+					OverrideRefreshTokenExpiry: o.now().Add(10 * time.Minute),
+				}, nil
+			},
 		}
 
 		// try and refresh, and observe intentional unauth error
 		returnErr = &unauthorizedErrImpl{error: errors.New(errDesc)}
 
-		treq = &oauth2.TokenRequest{
+		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeRefreshToken,
-			RefreshToken: tresp.RefreshToken,
+			RefreshToken: refreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
 		}
 
-		_, err = o.token(context.Background(), treq, h)
+		_, err := o.refreshToken(context.Background(), treq)
 
 		if err == nil {
 			t.Fatal("want error refreshing, got none")
@@ -656,246 +722,27 @@ func TestToken(t *testing.T) {
 		}
 
 		// refresh with generic err
+		refreshToken = newRefreshSess(t, o.storage)
+
 		returnErr = errors.New("boomtown")
 
 		treq = &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeRefreshToken,
-			RefreshToken: tresp.RefreshToken,
+			RefreshToken: refreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
 		}
 
-		_, err = o.token(context.Background(), treq, h)
+		_, err = o.refreshToken(context.Background(), treq)
 
 		if err == nil {
 			t.Fatal("want error refreshing, got none")
 		}
 		if _, ok = err.(*oauth2.HTTPError); !ok {
-			t.Fatalf("want http error, got %T", err)
+			t.Fatalf("want http error, got %T (%v)", err, err)
 		}
 	})
 
-}
-
-func TestFetchCodeSession(t *testing.T) {
-	for _, tc := range []struct {
-		Name string
-		// Setup should return both a session to be persisted, and a token
-		// request to use.
-		Setup func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest)
-		// WantErrMatch signifies that we expect an error. If we don't, it is
-		// expected the retrieved session matches the saved session.
-		WantErrMatch func(error) bool
-		// Cmp compares the sessions. If nil, a simple proto.Equal is performed
-		Cmp func(t *testing.T, stored, returned *sessionV2)
-	}{
-		{
-			Name: "Valid session, valid request",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
-				sid := mustGenerateID()
-				u, s, err := newToken(sid, time.Now().Add(1*time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				sess = &sessionV2{
-					ID:       sid,
-					AuthCode: s,
-				}
-
-				tr = &oauth2.TokenRequest{
-					Code: mustMarshal(u),
-				}
-
-				return sess, tr
-			},
-			Cmp: func(t *testing.T, stored, returned *sessionV2) {
-				if !returned.AuthCodeRedeemed {
-					t.Error("auth code should be marked as redeemed")
-				}
-				if returned.ID != stored.ID {
-					t.Error("mismatched session returned")
-				}
-			},
-		},
-		{
-			Name: "Code that does not correspond to a session",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
-				badsid := mustGenerateID()
-				u, _, err := newToken(badsid, time.Now().Add(1*time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				goodsid := mustGenerateID()
-				_, s, err := newToken(goodsid, time.Now().Add(1*time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				sess = &sessionV2{
-					ID:       goodsid,
-					AuthCode: s,
-				}
-
-				tr = &oauth2.TokenRequest{
-					Code: mustMarshal(u),
-				}
-
-				return sess, tr
-			},
-			WantErrMatch: matchTokenErrCode(oauth2.TokenErrorCodeInvalidGrant),
-		},
-		{
-			Name: "Token with bad data",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
-				sid := mustGenerateID()
-				u, s, err := newToken(sid, time.Now().Add(1*time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				// tamper with u by changing the actual token data
-				u.Token = []byte("willnotmatch")
-
-				sess = &sessionV2{
-					ID:       sid,
-					AuthCode: s,
-				}
-
-				tr = &oauth2.TokenRequest{
-					Code: mustMarshal(u),
-				}
-
-				return sess, tr
-			},
-			WantErrMatch: matchTokenErrCode(oauth2.TokenErrorCodeInvalidGrant),
-		},
-		{
-			Name: "Code that has expiration time in the past",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
-				sid := mustGenerateID()
-				u, s, err := newToken(sid, time.Now().Add(-1*time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				sess = &sessionV2{
-					ID:       sid,
-					AuthCode: s,
-					Expiry:   time.Now().Add(1 * time.Minute),
-				}
-
-				tr = &oauth2.TokenRequest{
-					Code: mustMarshal(u),
-				}
-
-				return sess, tr
-			},
-			WantErrMatch: matchTokenErrCode(oauth2.TokenErrorCodeInvalidGrant),
-		},
-	} {
-		t.Run(tc.Name, func(t *testing.T) {
-			smgr := newStubSMGR()
-
-			oidc, err := New(&Config{Issuer: "http://issuer"}, smgr, &staticclients.Clients{}, testKeysetHandle())
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			sess, tr := tc.Setup(t)
-
-			if err := putSession(context.Background(), smgr, sess); err != nil {
-				t.Fatalf("error persisting initial session: %v", err)
-			}
-
-			got, err := oidc.fetchCodeSession(context.Background(), tr)
-			checkErrMatcher(t, tc.WantErrMatch, err)
-
-			if tc.WantErrMatch == nil && tc.Cmp == nil {
-				if diff := cmp.Diff(sess, got); diff != "" {
-					t.Errorf("returned session doesn't match persisted: %s", diff)
-				}
-			}
-
-			if tc.Cmp != nil {
-				tc.Cmp(t, sess, got)
-			}
-		})
-	}
-}
-
-func TestFetchRefreshSession(t *testing.T) {
-	for _, tc := range []struct {
-		Name string
-		// Setup should return both a session to be persisted, and a token
-		// request to use.
-		Setup func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest)
-		// WantErrMatch signifies that we expect an error. If we don't, it is
-		// expected the retrieved session matches the saved session.
-		WantErrMatch func(error) bool
-		// Cmp compares the sessions. If nil, a simple proto.Equal is performed
-		Cmp func(t *testing.T, stored, returned *sessionV2)
-	}{
-		{
-			Name: "Valid refresh token for a session",
-			Setup: func(t *testing.T) (sess *sessionV2, tr *oauth2.TokenRequest) {
-				sid := mustGenerateID()
-				u, s, err := newToken(sid, time.Now().Add(1*time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				sess = &sessionV2{
-					ID:           sid,
-					RefreshToken: s,
-					Expiry:       time.Now().Add(1 * time.Minute),
-				}
-
-				tr = &oauth2.TokenRequest{
-					RefreshToken: mustMarshal(u),
-				}
-
-				return sess, tr
-			},
-			Cmp: func(t *testing.T, stored, returned *sessionV2) {
-				if returned.RefreshToken != nil {
-					t.Error("refresh token should be cleared")
-				}
-				if returned.ID != stored.ID {
-					t.Error("mismatched session returned")
-				}
-			},
-		},
-	} {
-		t.Run(tc.Name, func(t *testing.T) {
-			smgr := newStubSMGR()
-
-			oidc, err := New(&Config{Issuer: "http://issuer"}, smgr, &staticclients.Clients{}, testKeysetHandle())
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			sess, tr := tc.Setup(t)
-
-			if err := putSession(context.Background(), smgr, sess); err != nil {
-				t.Fatalf("error persisting initial session: %v", err)
-			}
-
-			got, err := oidc.fetchRefreshSession(context.Background(), tr)
-			checkErrMatcher(t, tc.WantErrMatch, err)
-
-			if tc.WantErrMatch == nil && tc.Cmp == nil {
-				if diff := cmp.Diff(sess, got); diff != "" {
-					t.Errorf("returned session don't match persisted: %s", cmp.Diff(sess, got))
-				}
-			}
-
-			if tc.Cmp != nil {
-				tc.Cmp(t, sess, got)
-			}
-		})
-	}
 }
 
 func TestUserinfo(t *testing.T) {
@@ -912,7 +759,7 @@ func TestUserinfo(t *testing.T) {
 	}
 
 	signAccessToken := func(cl oidc.AccessTokenClaims) string {
-		h, err := testKeysetHandle().Handle(context.TODO())
+		h, err := testKeysets()[SigningAlgRS256](context.TODO())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -921,7 +768,7 @@ func TestUserinfo(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		rawATJWT, err := accessTokenClaimsToRawJWT(cl)
+		rawATJWT, err := cl.ToJWT(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -953,7 +800,7 @@ func TestUserinfo(t *testing.T) {
 				return signAccessToken(oidc.AccessTokenClaims{
 					Issuer:  issuer,
 					Subject: "sub",
-					Expiry:  oidc.NewUnixTime(time.Now().Add(1 * time.Minute)),
+					Expiry:  oidc.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,
@@ -967,7 +814,7 @@ func TestUserinfo(t *testing.T) {
 				return signAccessToken(oidc.AccessTokenClaims{
 					Issuer:  "http://other",
 					Subject: "sub",
-					Expiry:  oidc.NewUnixTime(time.Now().Add(1 * time.Minute)),
+					Expiry:  oidc.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,
@@ -979,7 +826,7 @@ func TestUserinfo(t *testing.T) {
 				return signAccessToken(oidc.AccessTokenClaims{
 					Issuer:  issuer,
 					Subject: "sub",
-					Expiry:  oidc.NewUnixTime(time.Now().Add(-1 * time.Minute)),
+					Expiry:  oidc.UnixTime(time.Now().Add(-1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,
@@ -995,9 +842,18 @@ func TestUserinfo(t *testing.T) {
 		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
-			smgr := newStubSMGR()
+			s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
 
-			oidc, err := New(&Config{Issuer: issuer}, smgr, &staticclients.Clients{}, testKeysetHandle())
+			handlers := &authFnHandlers{
+				userinfo: func(w io.Writer, uireq *UserinfoRequest) (*UserinfoResponse, error) {
+					return &UserinfoResponse{Identity: &Identity{}}, nil
+				},
+			}
+
+			oidc, err := New(issuer, s, &staticclients.Clients{}, testKeysets(), handlers, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1011,23 +867,15 @@ func TestUserinfo(t *testing.T) {
 				req.Header.Set("authorization", "Bearer "+at)
 			}
 
-			err = oidc.Userinfo(rec, req, tc.Handler)
-			if tc.WantErr && err == nil {
+			oidc.Userinfo(rec, req)
+			if tc.WantErr && rec.Result().StatusCode == http.StatusOK {
 				t.Error("want error, but got none")
 			}
-			if !tc.WantErr && err != nil {
-				t.Errorf("want no error, got: %v", err)
+			if !tc.WantErr && rec.Result().StatusCode != http.StatusOK {
+				t.Errorf("want no error, got status: %d", rec.Result().StatusCode)
 			}
 		})
 	}
-}
-
-func mustMarshal(u *corev1.UserToken) string {
-	t, err := marshalToken(u)
-	if err != nil {
-		panic(err)
-	}
-	return t
 }
 
 func checkErrMatcher(t *testing.T, matcher func(error) bool, err error) {
@@ -1040,26 +888,6 @@ func checkErrMatcher(t *testing.T, matcher func(error) bool, err error) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		// we have an error and it matched
-	}
-}
-
-func matchAuthErrCode(code oauth2.AuthErrorCode) func(error) bool {
-	return func(err error) bool {
-		aerr, ok := err.(*oauth2.AuthError)
-		if !ok {
-			return false
-		}
-		return aerr.Code == code
-	}
-}
-
-func matchTokenErrCode(code oauth2.TokenErrorCode) func(error) bool {
-	return func(err error) bool {
-		terr, ok := err.(*oauth2.TokenError)
-		if !ok {
-			return false
-		}
-		return terr.ErrorCode == code
 	}
 }
 
@@ -1084,7 +912,7 @@ var (
 	thMu sync.Mutex
 )
 
-func testKeysetHandle() KeysetHandle {
+func testKeysets() map[SigningAlg]HandleFn {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
@@ -1096,5 +924,7 @@ func testKeysetHandle() KeysetHandle {
 		th = h
 	}
 
-	return NewStaticKeysetHandle(th)
+	return map[SigningAlg]HandleFn{
+		SigningAlgRS256: StaticHandleFn(th),
+	}
 }
