@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lstoll/oidc"
+	"github.com/lstoll/oidcop/discovery"
 	"github.com/lstoll/oidcop/internal/oauth2"
 	"github.com/lstoll/oidcop/storage"
 	"github.com/tink-crypto/tink-go/v2/jwt"
@@ -109,6 +112,10 @@ type Options struct {
 
 	// TODO - do we want to consider splitting the max refresh time, and how
 	// long any single refresh token is valid for?
+
+	// Logger can be used to configure a logger that will have errors and
+	// warning logged. Defaults to discarding this information.
+	Logger *slog.Logger
 }
 
 // OIDC can be used to handle the various parts of the OIDC auth flow.
@@ -119,6 +126,7 @@ type OIDC struct {
 	keyset  map[SigningAlg]HandleFn
 	handler AuthHandlers
 	opts    Options
+	logger  *slog.Logger
 
 	now func() time.Time
 }
@@ -144,7 +152,12 @@ func New(issuer string, storage storage.Storage, clientSource ClientSource, keys
 
 		opts: *opts,
 
-		now: time.Now,
+		now:    time.Now,
+		logger: opts.Logger,
+	}
+
+	if o.logger == nil {
+		o.logger = slog.New(&discardHandler{})
 	}
 
 	if o.opts.AuthValidityTime == time.Duration(0) {
@@ -167,7 +180,99 @@ func New(issuer string, storage storage.Storage, clientSource ClientSource, keys
 		return nil, fmt.Errorf("ID token validity must be equal or greater to the access token validity period")
 	}
 
+	handlers.SetAuthorizer(&authorizer{o: o})
+
 	return o, nil
+}
+
+func (o *OIDC) BuildDiscovery() *oidc.ProviderMetadata {
+	var algs []string
+	for k := range o.keyset {
+		algs = append(algs, string(k))
+	}
+	return &oidc.ProviderMetadata{
+		Issuer: o.issuer,
+		ResponseTypesSupported: []string{
+			"code",
+			// TODO - we "must" support these, but we don't currently.
+			// "id_token",
+			// "id_token token",
+		},
+		SubjectTypesSupported:            []string{"public"},
+		IDTokenSigningAlgValuesSupported: algs,
+		GrantTypesSupported:              []string{"authorization_code"},
+		CodeChallengeMethodsSupported:    []oidc.CodeChallengeMethod{oidc.CodeChallengeMethodS256},
+		JWKSURI:                          o.issuer + "/.well-known/jwks.json",
+	}
+}
+
+const (
+	DefaultAuthorizationEndpoint = "/authorization"
+	DefaultTokenEndpoint         = "/token"
+	DefaultUserinfoEndpoint      = "/userinfo"
+)
+
+// AttachHandlers will bind handlers for the following endpoints to the given
+// mux. If the provided metadata specifies a URL for them already it will be
+// used, if not defaults will be set. If metadata is nil, BuildDiscovery will be
+// used.
+func (o *OIDC) AttachHandlers(mux *http.ServeMux, metadata *oidc.ProviderMetadata) error {
+	if metadata == nil {
+		metadata = o.BuildDiscovery()
+	}
+	if metadata.AuthorizationEndpoint == "" {
+		metadata.AuthorizationEndpoint = o.issuer + DefaultAuthorizationEndpoint
+	}
+	authEndpoint, err := url.Parse(metadata.AuthorizationEndpoint)
+	if err != nil {
+		return fmt.Errorf("parsing %s: %w", metadata.AuthorizationEndpoint, err)
+	}
+	if metadata.TokenEndpoint == "" {
+		metadata.TokenEndpoint = o.issuer + DefaultTokenEndpoint
+	}
+	tokenEndpoint, err := url.Parse(metadata.TokenEndpoint)
+	if err != nil {
+		return fmt.Errorf("parsing %s: %w", metadata.TokenEndpoint, err)
+	}
+	if metadata.UserinfoEndpoint == "" {
+		metadata.UserinfoEndpoint = o.issuer + DefaultUserinfoEndpoint
+	}
+	userinfoEndpoint, err := url.Parse(metadata.UserinfoEndpoint)
+	if err != nil {
+		return fmt.Errorf("parsing %s: %w", metadata.UserinfoEndpoint, err)
+	}
+
+	discoh, err := discovery.NewConfigurationHandler(metadata, &pubHandle{h: o.keyset[SigningAlgRS256]})
+	if err != nil {
+		return fmt.Errorf("creating configuration handler: %w", err)
+	}
+
+	mux.Handle("GET /.well-known/openid-configuration", discoh)
+	mux.Handle("GET /.well-known/jwks.json", discoh)
+
+	mux.Handle("GET "+authEndpoint.Path, http.HandlerFunc(o.StartAuthorization))
+	mux.Handle("POST "+tokenEndpoint.Path, http.HandlerFunc(o.Token))
+	mux.Handle("GET "+userinfoEndpoint.Path, http.HandlerFunc(o.Userinfo))
+
+	return nil
+}
+
+type pubHandle struct {
+	// TODO - either convert oidc to handle func, or decide to keep it an
+	// interface.
+	h HandleFn
+}
+
+func (p *pubHandle) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
+	h, err := p.h(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := h.Public()
+	if err != nil {
+		return nil, err
+	}
+	return pub, nil
 }
 
 // StartAuthorization can be used to handle a request to the auth endpoint. It
@@ -220,6 +325,7 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 
 	ar := &storage.AuthRequest{
 		ID:            uuid.Must(uuid.NewRandom()),
+		ClientID:      authreq.ClientID,
 		RedirectURI:   redir.String(),
 		State:         authreq.State,
 		Scopes:        authreq.Scopes,
@@ -361,11 +467,11 @@ func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request,
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#TokenEndpoint
 // https://openid.net/specs/openid-connect-core-1_0.html#RefreshTokens
-func (o *OIDC) Token(w http.ResponseWriter, req *http.Request) error {
+func (o *OIDC) Token(w http.ResponseWriter, req *http.Request) {
 	treq, err := oauth2.ParseTokenRequest(req)
 	if err != nil {
 		_ = oauth2.WriteError(w, req, err)
-		return err
+		return
 	}
 
 	var resp *oauth2.TokenResponse
@@ -377,13 +483,17 @@ func (o *OIDC) Token(w http.ResponseWriter, req *http.Request) error {
 	default:
 		err = &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid grant type", Cause: fmt.Errorf("grant type %s not handled", treq.GrantType)}
 	}
-
-	if err := oauth2.WriteTokenResponse(w, resp); err != nil {
+	if err != nil {
+		o.logger.WarnContext(req.Context(), "error in token handler", "grant-type", treq.GrantType, "err", err)
 		_ = oauth2.WriteError(w, req, err)
-		return err
+		return
 	}
 
-	return nil
+	if err := oauth2.WriteTokenResponse(w, resp); err != nil {
+		o.logger.ErrorContext(req.Context(), "error writing token repsonse", "grant-type", treq.GrantType, "err", err)
+		_ = oauth2.WriteError(w, req, err)
+		return
+	}
 }
 
 func (o *OIDC) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth2.TokenResponse, error) {
@@ -395,7 +505,7 @@ func (o *OIDC) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get code from storage", Cause: err}
 	}
-	if ac == nil {
+	if ac == nil || auth == nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
 	}
 
@@ -607,7 +717,7 @@ func (o *OIDC) buildTokenResponse(ctx context.Context, auth *storage.Authorizati
 	}, nil
 }
 
-func (o *OIDC) validateTokenClient(ctx context.Context, req *oauth2.TokenRequest, wantClientID string) error {
+func (o *OIDC) validateTokenClient(_ context.Context, req *oauth2.TokenRequest, wantClientID string) error {
 	// check to see if we're working with the same client
 	if wantClientID != req.ClientID {
 		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
@@ -635,13 +745,13 @@ func (o *OIDC) validateTokenClient(ctx context.Context, req *oauth2.TokenRequest
 // appropriate response data in JSON format to the passed writer.
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#UserInfoResponse
-func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) error {
+func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) {
 	authSp := strings.SplitN(req.Header.Get("authorization"), " ", 2)
 	if !strings.EqualFold(authSp[0], "bearer") || len(authSp) != 2 {
 		be := &oauth2.BearerError{} // no content, just request auth
 		herr := &oauth2.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), CauseMsg: "malformed Authorization header"}
 		_ = oauth2.WriteError(w, req, herr)
-		return herr
+		return
 	}
 
 	// TODO - replace this verification logic with oidc.Provider
@@ -652,20 +762,20 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) error {
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
 		_ = oauth2.WriteError(w, req, herr)
-		return herr
+		return
 	}
 	ph, err := h.Public()
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
 		_ = oauth2.WriteError(w, req, herr)
-		return herr
+		return
 	}
 
 	jwtVerifier, err := jwt.NewVerifier(ph)
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
 		_ = oauth2.WriteError(w, req, herr)
-		return herr
+		return
 	}
 
 	jwtValidator, err := jwt.NewValidator(&jwt.ValidatorOpts{
@@ -676,7 +786,7 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) error {
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
 		_ = oauth2.WriteError(w, req, herr)
-		return herr
+		return
 	}
 
 	jwt, err := jwtVerifier.VerifyAndDecode(authSp[1], jwtValidator)
@@ -684,14 +794,14 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) error {
 		be := &oauth2.BearerError{Code: oauth2.BearerErrorCodeInvalidRequest, Description: "invalid access token"}
 		herr := &oauth2.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), Cause: err}
 		_ = oauth2.WriteError(w, req, herr)
-		return herr
+		return
 	}
 
 	sub, err := jwt.Subject()
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
 		_ = oauth2.WriteError(w, req, herr)
-		return herr
+		return
 	}
 
 	// If we make it to here, we have been presented a valid token for a valid session. Run the handler.
@@ -705,13 +815,13 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) error {
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error in user handler"}
 		_ = oauth2.WriteError(w, req, herr)
-		return herr
+		return
 	}
 
-	// TODO - build response, respect scopes, etc
-	_ = uiresp
-
-	return nil
+	if err := json.NewEncoder(w).Encode(uiresp.Identity); err != nil {
+		_ = oauth2.WriteError(w, req, err)
+		return
+	}
 }
 
 type unauthorizedErr interface {

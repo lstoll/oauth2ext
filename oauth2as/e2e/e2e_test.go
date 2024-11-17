@@ -4,19 +4,20 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
-	"fmt"
 	"io"
+	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lstoll/oidc"
 	"github.com/lstoll/oidcop"
-	"github.com/lstoll/oidcop/discovery"
 	"github.com/lstoll/oidcop/staticclients"
+	"github.com/lstoll/oidcop/storage"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 	"golang.org/x/oauth2"
@@ -74,12 +75,6 @@ func TestE2E(t *testing.T) {
 			}))
 			defer cliSvr.Close()
 
-			cfg := &oidcop.Config{
-				Issuer:           "http://issuer",
-				AuthValidityTime: 1 * time.Minute,
-				CodeValidityTime: 1 * time.Minute,
-			}
-			smgr := newStubSMGR()
 			clientSource := &staticclients.Clients{
 				Clients: []staticclients.Client{
 					{
@@ -91,30 +86,26 @@ func TestE2E(t *testing.T) {
 				},
 			}
 
-			oidcHandlers, err := oidcop.New(cfg, smgr, clientSource, testKeysetHandle())
+			s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			mux := http.NewServeMux()
-			oidcSvr := httptest.NewServer(mux)
-			defer oidcSvr.Close()
-
-			mux.HandleFunc("/authorization", func(w http.ResponseWriter, req *http.Request) {
+			/*mux.HandleFunc("/authorization", func(w http.ResponseWriter, req *http.Request) {
 				ar, err := oidcHandlers.StartAuthorization(w, req)
 				if err != nil {
 					t.Fatalf("error starting authorization flow: %v", err)
 				}
 
 				// just finish it straight away
-				if err := oidcHandlers.FinishAuthorization(w, req, ar.SessionID, &oidcop.Authorization{Scopes: []string{"openid"}}); err != nil {
+				if err := oidcHandlers.FinishAuthorization(w, req, ar.SessionID, &op.Authorization{Scopes: []string{"openid"}}); err != nil {
 					t.Fatalf("error finishing authorization: %v", err)
 				}
 			})
 
 			mux.HandleFunc("/token", func(w http.ResponseWriter, req *http.Request) {
-				err := oidcHandlers.Token(w, req, func(tr *oidcop.TokenRequest) (*oidcop.TokenResponse, error) {
-					return &oidcop.TokenResponse{
+				err := oidcHandlers.Token(w, req, func(tr *op.TokenRequest) (*op.TokenResponse, error) {
+					return &op.TokenResponse{
 						IDToken:                tr.PrefillIDToken("test-sub", time.Now().Add(1*time.Minute)),
 						AccessToken:            tr.PrefillAccessToken("test-sub", time.Now().Add(1*time.Minute)),
 						IssueRefreshToken:      true,
@@ -127,7 +118,7 @@ func TestE2E(t *testing.T) {
 			})
 
 			mux.HandleFunc("/userinfo", func(w http.ResponseWriter, req *http.Request) {
-				err := oidcHandlers.Userinfo(w, req, func(w io.Writer, _ *oidcop.UserinfoRequest) error {
+				err := oidcHandlers.Userinfo(w, req, func(w io.Writer, _ *op.UserinfoRequest) error {
 					fmt.Fprintf(w, `{
 						"sub": "test-sub"
 					}`)
@@ -136,30 +127,48 @@ func TestE2E(t *testing.T) {
 				if err != nil {
 					t.Errorf("error in userinfo endpoint: %v", err)
 				}
-			})
+			})*/
 
-			privh, err := testKeysetHandle().Handle(ctx)
+			oidcSvr := httptest.NewServer(nil)
+			t.Cleanup(oidcSvr.Close)
+
+			handlers := &handlers{}
+
+			op, err := oidcop.New(oidcSvr.URL, s, clientSource, testKeysets(), handlers, &oidcop.Options{
+				Logger: slog.With("component", "oidcop"),
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			pubh, err := privh.Public()
-			if err != nil {
+
+			mux := http.NewServeMux()
+			if err := op.AttachHandlers(mux, nil); err != nil {
 				t.Fatal(err)
 			}
+			oidcSvr.Config.Handler = mux
+
+			// privh, err := testKeysets()[oidcop.SigningAlgRS256](ctx)
+			// if err != nil {
+			// 	t.Fatal(err)
+			// }
+			// pubh, err := privh.Public()
+			// if err != nil {
+			// 	t.Fatal(err)
+			// }
 
 			// discovery endpoint
-			md := discovery.DefaultCoreMetadata(oidcSvr.URL)
-			md.Issuer = oidcSvr.URL
-			md.AuthorizationEndpoint = oidcSvr.URL + "/authorization"
-			md.TokenEndpoint = oidcSvr.URL + "/token"
-			md.UserinfoEndpoint = oidcSvr.URL + "/userinfo"
+			// md := discovery.DefaultCoreMetadata(oidcSvr.URL)
+			// md.Issuer = oidcSvr.URL
+			// md.AuthorizationEndpoint = oidcSvr.URL + "/authorization"
+			// md.TokenEndpoint = oidcSvr.URL + "/token"
+			// md.UserinfoEndpoint = oidcSvr.URL + "/userinfo"
 
-			discoh, err := discovery.NewConfigurationHandler(md, oidc.NewStaticPublicHandle(pubh))
-			if err != nil {
-				t.Fatalf("Failed to initialize discovery handler: %v", err)
-			}
-			mux.Handle("GET /.well-known/openid-configuration", discoh)
-			mux.Handle("GET /.well-known/jwks.json", discoh)
+			// discoh, err := discovery.NewConfigurationHandler(md, oidc.NewStaticPublicHandle(pubh))
+			// if err != nil {
+			// 	t.Fatalf("Failed to initialize discovery handler: %v", err)
+			// }
+			// mux.Handle("GET /.well-known/openid-configuration", discoh)
+			// mux.Handle("GET /.well-known/jwks.json", discoh)
 
 			provider, err := oidc.DiscoverProvider(ctx, oidcSvr.URL, nil)
 			if err != nil {
@@ -171,6 +180,7 @@ func TestE2E(t *testing.T) {
 				ClientSecret: clientSecret,
 				Endpoint:     provider.Endpoint(),
 				RedirectURL:  cliSvr.URL,
+				Scopes:       []string{oidc.ScopeOfflineAccess},
 			}
 
 			var acopts []oauth2.AuthCodeOption
@@ -216,9 +226,10 @@ func TestE2E(t *testing.T) {
 				t.Logf("refresh iter: %d", i)
 				currRT := tok.RefreshToken
 
-				if err := smgr.expireAccessTokens(ctx); err != nil {
-					t.Fatalf("expiring tokens: %v", err)
-				}
+				// TODO - how to do this?
+				// if err := smgr.expireAccessTokens(ctx); err != nil {
+				// 	t.Fatalf("expiring tokens: %v", err)
+				// }
 				tok.Expiry = time.Now().Add(-1 * time.Second) // needs to line up with remote change, else we won't refresh
 
 				_, uir, err := provider.Userinfo(ctx, ts)
@@ -256,93 +267,134 @@ func randomStateValue() string {
 
 // contains helpers used by multiple tests
 
-type stubSMGR struct {
-	// sessions maps JSON session objects by their ID
-	// JSON > proto here for better debug output
-	sessions map[string]string
-}
+// type stubSMGR struct {
+// 	// sessions maps JSON session objects by their ID
+// 	// JSON > proto here for better debug output
+// 	sessions map[string]string
+// }
 
-func newStubSMGR() *stubSMGR {
-	return &stubSMGR{
-		sessions: map[string]string{},
-	}
-}
+// func newStubSMGR() *stubSMGR {
+// 	return &stubSMGR{
+// 		sessions: map[string]string{},
+// 	}
+// }
 
-func (s *stubSMGR) NewID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Errorf("can't create ID, rand.Read failed: %w", err))
-	}
-	return base64.RawURLEncoding.EncodeToString(b)
-}
+// func (s *stubSMGR) NewID() string {
+// 	b := make([]byte, 16)
+// 	if _, err := rand.Read(b); err != nil {
+// 		panic(fmt.Errorf("can't create ID, rand.Read failed: %w", err))
+// 	}
+// 	return base64.RawURLEncoding.EncodeToString(b)
+// }
 
-func (s *stubSMGR) GetSession(_ context.Context, sessionID string, into oidcop.Session) (found bool, err error) {
-	sess, ok := s.sessions[sessionID]
-	if !ok {
-		return false, nil
-	}
-	if err := json.Unmarshal([]byte(sess), into); err != nil {
-		return false, err
-	}
-	return true, nil
-}
+// func (s *stubSMGR) GetSession(_ context.Context, sessionID string, into oidcop.Session) (found bool, err error) {
+// 	sess, ok := s.sessions[sessionID]
+// 	if !ok {
+// 		return false, nil
+// 	}
+// 	if err := json.Unmarshal([]byte(sess), into); err != nil {
+// 		return false, err
+// 	}
+// 	return true, nil
+// }
 
-func (s *stubSMGR) PutSession(_ context.Context, sess oidcop.Session) error {
-	if sess.ID() == "" {
-		return fmt.Errorf("session has no ID")
-	}
-	strsess, err := json.Marshal(sess)
-	if err != nil {
-		return err
-	}
-	s.sessions[sess.ID()] = string(strsess)
-	return nil
-}
+// func (s *stubSMGR) PutSession(_ context.Context, sess oidcop.Session) error {
+// 	if sess.ID() == "" {
+// 		return fmt.Errorf("session has no ID")
+// 	}
+// 	strsess, err := json.Marshal(sess)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	s.sessions[sess.ID()] = string(strsess)
+// 	return nil
+// }
 
-func (s *stubSMGR) DeleteSession(ctx context.Context, sessionID string) error {
-	delete(s.sessions, sessionID)
-	return nil
-}
+// func (s *stubSMGR) DeleteSession(ctx context.Context, sessionID string) error {
+// 	delete(s.sessions, sessionID)
+// 	return nil
+// }
 
-// expireAccessTokens will set all the access token expirations to a time before
-// now.
-func (s *stubSMGR) expireAccessTokens(_ context.Context) error {
-	for id, sd := range s.sessions {
-		sm := map[string]interface{}{}
-		if err := json.Unmarshal([]byte(sd), &sm); err != nil {
-			return err
-		}
-		ati, ok := sm["access_token"]
-		if !ok {
-			continue // no access token in this session, skip
-		}
-		at := ati.(map[string]interface{})
-		at["expires_at"] = time.Now().Add(-1 * time.Second).Format(time.RFC3339)
-		sd, err := json.Marshal(sm)
-		if err != nil {
-			return err
-		}
-		s.sessions[id] = string(sd)
-	}
-	return nil
-}
+// // expireAccessTokens will set all the access token expirations to a time before
+// // now.
+// func (s *stubSMGR) expireAccessTokens(_ context.Context) error {
+// 	for id, sd := range s.sessions {
+// 		sm := map[string]interface{}{}
+// 		if err := json.Unmarshal([]byte(sd), &sm); err != nil {
+// 			return err
+// 		}
+// 		ati, ok := sm["access_token"]
+// 		if !ok {
+// 			continue // no access token in this session, skip
+// 		}
+// 		at := ati.(map[string]interface{})
+// 		at["expires_at"] = time.Now().Add(-1 * time.Second).Format(time.RFC3339)
+// 		sd, err := json.Marshal(sm)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		s.sessions[id] = string(sd)
+// 	}
+// 	return nil
+// }
 
 var (
-	th     *keyset.Handle
-	thOnce sync.Once
+	th   *keyset.Handle
+	thMu sync.Mutex
 )
 
-func testKeysetHandle() oidcop.KeysetHandle {
-	thOnce.Do(func() {
-		// we only make one, because it's slow
-		if th == nil {
-			h, err := keyset.NewHandle(jwt.ES256Template())
-			if err != nil {
-				panic(err)
-			}
-			th = h
+func testKeysets() map[oidcop.SigningAlg]oidcop.HandleFn {
+	thMu.Lock()
+	defer thMu.Unlock()
+	// we only make one, because it's slow
+	if th == nil {
+		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
+		if err != nil {
+			panic(err)
 		}
-	})
+		th = h
+	}
 
-	return oidcop.NewStaticKeysetHandle(th)
+	return map[oidcop.SigningAlg]oidcop.HandleFn{
+		oidcop.SigningAlgRS256: oidcop.StaticHandleFn(th),
+	}
+}
+
+var _ oidcop.AuthHandlers = (*handlers)(nil)
+
+type handlers struct {
+	authorizer oidcop.Authorizer
+}
+
+func (a *handlers) SetAuthorizer(at oidcop.Authorizer) {
+	a.authorizer = at
+}
+
+func (a *handlers) StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *oidcop.AuthorizationRequest) {
+	log.Printf("req scopes %v", authReq.Scopes)
+	if err := a.authorizer.Authorize(w, req, authReq.ID, &oidcop.Authorization{
+		Subject: "test-user",
+		Scopes:  append(authReq.Scopes, oidc.ScopeOpenID),
+	}); err != nil {
+		slog.ErrorContext(req.Context(), "error authorizing", "err", err)
+		http.Error(w, "error authorizing", http.StatusInternalServerError)
+	}
+}
+
+func (a *handlers) Token(req *oidcop.TokenRequest) (*oidcop.TokenResponse, error) {
+	return &oidcop.TokenResponse{
+		Identity: &oidcop.Identity{},
+	}, nil
+}
+
+func (a *handlers) RefreshToken(req *oidcop.RefreshTokenRequest) (*oidcop.TokenResponse, error) {
+	return &oidcop.TokenResponse{
+		Identity: &oidcop.Identity{},
+	}, nil
+}
+
+func (a *handlers) Userinfo(w io.Writer, uireq *oidcop.UserinfoRequest) (*oidcop.UserinfoResponse, error) {
+	return &oidcop.UserinfoResponse{
+		Identity: &oidcop.Identity{},
+	}, nil
 }

@@ -868,12 +868,12 @@ func TestUserinfo(t *testing.T) {
 				req.Header.Set("authorization", "Bearer "+at)
 			}
 
-			err = oidc.Userinfo(rec, req)
-			if tc.WantErr && err == nil {
+			oidc.Userinfo(rec, req)
+			if tc.WantErr && rec.Result().StatusCode == http.StatusOK {
 				t.Error("want error, but got none")
 			}
-			if !tc.WantErr && err != nil {
-				t.Errorf("want no error, got: %v", err)
+			if !tc.WantErr && rec.Result().StatusCode != http.StatusOK {
+				t.Errorf("want no error, got status: %d", rec.Result().StatusCode)
 			}
 		})
 	}
