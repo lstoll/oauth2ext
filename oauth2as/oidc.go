@@ -385,13 +385,7 @@ func (o *OIDC) finishAuthorization(w http.ResponseWriter, req *http.Request, aut
 		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "internal error", err, "deleting auth request failed")
 	}
 
-	var openidScope bool
-	for _, s := range auth.Scopes {
-		if s == "openid" {
-			openidScope = true
-		}
-	}
-	if !openidScope {
+	if !slices.Contains(auth.Scopes, oidc.ScopeOpenID) {
 		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "Access Denied", err, "openid scope was not granted")
 	}
 
@@ -817,6 +811,11 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) {
 		_ = oauth2.WriteError(w, req, herr)
 		return
 	}
+	if uiresp.Identity == nil {
+		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "userinfo has no identity"}
+		_ = oauth2.WriteError(w, req, herr)
+		return
+	}
 
 	if err := json.NewEncoder(w).Encode(uiresp.Identity); err != nil {
 		_ = oauth2.WriteError(w, req, err)
@@ -827,15 +826,6 @@ func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) {
 type unauthorizedErr interface {
 	error
 	Unauthorized() bool
-}
-
-func strsContains(strs []string, s string) bool {
-	for _, str := range strs {
-		if str == s {
-			return true
-		}
-	}
-	return false
 }
 
 func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {

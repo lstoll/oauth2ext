@@ -850,7 +850,7 @@ func TestUserinfo(t *testing.T) {
 
 			handlers := &authFnHandlers{
 				userinfo: func(w io.Writer, uireq *UserinfoRequest) (*UserinfoResponse, error) {
-					return nil, nil
+					return &UserinfoResponse{Identity: &Identity{}}, nil
 				},
 			}
 
