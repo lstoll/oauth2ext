@@ -5,12 +5,16 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: [ stable, oldstable ]
+
     steps:
 
-    - name: Set up Go stable
+    - name: Set up Go ${{ matrix.go }}
       uses: actions/setup-go@v5
       with:
-        go-version: stable
+        go-version: ${{ matrix.go }}
       id: go
 
     - name: Check out code into the Go module directory
@@ -20,10 +24,10 @@ jobs:
       run: go mod download
 
     - name: Build
-      run: make build
+      run: go build ./...
 
     - name: Test
-      run: make test
+      run: go test ./...
 
     - name: Lint
       uses: golangci/golangci-lint-action@v6
