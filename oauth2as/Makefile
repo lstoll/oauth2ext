@@ -1,16 +1,10 @@
-.PHONY: all build test lint proto
+.PHONY: all
+all: proto generate
 
-export PATH := $(shell pwd)/bin:$(PATH)
+.PHONY: generate
+generate:
+	go generate ./...
 
-all: proto build test lint
-
-build:
-	go build ./...
-
-test:
-	go test -v ./...
-
-proto: proto/core/v1/storage.pb.go
-
-proto/core/v1/storage.pb.go: proto/core/v1/storage.proto
-	protoc -I proto/core/v1 --go_out=proto/core/v1 storage.proto
+.PHONY: proto
+proto:
+	buf generate .

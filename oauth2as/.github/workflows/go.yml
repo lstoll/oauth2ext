@@ -33,3 +33,8 @@ jobs:
       uses: golangci/golangci-lint-action@v6
       with:
         version: latest
+
+    - name: Buf
+      uses: bufbuild/buf-action@v1
+      with:
+        pr_comment: false

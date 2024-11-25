@@ -1,0 +1,8 @@
+version: v2
+clean: false
+plugins:
+  - local: ["go", "run", "google.golang.org/protobuf/cmd/protoc-gen-go"]
+    out: .
+    opt: paths=source_relative
+inputs:
+  - directory: proto
