@@ -99,7 +99,7 @@ func TestFileError(t *testing.T) {
 	type DB struct{ Val int }
 
 	path := filepath.Join(t.TempDir(), "tstdir", "testfserr.json")
-	os.MkdirAll(filepath.Dir(path), 0777)
+	_ = os.MkdirAll(filepath.Dir(path), 0777)
 	db, err := New[DB](path)
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestFileError(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		os.Chmod(filepath.Dir(path), 0700)
+		_ = os.Chmod(filepath.Dir(path), 0700)
 	})
 
 	if err := db.Write(func(db *DB) error {
