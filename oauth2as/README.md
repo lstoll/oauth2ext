@@ -1,5 +1,7 @@
 # oidcop
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/lstoll/oidcop.svg)](https://pkg.go.dev/github.com/lstoll/oidcop)
+
 Go library for implementing OIDC OPs (Servers)
 
 ## Example OP
