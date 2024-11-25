@@ -8,8 +8,8 @@ import (
 	"slices"
 	"time"
 
-	"crawshaw.dev/jsonfile"
 	"github.com/google/uuid"
+	"github.com/lstoll/oidcop/internal/jsonfile"
 )
 
 var _ Storage = (*JSONFile)(nil)
