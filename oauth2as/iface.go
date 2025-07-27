@@ -2,7 +2,6 @@ package oauth2as
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"time"
 
@@ -38,16 +37,6 @@ type Authorization struct {
 	// Metadata can optionally contain serialized data, that will be made
 	// accessible across calls. This library will not maipulate the data.
 	Metadata json.RawMessage `json:"metadata"`
-}
-
-type AuthHandlers interface {
-	// SetAuthorizer sets the authorizer these handlers should use to finalize
-	// login flows. This will be called before any other methods are called.
-	SetAuthorizer(Authorizer)
-	StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *AuthorizationRequest)
-	Token(req *TokenRequest) (*TokenResponse, error)
-	RefreshToken(req *RefreshTokenRequest) (*TokenResponse, error)
-	Userinfo(w io.Writer, uireq *UserinfoRequest) (*UserinfoResponse, error)
 }
 
 // AuthorizationRequest details the information the user starting the

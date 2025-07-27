@@ -83,15 +83,15 @@ func unmarshalToken(tok string) (id uuid.UUID, b []byte, _ error) {
 	return uid, ut.Token, err
 }
 
-func (o *Server) buildIDAccessTokens(auth *storage.Authorization, identity Identity, extraAccessClaims map[string]any, idExp, atExp time.Time) (id *jwt.RawJWT, access *jwt.RawJWT, _ error) {
+func (s *Server) buildIDAccessTokens(auth *storage.Authorization, identity Identity, extraAccessClaims map[string]any, idExp, atExp time.Time) (id *jwt.RawJWT, access *jwt.RawJWT, _ error) {
 	idc := claims.RawIDClaims{
-		Issuer:   o.issuer,
+		Issuer:   s.config.Issuer,
 		Subject:  auth.Subject,
 		Expiry:   claims.UnixTime(idExp.Unix()),
 		Audience: claims.StrOrSlice{auth.ClientID},
 		ACR:      auth.ACR,
 		AMR:      auth.AMR,
-		IssuedAt: claims.UnixTime(o.now().Unix()),
+		IssuedAt: claims.UnixTime(s.now().Unix()),
 		AuthTime: claims.UnixTime(auth.AuthenticatedAt.Unix()),
 		Nonce:    auth.Nonce,
 		Extra:    identity.ExtraClaims,
@@ -110,17 +110,17 @@ func (o *Server) buildIDAccessTokens(auth *storage.Authorization, identity Ident
 	}
 
 	ac := claims.RawAccessTokenClaims{
-		Issuer:   o.issuer,
+		Issuer:   s.config.Issuer,
 		Subject:  auth.Subject,
 		ClientID: auth.ClientID,
 		Expiry:   claims.UnixTime(atExp.Unix()),
 		// TODO - what do we actually want to do here. Is this going to be just
 		// an identity server, or do we actually want to extend to access? For
 		// now, just make it for the issuer and verify that on userinfo.
-		Audience: claims.StrOrSlice{o.issuer},
+		Audience: claims.StrOrSlice{s.config.Issuer},
 		ACR:      auth.ACR,
 		AMR:      auth.AMR,
-		IssuedAt: claims.UnixTime(o.now().Unix()),
+		IssuedAt: claims.UnixTime(s.now().Unix()),
 		AuthTime: claims.UnixTime(auth.AuthenticatedAt.Unix()),
 		JWTID:    uuid.Must(uuid.NewRandom()).String(),
 		// TODO - groups/roles etc? Or are these just "extra"

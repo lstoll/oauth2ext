@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -20,37 +21,7 @@ import (
 	"github.com/lstoll/oauth2as/storage"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
-	"github.com/tink-crypto/tink-go/v2/keyset"
-	tinkpb "github.com/tink-crypto/tink-go/v2/proto/tink_go_proto"
 )
-
-// HandleFn is used to get a tink handle for a keyset, when it is needed.
-type HandleFn func(context.Context) (*keyset.Handle, error)
-
-// StaticHandleFn is a convenience method to create a HandleFn from a fixed
-// keyset handle.
-func StaticHandleFn(h *keyset.Handle) HandleFn {
-	return HandleFn(func(context.Context) (*keyset.Handle, error) { return h, nil })
-}
-
-// SigningAlg represents supported JWT signing algorithms
-type SigningAlg string
-
-const (
-	SigningAlgRS256 = "RS256"
-	SigningAlgES256 = "ES256"
-)
-
-func (s SigningAlg) Template() *tinkpb.KeyTemplate {
-	switch s {
-	case SigningAlgRS256:
-		return jwt.RS256_2048_F4_Key_Template()
-	case SigningAlgES256:
-		return jwt.ES256Template()
-	default:
-		panic(fmt.Sprintf("invalid signing alg %s", s))
-	}
-}
 
 // ClientSource is used for validating client informantion for the general flow
 type ClientSource interface {
@@ -85,8 +56,29 @@ const (
 
 // Options sets configuration values for the OIDC flow implementation
 type Options struct {
+
+	// TODO - do we want to consider splitting the max refresh time, and how
+	// long any single refresh token is valid for?
+
+	// Logger can be used to configure a logger that will have errors and
+	// warning logged. Defaults to discarding this information.
+	Logger *slog.Logger
+}
+
+// Server can be used to handle the various parts of the Server auth flow.
+type Config struct {
 	// Issuer is the issuer we are serving for.
 	Issuer string
+	// Storage is the storage backend to use for the server.
+	Storage storage.Storage
+	Clients ClientSource
+	Keyset  AlgKeysets
+
+	Logger *slog.Logger
+
+	TokenHandler    func(req *TokenRequest) (*TokenResponse, error)
+	UserinfoHandler func(w io.Writer, uireq *UserinfoRequest) (*UserinfoResponse, error)
+
 	// AuthValidityTime is the maximum time an authorization flow/AuthID is
 	// valid. This is the time from Starting to Finishing the authorization. The
 	// optimal time here will be application specific, and should encompass how
@@ -110,100 +102,122 @@ type Options struct {
 	// valid up until this time.
 	MaxRefreshTime time.Duration
 
-	// TODO - do we want to consider splitting the max refresh time, and how
-	// long any single refresh token is valid for?
-
-	// Logger can be used to configure a logger that will have errors and
-	// warning logged. Defaults to discarding this information.
-	Logger *slog.Logger
-}
-
-// Server can be used to handle the various parts of the Server auth flow.
-type Server struct {
-	issuer  string
-	storage storage.Storage
-	clients ClientSource
-	keyset  map[SigningAlg]HandleFn
-	handler AuthHandlers
-	opts    Options
-	logger  *slog.Logger
+	// AuthorizationPath is the path to the authorization endpoint. The server
+	// does not handle requests to this, but it is published in the discovery
+	// metadata.
+	AuthorizationPath string
+	TokenPath         string
+	UserinfoPath      string
 
 	now func() time.Time
 }
 
-func New(issuer string, storage storage.Storage, clientSource ClientSource, keyset map[SigningAlg]HandleFn, handlers AuthHandlers, opts *Options) (*Server, error) {
-	if issuer == "" {
-		return nil, fmt.Errorf("issuer must be provided")
-	}
-	if opts == nil {
-		opts = &Options{}
-	}
+type Server struct {
+	config Config
+	mux    *http.ServeMux
 
-	if _, ok := keyset[SigningAlgRS256]; !ok {
-		return nil, errors.New("keyset must contain a RS256 handle")
-	}
+	logger *slog.Logger
 
-	o := &Server{
-		issuer:  issuer,
-		storage: storage,
-		clients: clientSource,
-		handler: handlers,
-		keyset:  keyset,
-
-		opts: *opts,
-
-		now:    time.Now,
-		logger: opts.Logger,
-	}
-
-	if o.logger == nil {
-		o.logger = slog.New(slog.DiscardHandler)
-	}
-
-	if o.opts.AuthValidityTime == time.Duration(0) {
-		o.opts.AuthValidityTime = DefaultAuthValidityTime
-	}
-	if o.opts.CodeValidityTime == time.Duration(0) {
-		o.opts.CodeValidityTime = DefaultCodeValidityTime
-	}
-	if o.opts.IDTokenValidity == time.Duration(0) {
-		o.opts.IDTokenValidity = DefaultIDTokenValidity
-	}
-	if o.opts.AccessTokenValidity == time.Duration(0) {
-		o.opts.AccessTokenValidity = DefaultsAccessTokenValidity
-	}
-	if o.opts.MaxRefreshTime == time.Duration(0) {
-		o.opts.MaxRefreshTime = DefaultMaxRefreshTime
-	}
-
-	if o.opts.AccessTokenValidity < o.opts.IDTokenValidity {
-		return nil, fmt.Errorf("ID token validity must be equal or greater to the access token validity period")
-	}
-
-	handlers.SetAuthorizer(&authorizer{o: o})
-
-	return o, nil
+	now func() time.Time
 }
 
-func (o *Server) BuildDiscovery() *oidc.ProviderMetadata {
-	var algs []string
-	for k := range o.keyset {
-		algs = append(algs, string(k))
+func NewServer(c Config) (*Server, error) {
+	// perform validations
+	if c.Issuer == "" {
+		return nil, fmt.Errorf("issuer is required")
 	}
-	return &oidc.ProviderMetadata{
-		Issuer: o.issuer,
+
+	issURL, err := url.Parse(c.Issuer)
+	if err != nil {
+		return nil, fmt.Errorf("parsing issuer: %w", err)
+	}
+
+	if c.Storage == nil {
+		return nil, fmt.Errorf("storage is required")
+	}
+	if c.Clients == nil {
+		return nil, fmt.Errorf("clients is required")
+	}
+	if c.Keyset == nil {
+		return nil, fmt.Errorf("keyset is required")
+	}
+
+	// TODO - relax this with defaults if we can make them work.
+	if c.TokenHandler == nil {
+		return nil, fmt.Errorf("token handler is required")
+	}
+	if c.UserinfoHandler == nil {
+		return nil, fmt.Errorf("userinfo handler is required")
+	}
+
+	// Set defaults
+
+	if c.AccessTokenValidity == 0 {
+		c.AccessTokenValidity = DefaultsAccessTokenValidity
+	}
+	if c.IDTokenValidity == 0 {
+		c.IDTokenValidity = DefaultIDTokenValidity
+	}
+	if c.AuthValidityTime == 0 {
+		c.AuthValidityTime = DefaultAuthValidityTime
+	}
+	if c.CodeValidityTime == 0 {
+		c.CodeValidityTime = DefaultCodeValidityTime
+	}
+	if c.MaxRefreshTime == 0 {
+		c.MaxRefreshTime = DefaultMaxRefreshTime
+	}
+
+	svr := &Server{
+		config: c,
+		mux:    http.NewServeMux(),
+		now:    time.Now,
+	}
+
+	if c.AuthorizationPath == "" {
+		c.AuthorizationPath = DefaultAuthorizationEndpoint
+	}
+	if c.TokenPath == "" {
+		c.TokenPath = DefaultTokenEndpoint
+	}
+
+	// Build discovery metadata
+	var mdAlgs []string
+	for _, k := range c.Keyset.SupportedAlgorithms() {
+		mdAlgs = append(mdAlgs, string(k))
+	}
+
+	metadata := &oidc.ProviderMetadata{
+		Issuer: c.Issuer,
 		ResponseTypesSupported: []string{
 			"code",
-			// TODO - we "must" support these, but we don't currently.
-			// "id_token",
-			// "id_token token",
 		},
 		SubjectTypesSupported:            []string{"public"},
-		IDTokenSigningAlgValuesSupported: algs,
+		IDTokenSigningAlgValuesSupported: mdAlgs,
 		GrantTypesSupported:              []string{"authorization_code"},
 		CodeChallengeMethodsSupported:    []oidc.CodeChallengeMethod{oidc.CodeChallengeMethodS256},
-		JWKSURI:                          o.issuer + "/.well-known/jwks.json",
+		JWKSURI:                          issURL.ResolveReference(&url.URL{Path: "/.well-known/jwks.json"}).String(),
+		AuthorizationEndpoint:            issURL.ResolveReference(&url.URL{Path: c.AuthorizationPath}).String(),
+		TokenEndpoint:                    issURL.ResolveReference(&url.URL{Path: c.TokenPath}).String(),
 	}
+	if c.UserinfoPath != "" {
+		metadata.UserinfoEndpoint = issURL.ResolveReference(&url.URL{Path: c.UserinfoPath}).String()
+	}
+
+	discoh, err := discovery.NewConfigurationHandler(metadata, &pubHandle{h: c.Keyset})
+	if err != nil {
+		return nil, fmt.Errorf("creating configuration handler: %w", err)
+	}
+
+	svr.mux.Handle("GET /.well-known/openid-configuration", discoh)
+	svr.mux.Handle("GET /.well-known/jwks.json", discoh)
+
+	svr.mux.Handle("POST "+c.TokenPath, http.HandlerFunc(svr.Token))
+	if c.UserinfoPath != "" {
+		svr.mux.Handle("GET "+c.UserinfoPath, http.HandlerFunc(svr.Userinfo))
+	}
+
+	return svr, nil
 }
 
 const (
@@ -212,67 +226,14 @@ const (
 	DefaultUserinfoEndpoint      = "/userinfo"
 )
 
-// AttachHandlers will bind handlers for the following endpoints to the given
-// mux. If the provided metadata specifies a URL for them already it will be
-// used, if not defaults will be set. If metadata is nil, BuildDiscovery will be
-// used.
-func (o *Server) AttachHandlers(mux *http.ServeMux, metadata *oidc.ProviderMetadata) error {
-	if metadata == nil {
-		metadata = o.BuildDiscovery()
-	}
-	if metadata.AuthorizationEndpoint == "" {
-		metadata.AuthorizationEndpoint = o.issuer + DefaultAuthorizationEndpoint
-	}
-	authEndpoint, err := url.Parse(metadata.AuthorizationEndpoint)
-	if err != nil {
-		return fmt.Errorf("parsing %s: %w", metadata.AuthorizationEndpoint, err)
-	}
-	if metadata.TokenEndpoint == "" {
-		metadata.TokenEndpoint = o.issuer + DefaultTokenEndpoint
-	}
-	tokenEndpoint, err := url.Parse(metadata.TokenEndpoint)
-	if err != nil {
-		return fmt.Errorf("parsing %s: %w", metadata.TokenEndpoint, err)
-	}
-	if metadata.UserinfoEndpoint == "" {
-		metadata.UserinfoEndpoint = o.issuer + DefaultUserinfoEndpoint
-	}
-	userinfoEndpoint, err := url.Parse(metadata.UserinfoEndpoint)
-	if err != nil {
-		return fmt.Errorf("parsing %s: %w", metadata.UserinfoEndpoint, err)
-	}
-
-	discoh, err := discovery.NewConfigurationHandler(metadata, &pubHandle{h: o.keyset[SigningAlgRS256]})
-	if err != nil {
-		return fmt.Errorf("creating configuration handler: %w", err)
-	}
-
-	mux.Handle("GET /.well-known/openid-configuration", discoh)
-	mux.Handle("GET /.well-known/jwks.json", discoh)
-
-	mux.Handle("GET "+authEndpoint.Path, http.HandlerFunc(o.StartAuthorization))
-	mux.Handle("POST "+tokenEndpoint.Path, http.HandlerFunc(o.Token))
-	mux.Handle("GET "+userinfoEndpoint.Path, http.HandlerFunc(o.Userinfo))
-
-	return nil
-}
-
-type pubHandle struct {
-	// TODO - either convert oidc to handle func, or decide to keep it an
-	// interface.
-	h HandleFn
-}
-
-func (p *pubHandle) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
-	h, err := p.h(ctx)
-	if err != nil {
-		return nil, err
-	}
-	pub, err := h.Public()
-	if err != nil {
-		return nil, err
-	}
-	return pub, nil
+// ServeHTTP will handle requests on the following paths:
+// * TokenPath
+// * UserinfoPath, if configured
+// * /.well-known/openid-configuration
+// * /.well-known/jwks.json
+// TODO - oauth2 discovery endpoint
+func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	s.mux.ServeHTTP(w, req)
 }
 
 // StartAuthorization can be used to handle a request to the auth endpoint. It
@@ -285,7 +246,7 @@ func (p *pubHandle) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#CodeFlowAuth
 // https://openid.net/specs/openid-connect-core-1_0.html#ImplicitFlowAuth
-func (o *Server) StartAuthorization(w http.ResponseWriter, req *http.Request) {
+func (s *Server) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 	authreq, err := oauth2.ParseAuthRequest(req)
 	if err != nil {
 		_ = oauth2.WriteError(w, req, err)
@@ -303,7 +264,7 @@ func (o *Server) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 	//
 	// https://tools.ietf.org/html/rfc6749#section-4.1.2.1
 
-	cidok, err := o.clients.IsValidClientID(authreq.ClientID)
+	cidok, err := s.config.Clients.IsValidClientID(authreq.ClientID)
 	if err != nil {
 		_ = oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource check client ID")
 		return
@@ -313,7 +274,7 @@ func (o *Server) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	redirok, err := o.clients.ValidateClientRedirectURI(authreq.ClientID, authreq.RedirectURI)
+	redirok, err := s.config.Clients.ValidateClientRedirectURI(authreq.ClientID, authreq.RedirectURI)
 	if err != nil {
 		_ = oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource redirect URI validation")
 		return
@@ -331,7 +292,7 @@ func (o *Server) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 		Scopes:        authreq.Scopes,
 		Nonce:         authreq.Raw.Get("nonce"),
 		CodeChallenge: authreq.CodeChallenge,
-		Expiry:        o.now().Add(o.opts.AuthValidityTime),
+		Expiry:        s.now().Add(s.config.AuthValidityTime),
 	}
 	if authreq.Raw.Get("acr_values") != "" {
 		ar.ACRValues = strings.Split(authreq.Raw.Get("acr_values"), " ")
@@ -345,7 +306,7 @@ func (o *Server) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if err := o.storage.PutAuthRequest(req.Context(), ar); err != nil {
+	if err := s.config.Storage.PutAuthRequest(req.Context(), ar); err != nil {
 		_ = oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeErrServerError, authreq.State, "failed to persist session", err)
 		return
 	}
@@ -360,7 +321,8 @@ func (o *Server) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 		areq.ACRValues = strings.Split(authreq.Raw.Get("acr_values"), " ")
 	}
 
-	o.handler.StartAuthorization(w, req, areq)
+	// TODO - return parsed request
+	// o.handler.StartAuthorization(w, req, areq)
 }
 
 type authorizer struct {
@@ -372,8 +334,8 @@ func (a *authorizer) Authorize(w http.ResponseWriter, r *http.Request, authReqID
 }
 
 // TODO - set a authroizer on the handles.
-func (o *Server) finishAuthorization(w http.ResponseWriter, req *http.Request, authReqID uuid.UUID, auth *Authorization) error {
-	authreq, err := o.storage.GetAuthRequest(req.Context(), authReqID)
+func (s *Server) finishAuthorization(w http.ResponseWriter, req *http.Request, authReqID uuid.UUID, auth *Authorization) error {
+	authreq, err := s.config.Storage.GetAuthRequest(req.Context(), authReqID)
 	if err != nil {
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to get session")
 	}
@@ -381,7 +343,7 @@ func (o *Server) finishAuthorization(w http.ResponseWriter, req *http.Request, a
 		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "Access Denied", err, "session not found in storage")
 	}
 
-	if err := o.storage.DeleteAuthRequest(req.Context(), authreq.ID); err != nil {
+	if err := s.config.Storage.DeleteAuthRequest(req.Context(), authreq.ID); err != nil {
 		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "internal error", err, "deleting auth request failed")
 	}
 
@@ -389,25 +351,25 @@ func (o *Server) finishAuthorization(w http.ResponseWriter, req *http.Request, a
 		return oauth2.WriteHTTPError(w, req, http.StatusForbidden, "Access Denied", err, "openid scope was not granted")
 	}
 
-	stgauth := auth.toStorage(authreq.ID, authreq.ClientID, o.now(), authreq.Nonce)
-	if err := o.storage.PutAuthorization(req.Context(), stgauth); err != nil {
+	stgauth := auth.toStorage(authreq.ID, authreq.ClientID, s.now(), authreq.Nonce)
+	if err := s.config.Storage.PutAuthorization(req.Context(), stgauth); err != nil {
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to save authorization")
 	}
 
 	switch authreq.ResponseType {
 	case storage.AuthRequestResponseTypeCode:
-		return o.finishCodeAuthorization(w, req, authreq, stgauth)
+		return s.finishCodeAuthorization(w, req, authreq, stgauth)
 	default:
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", nil, fmt.Sprintf("unknown ResponseType %s", authreq.ResponseType))
 	}
 }
 
-func (o *Server) finishCodeAuthorization(w http.ResponseWriter, req *http.Request, authReq *storage.AuthRequest, auth *storage.Authorization) error {
+func (s *Server) finishCodeAuthorization(w http.ResponseWriter, req *http.Request, authReq *storage.AuthRequest, auth *storage.Authorization) error {
 	ac := &storage.AuthCode{
 		ID:              uuid.Must(uuid.NewRandom()),
 		AuthorizationID: auth.ID,
 		CodeChallenge:   authReq.CodeChallenge,
-		Expiry:          o.now().Add(o.opts.CodeValidityTime),
+		Expiry:          s.now().Add(s.config.CodeValidityTime),
 	}
 
 	ucode, scode, err := newToken(ac.ID)
@@ -422,7 +384,7 @@ func (o *Server) finishCodeAuthorization(w http.ResponseWriter, req *http.Reques
 
 	ac.Code = scode
 
-	if err := o.storage.PutAuthCode(req.Context(), ac); err != nil {
+	if err := s.config.Storage.PutAuthCode(req.Context(), ac); err != nil {
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to save auth code")
 	}
 
@@ -461,7 +423,7 @@ func (o *Server) finishCodeAuthorization(w http.ResponseWriter, req *http.Reques
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#TokenEndpoint
 // https://openid.net/specs/openid-connect-core-1_0.html#RefreshTokens
-func (o *Server) Token(w http.ResponseWriter, req *http.Request) {
+func (s *Server) Token(w http.ResponseWriter, req *http.Request) {
 	treq, err := oauth2.ParseTokenRequest(req)
 	if err != nil {
 		_ = oauth2.WriteError(w, req, err)
@@ -471,31 +433,31 @@ func (o *Server) Token(w http.ResponseWriter, req *http.Request) {
 	var resp *oauth2.TokenResponse
 	switch treq.GrantType {
 	case oauth2.GrantTypeAuthorizationCode:
-		resp, err = o.codeToken(req.Context(), treq)
+		resp, err = s.codeToken(req.Context(), treq)
 	case oauth2.GrantTypeRefreshToken:
-		resp, err = o.refreshToken(req.Context(), treq)
+		resp, err = s.refreshToken(req.Context(), treq)
 	default:
 		err = &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid grant type", Cause: fmt.Errorf("grant type %s not handled", treq.GrantType)}
 	}
 	if err != nil {
-		o.logger.WarnContext(req.Context(), "error in token handler", "grant-type", treq.GrantType, "err", err)
+		s.logger.WarnContext(req.Context(), "error in token handler", "grant-type", treq.GrantType, "err", err)
 		_ = oauth2.WriteError(w, req, err)
 		return
 	}
 
 	if err := oauth2.WriteTokenResponse(w, resp); err != nil {
-		o.logger.ErrorContext(req.Context(), "error writing token response", "grant-type", treq.GrantType, "err", err)
+		s.logger.ErrorContext(req.Context(), "error writing token response", "grant-type", treq.GrantType, "err", err)
 		_ = oauth2.WriteError(w, req, err)
 		return
 	}
 }
 
-func (o *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth2.TokenResponse, error) {
+func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth2.TokenResponse, error) {
 	id, utok, err := unmarshalToken(treq.Code)
 	if err != nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid code", Cause: err}
 	}
-	ac, auth, err := o.storage.GetAuthCode(ctx, id) // TODO
+	ac, auth, err := s.config.Storage.GetAuthCode(ctx, id) // TODO
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get code from storage", Cause: err}
 	}
@@ -505,12 +467,12 @@ func (o *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 
 	// discard the auth code now, it can only be used once regardless of it's
 	// validity.
-	if err := o.storage.DeleteAuthCode(ctx, id); err != nil {
+	if err := s.config.Storage.DeleteAuthCode(ctx, id); err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete session from storage", Cause: err}
 	}
 
 	// storage should take care of this, but an extra check doesn't hurt
-	if o.now().After(ac.Expiry) {
+	if s.now().After(ac.Expiry) {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
 	}
 
@@ -523,13 +485,13 @@ func (o *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 	}
 
 	// we have a validated code.
-	if err := o.validateTokenClient(ctx, treq, auth.ClientID); err != nil {
+	if err := s.validateTokenClient(ctx, treq, auth.ClientID); err != nil {
 		return nil, err
 	}
 
 	// If the client is public and we require pkce, reject it if there's no
 	// verifier.
-	reqPKCE, err := o.clients.RequiresPKCE(treq.ClientID)
+	reqPKCE, err := s.config.Clients.RequiresPKCE(treq.ClientID)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check if client is public", Cause: err}
 	}
@@ -549,7 +511,8 @@ func (o *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 		Authorization: *auth,
 	}
 
-	tresp, err := o.handler.Token(tr)
+	// TODO - this should be optional
+	tresp, err := s.config.TokenHandler(tr)
 	if err != nil {
 		var uaerr unauthorizedErr
 		if errors.As(err, &uaerr); uaerr != nil && uaerr.Unauthorized() {
@@ -558,15 +521,15 @@ func (o *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	return o.buildTokenResponse(ctx, auth, nil, tresp)
+	return s.buildTokenResponse(ctx, auth, nil, tresp)
 }
 
-func (o *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
+func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
 	id, utok, err := unmarshalToken(treq.RefreshToken)
 	if err != nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid refresh token", Cause: err}
 	}
-	rsess, auth, err := o.storage.GetRefreshSession(ctx, id)
+	rsess, auth, err := s.config.Storage.GetRefreshSession(ctx, id)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get refresh session from storage", Cause: err}
 	}
@@ -580,7 +543,7 @@ func (o *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 	// succeeds, abort the deferred deletion.
 	defer func() {
 		if retErr != nil {
-			if err := o.storage.DeleteRefreshSession(ctx, rsess.ID); err != nil {
+			if err := s.config.Storage.DeleteRefreshSession(ctx, rsess.ID); err != nil {
 				retErr = &oauth2.HTTPError{
 					Code:     http.StatusInternalServerError,
 					Message:  "internal error",
@@ -592,7 +555,7 @@ func (o *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 	}()
 
 	// storage should take care of this, but an extra check doesn't hurt
-	if o.now().After(rsess.Expiry) {
+	if s.now().After(rsess.Expiry) {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
 	}
 
@@ -604,12 +567,14 @@ func (o *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code", Cause: err}
 	}
 
-	// we have a validated request. Call out to the handler to get the details.
-	tr := &RefreshTokenRequest{
-		Authorization: *auth,
-	}
+	// // we have a validated request. Call out to the handler to get the details.
+	// tr := &RefreshTokenRequest{
+	// 	Authorization: *auth,
+	// }
 
-	tresp, err := o.handler.RefreshToken(tr)
+	// tresp, err := o.handler.RefreshToken(tr)
+	// TODO - need to re-do this too.
+	tresp, err := s.config.TokenHandler(nil)
 	if err != nil {
 		var uaerr unauthorizedErr
 		if errors.As(err, &uaerr); uaerr != nil && uaerr.Unauthorized() {
@@ -618,20 +583,20 @@ func (o *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	return o.buildTokenResponse(ctx, auth, rsess, tresp)
+	return s.buildTokenResponse(ctx, auth, rsess, tresp)
 }
 
 // buildTokenResponse creates the oauth token response for code and refresh.
 // refreshSession can be nil, if it is and we should issue a refresh token, a
 // new refresh session will be created.
-func (o *Server) buildTokenResponse(ctx context.Context, auth *storage.Authorization, refreshSess *storage.RefreshSession, tresp *TokenResponse) (*oauth2.TokenResponse, error) {
+func (s *Server) buildTokenResponse(ctx context.Context, auth *storage.Authorization, refreshSess *storage.RefreshSession, tresp *TokenResponse) (*oauth2.TokenResponse, error) {
 	var refreshTok string
 	if !tresp.OverrideRefreshTokenIssuance && slices.Contains(auth.Scopes, oidc.ScopeOfflineAccess) {
 		if refreshSess == nil {
 			// code request with refresh allowed, build a new session.
 			refreshExpiry := tresp.RefreshTokenValidUntil
 			if refreshExpiry.IsZero() {
-				refreshExpiry = auth.AuthenticatedAt.Add(o.opts.MaxRefreshTime)
+				refreshExpiry = auth.AuthenticatedAt.Add(s.config.MaxRefreshTime)
 			}
 			refreshSess = &storage.RefreshSession{
 				ID:              uuid.Must(uuid.NewRandom()),
@@ -657,30 +622,30 @@ func (o *Server) buildTokenResponse(ctx context.Context, auth *storage.Authoriza
 			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to marshal refresh token", Cause: err}
 		}
 
-		if err := o.storage.PutRefreshSession(ctx, refreshSess); err != nil {
+		if err := s.config.Storage.PutRefreshSession(ctx, refreshSess); err != nil {
 			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to update refresh session", Cause: err}
 		}
 	} else if refreshSess != nil {
-		if err := o.storage.DeleteRefreshSession(ctx, refreshSess.ID); err != nil {
+		if err := s.config.Storage.DeleteRefreshSession(ctx, refreshSess.ID); err != nil {
 			return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to delete refresh session", Cause: err}
 		}
 	}
 
 	idExp := tresp.IDTokenExpiry
 	if idExp.IsZero() {
-		idExp = o.now().Add(o.opts.IDTokenValidity)
+		idExp = s.now().Add(s.config.IDTokenValidity)
 	}
 	atExp := tresp.AccessTokenExpiry
 	if atExp.IsZero() {
-		atExp = o.now().Add(o.opts.AccessTokenValidity)
+		atExp = s.now().Add(s.config.AccessTokenValidity)
 	}
 
-	rawid, rawat, err := o.buildIDAccessTokens(auth, *tresp.Identity, tresp.AccessTokenExtraClaims, idExp, atExp)
+	rawid, rawat, err := s.buildIDAccessTokens(auth, *tresp.Identity, tresp.AccessTokenExtraClaims, idExp, atExp)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating raw JWTs", Cause: err}
 	}
 
-	h, err := o.keyset[SigningAlgRS256](ctx)
+	h, err := s.config.Keyset.HandleFor(SigningAlgRS256)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting handle", Cause: err}
 	}
@@ -704,21 +669,21 @@ func (o *Server) buildTokenResponse(ctx context.Context, auth *storage.Authoriza
 		AccessToken:  sat,
 		RefreshToken: refreshTok,
 		TokenType:    "bearer",
-		ExpiresIn:    atExp.Sub(o.now()),
+		ExpiresIn:    atExp.Sub(s.now()),
 		ExtraParams: map[string]interface{}{
 			"id_token": string(sidt),
 		},
 	}, nil
 }
 
-func (o *Server) validateTokenClient(_ context.Context, req *oauth2.TokenRequest, wantClientID string) error {
+func (s *Server) validateTokenClient(_ context.Context, req *oauth2.TokenRequest, wantClientID string) error {
 	// check to see if we're working with the same client
 	if wantClientID != req.ClientID {
 		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
 	}
 
 	// validate the client
-	cok, err := o.clients.ValidateClientSecret(req.ClientID, req.ClientSecret)
+	cok, err := s.config.Clients.ValidateClientSecret(req.ClientID, req.ClientSecret)
 	if err != nil {
 		return &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check client id & secret", Cause: err}
 
@@ -739,7 +704,7 @@ func (o *Server) validateTokenClient(_ context.Context, req *oauth2.TokenRequest
 // appropriate response data in JSON format to the passed writer.
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#UserInfoResponse
-func (o *Server) Userinfo(w http.ResponseWriter, req *http.Request) {
+func (s *Server) Userinfo(w http.ResponseWriter, req *http.Request) {
 	authSp := strings.SplitN(req.Header.Get("authorization"), " ", 2)
 	if !strings.EqualFold(authSp[0], "bearer") || len(authSp) != 2 {
 		be := &oauth2.BearerError{} // no content, just request auth
@@ -752,7 +717,7 @@ func (o *Server) Userinfo(w http.ResponseWriter, req *http.Request) {
 
 	// TODO - check the audience is the issuer, as we have hardcoded.
 
-	h, err := o.keyset[SigningAlgRS256](req.Context())
+	h, err := s.config.Keyset.HandleFor(SigningAlgRS256)
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
 		_ = oauth2.WriteError(w, req, herr)
@@ -773,7 +738,7 @@ func (o *Server) Userinfo(w http.ResponseWriter, req *http.Request) {
 	}
 
 	jwtValidator, err := jwt.NewValidator(&jwt.ValidatorOpts{
-		ExpectedIssuer:     &o.issuer,
+		ExpectedIssuer:     &s.config.Issuer,
 		IgnoreAudiences:    true, // we don't care about the audience here, this is just introspecting the user
 		ExpectedTypeHeader: ptrOrNil("at+jwt"),
 	})
@@ -805,7 +770,8 @@ func (o *Server) Userinfo(w http.ResponseWriter, req *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	uiresp, err := o.handler.Userinfo(w, uireq)
+	// TODO - if not set, we should just not handle userinfo.
+	uiresp, err := s.config.UserinfoHandler(w, uireq)
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error in user handler"}
 		_ = oauth2.WriteError(w, req, herr)
