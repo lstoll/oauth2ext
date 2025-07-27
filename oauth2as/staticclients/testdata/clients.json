@@ -11,8 +11,7 @@
     },
     {
       "id": "publocalpkce",
-      "public": true,
-      "permitLocalhostRedirect": true
+      "public": true
     },
     {
       "id": "envsecret",
@@ -26,7 +25,6 @@
     {
       "id": "publocalpkceskip",
       "public": true,
-      "permitLocalhostRedirect": true,
       "requiresPKCE": false
     }
   ]
