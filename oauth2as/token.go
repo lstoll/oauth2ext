@@ -1,4 +1,4 @@
-package oidcop
+package oauth2as
 
 import (
 	"crypto/rand"
@@ -46,10 +46,11 @@ func newToken(id uuid.UUID) (_ *corev1.UserToken, serverPart []byte, _ error) {
 // token. if the user token value hashes to the same value on the server.
 func tokensMatch(user []byte, stored []byte) (bool, error) {
 	err := bcrypt.CompareHashAndPassword(stored, user)
-	if err == nil {
+	switch err {
+	case nil:
 		// no error in comparison, they match
 		return true, nil
-	} else if err == bcrypt.ErrMismatchedHashAndPassword {
+	case bcrypt.ErrMismatchedHashAndPassword:
 		// they do not match, this isn't an error per se.
 		return false, nil
 	}

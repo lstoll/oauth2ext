@@ -1,4 +1,4 @@
-package oidcop
+package oauth2as
 
 import (
 	"context"

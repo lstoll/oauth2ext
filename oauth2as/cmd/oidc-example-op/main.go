@@ -32,15 +32,15 @@ func main() {
 
 	svr := &server{}
 
-	core, err := oidcop.New(
+	core, err := oauth2as.New(
 		iss,
 		store,
 		clients,
-		map[oidcop.SigningAlg]oidcop.HandleFn{
-			oidcop.SigningAlgRS256: oidcop.StaticHandleFn(privh),
+		map[oauth2as.SigningAlg]oauth2as.HandleFn{
+			oauth2as.SigningAlgRS256: oauth2as.StaticHandleFn(privh),
 		},
 		svr,
-		&oidcop.Options{
+		&oauth2as.Options{
 			Issuer:           iss,
 			AuthValidityTime: 5 * time.Minute,
 			CodeValidityTime: 5 * time.Minute,
