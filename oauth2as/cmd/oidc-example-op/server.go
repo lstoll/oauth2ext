@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -10,22 +11,16 @@ import (
 
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/lstoll/oauth2as"
-)
-
-const (
-	authReqIDCookieName = "authReqID"
+	"github.com/lstoll/oauth2ext/claims"
 )
 
 type metadata struct {
 	Userinfo map[string]any `json:"userinfo"`
 }
 
-var _ oauth2as.AuthHandlers = (*server)(nil)
-
 type server struct {
-	authorizer oauth2as.Authorizer
+	core *oauth2as.Server
 }
 
 const loginPage = `<!DOCTYPE html>
@@ -37,6 +32,7 @@ const loginPage = `<!DOCTYPE html>
 	<body>
 		<h1>Log in to IDP</h1>
 		<form action="/finish" method="POST">
+			<input type="hidden" name="auth_request" value="{{ .auth_request_data }}">
 			<p>Subject: <input type="text" name="subject" value="auser" required size="15"></p>
 			<p>Granted Scopes (space delimited): <input type="text" name="scopes" value="{{ .scopes }}" size="15"></p>
 			<p>ACR: <input type="text" name="acr" size="15"></p>
@@ -49,26 +45,34 @@ const loginPage = `<!DOCTYPE html>
 
 var loginTmpl = template.Must(template.New("loginPage").Parse(loginPage))
 
-func (s *server) SetAuthorizer(at oauth2as.Authorizer) {
-	s.authorizer = at
+func (s *server) SetCore(core *oauth2as.Server) {
+	s.core = core
 }
 
-func (s *server) StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *oauth2as.AuthorizationRequest) {
-	// set a cookie with the auth ID, so we can track it.
-	aidc := &http.Cookie{
-		Name:   authReqIDCookieName,
-		Value:  authReq.ID.String(),
-		MaxAge: 600,
+func (s *server) StartAuthorization(w http.ResponseWriter, req *http.Request) {
+	// Parse the authorization request
+	authReq, err := s.core.ParseAuthRequest(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to parse auth request: %v", err), http.StatusBadRequest)
+		return
 	}
-	http.SetCookie(w, aidc)
+
+	// Serialize the auth request to store in the form
+	authReqData, err := json.Marshal(authReq)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to serialize auth request: %v", err), http.StatusInternalServerError)
+		return
+	}
+	authReqEncoded := base64.StdEncoding.EncodeToString(authReqData)
 
 	var acr string
 	if len(authReq.ACRValues) > 0 {
 		acr = authReq.ACRValues[0]
 	}
 	tmplData := map[string]interface{}{
-		"acr":    acr,
-		"scopes": strings.Join(authReq.Scopes, " "),
+		"auth_request_data": authReqEncoded,
+		"acr":               acr,
+		"scopes":            strings.Join(authReq.Scopes, " "),
 	}
 
 	if err := loginTmpl.Execute(w, tmplData); err != nil {
@@ -78,61 +82,59 @@ func (s *server) StartAuthorization(w http.ResponseWriter, req *http.Request, au
 }
 
 func (s *server) finishAuthorization(w http.ResponseWriter, req *http.Request) {
-	authReqCookie, err := req.Cookie(authReqIDCookieName)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to get auth id cookie: %v", err), http.StatusInternalServerError)
-		return
-	}
-	authReqUUID, err := uuid.Parse(authReqCookie.Value)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid auth req ID format: %v", err), http.StatusBadRequest)
+	// Retrieve and deserialize the auth request
+	authReqEncoded := req.FormValue("auth_request")
+	if authReqEncoded == "" {
+		http.Error(w, "missing auth request data", http.StatusBadRequest)
 		return
 	}
 
-	var amr []string
-	if req.FormValue("amr") != "" {
-		amr = strings.Split(req.FormValue("amr"), ",")
-	}
-
-	meta := &metadata{
-		Userinfo: map[string]interface{}{},
-	}
-	if err := json.Unmarshal([]byte(req.FormValue("userinfo")), &meta.Userinfo); err != nil {
-		http.Error(w, fmt.Sprintf("failed to unmarshal userinfo: %v", err), http.StatusInternalServerError)
-		return
-	}
-	mb, err := json.Marshal(meta)
+	authReqData, err := base64.StdEncoding.DecodeString(authReqEncoded)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to marshal metadata: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("failed to decode auth request: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	if err := s.authorizer.Authorize(w, req, authReqUUID, &oauth2as.Authorization{
-		Subject:  req.FormValue("subject"),
-		Scopes:   strings.Split(req.FormValue("scopes"), " "),
-		ACR:      req.FormValue("acr"),
-		AMR:      amr,
-		Metadata: mb,
-	}); err != nil {
+	var authReq oauth2as.AuthRequest
+	if err := json.Unmarshal(authReqData, &authReq); err != nil {
+		http.Error(w, fmt.Sprintf("failed to deserialize auth request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Create authorization grant using the actual auth request
+	grant := &oauth2as.AuthGrant{
+		Request:       &authReq,
+		GrantedScopes: strings.Split(req.FormValue("scopes"), " "),
+		UserID:        req.FormValue("subject"),
+	}
+
+	// Grant the authorization
+	redirectURI, err := s.core.GrantAuth(req.Context(), grant)
+	if err != nil {
 		slog.ErrorContext(req.Context(), "error authorizing", "err", err)
 		http.Error(w, "error authorizing", http.StatusInternalServerError)
+		return
 	}
+
+	// Redirect to the client
+	http.Redirect(w, req, redirectURI, http.StatusFound)
 }
 
-func (s *server) Token(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
+func (s *server) handleToken(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
 	return &oauth2as.TokenResponse{
-		Identity: &oauth2as.Identity{},
+		IDClaims: &claims.RawIDClaims{
+			Subject: req.Grant.UserID,
+		},
+		AccessTokenClaims: &claims.RawAccessTokenClaims{
+			Subject: req.Grant.UserID,
+		},
 	}, nil
 }
 
-func (s *server) RefreshToken(req *oauth2as.RefreshTokenRequest) (*oauth2as.TokenResponse, error) {
-	return &oauth2as.TokenResponse{
-		Identity: &oauth2as.Identity{},
-	}, nil
-}
-
-func (s *server) Userinfo(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
+func (s *server) handleUserinfo(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
 	return &oauth2as.UserinfoResponse{
-		Identity: &oauth2as.Identity{},
+		Identity: &claims.RawIDClaims{
+			Subject: uireq.Subject,
+		},
 	}, nil
 }

@@ -143,20 +143,22 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		return "", fmt.Errorf("error getting redirect URIs for client ID %s: %w", grant.Request.ClientID, err)
 	}
 
+	var redirURI string
 	if grant.Request.RedirectURI == "" {
 		if len(redirs) != 1 {
 			return "", fmt.Errorf("client ID %s has multiple redirect URIs, but none were provided", grant.Request.ClientID)
 		}
 		// Use the single registered redirect URI
-		grant.Request.RedirectURI = redirs[0]
+		redirURI = redirs[0]
 	} else {
 		// Validate the provided redirect URI
 		if !isValidRedirectURI(grant.Request.RedirectURI, redirs) {
 			return "", fmt.Errorf("redirect URI %s is not valid for client ID %s", grant.Request.RedirectURI, grant.Request.ClientID)
 		}
+		redirURI = grant.Request.RedirectURI
 	}
 
-	redir, err := url.Parse(grant.Request.RedirectURI)
+	redir, err := url.Parse(redirURI)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse authreq's URI: %w", err)
 	}

@@ -2,62 +2,83 @@ package main
 
 import (
 	_ "embed"
-	"log"
+	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/lstoll/oauth2as"
 	"github.com/lstoll/oauth2as/staticclients"
-	"github.com/lstoll/oauth2as/storage"
 )
 
 //go:embed clients.json
 var clientsJSON []byte
 
 func main() {
-	store, err := storage.NewJSONFile(filepath.Join(os.TempDir(), "oidc-example-op.json"))
-	if err != nil {
-		log.Fatalf("creating storage: %v", err)
-	}
-	privh, _ := mustInitKeyset()
+	// Use in-memory storage instead of JSON file
+	store := oauth2as.NewMemStorage()
 
 	clients, err := staticclients.ExpandUnmarshal(clientsJSON)
 	if err != nil {
-		log.Fatalf("parsing clients: %v", err)
+		slog.Error("parsing clients", "error", err)
+		return
 	}
 
 	iss := "http://localhost:8085"
 
 	svr := &server{}
 
-	core, err := oauth2as.New(
-		iss,
-		store,
-		clients,
-		map[oauth2as.SigningAlg]oauth2as.HandleFn{
-			oauth2as.SigningAlgRS256: oauth2as.StaticHandleFn(privh),
-		},
-		svr,
-		&oauth2as.Options{
-			Issuer:           iss,
-			AuthValidityTime: 5 * time.Minute,
-			CodeValidityTime: 5 * time.Minute,
-		})
+	// Create keyset for RS256
+	privHandle, _ := mustInitKeyset()
+	keyset := oauth2as.NewSingleAlgKeysets(oauth2as.SigningAlgRS256, privHandle)
+
+	// Create server with new API
+	core, err := oauth2as.NewServer(oauth2as.Config{
+		Issuer:  iss,
+		Storage: store,
+		Clients: clients,
+		Keyset:  keyset,
+		Logger:  slog.Default(),
+
+		// Token handler
+		TokenHandler: svr.handleToken,
+
+		// Userinfo handler
+		UserinfoHandler: svr.handleUserinfo,
+
+		// Configuration
+		AuthValidityTime:    5 * time.Minute,
+		CodeValidityTime:    5 * time.Minute,
+		IDTokenValidity:     1 * time.Hour,
+		AccessTokenValidity: 1 * time.Hour,
+		MaxRefreshTime:      30 * 24 * time.Hour,
+
+		// Paths
+		AuthorizationPath: "/authorize",
+		TokenPath:         "/token",
+		UserinfoPath:      "/userinfo",
+	})
 	if err != nil {
-		log.Fatalf("Failed to create OIDC server instance: %v", err)
+		slog.Error("Failed to create OIDC server instance", "error", err)
+		return
 	}
+
+	// Set the core reference in the server
+	svr.SetCore(core)
 
 	m := http.NewServeMux()
-	if err := core.AttachHandlers(m, nil); err != nil {
-		log.Fatalf("failed to attach oidc handlers: %v", err)
-	}
+
+	// Add authorization endpoint handler
+	m.HandleFunc("/authorize", svr.StartAuthorization)
+
+	// Attach the server's handlers for token and userinfo
+	m.Handle("/", core)
+
+	// Add our custom finish endpoint
 	m.HandleFunc("/finish", svr.finishAuthorization)
 
-	log.Printf("Listening on: %s", "localhost:8085")
+	slog.Info("Listening on", "address", "localhost:8085")
 	err = http.ListenAndServe("localhost:8085", m)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("Server failed", "error", err)
 	}
 }

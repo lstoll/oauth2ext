@@ -72,10 +72,6 @@ type Client struct {
 	Public bool `json:"public" yaml:"public"`
 	// PermitLocalhostRedirect allows redirects to localhost, if this is a
 	// public client
-	PermitLocalhostRedirect bool `json:"permitLocalhostRedirect" yaml:"permitLocalhostRedirect"`
-	// RequiresPKCE indicates that this client should be required to use PKCE
-	// for the token exchange. This defaults to true for public clients, and
-	// false for non-public clients.
 	RequiresPKCE *bool `json:"requiresPKCE" yaml:"requiresPKCE"`
 }
 

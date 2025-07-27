@@ -12,7 +12,9 @@
     {
       "id": "cli",
       "public": true,
-      "permitLocalhostRedirect": true
+      "redirectURLs": [
+        "http://127.0.0.1/callback"
+      ]
     }
   ]
 }
