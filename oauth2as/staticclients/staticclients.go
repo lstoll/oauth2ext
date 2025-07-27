@@ -5,19 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
-)
-
-var (
-	// reValidPublicRedirectUri is a fairly strict regular expression that must
-	// match against the redirect URI for a Public client. It intentionally may
-	// not match all URLs that are technically valid, but is it meant to match
-	// all commonly constructed ones, without inadvertently falling victim to
-	// parser bugs or parser inconsistencies (e.g.,
-	// https://www.blackhat.com/docs/us-17/thursday/us-17-Tsai-A-New-Era-Of-SSRF-Exploiting-URL-Parser-In-Trending-Programming-Languages.pdf)
-	reValidPublicRedirectURI = regexp.MustCompile(`\Ahttp://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?(?:|/[A-Za-z0-9./_-]{0,1000})\z`)
 )
 
 // Clients implements the oidcop.ClientSource against a static list of clients.
@@ -72,10 +61,6 @@ type Client struct {
 	Public bool `json:"public" yaml:"public"`
 	// PermitLocalhostRedirect allows redirects to localhost, if this is a
 	// public client
-	PermitLocalhostRedirect bool `json:"permitLocalhostRedirect" yaml:"permitLocalhostRedirect"`
-	// RequiresPKCE indicates that this client should be required to use PKCE
-	// for the token exchange. This defaults to true for public clients, and
-	// false for non-public clients.
 	RequiresPKCE *bool `json:"requiresPKCE" yaml:"requiresPKCE"`
 }
 
@@ -117,18 +102,13 @@ func (c *Clients) ValidateClientSecret(clientID, clientSecret string) (ok bool, 
 	}), nil
 }
 
-func (c *Clients) ValidateClientRedirectURI(clientID, redirectURI string) (ok bool, err error) {
+func (c *Clients) RedirectURIs(clientID string) ([]string, error) {
 	cl, ok := c.getClient(clientID)
 	if !ok {
-		return false, fmt.Errorf("invalid client ID")
+		return nil, fmt.Errorf("invalid client ID")
 	}
 
-	if cl.Public && cl.PermitLocalhostRedirect && reValidPublicRedirectURI.MatchString(redirectURI) {
-		// this is a valid public redirect for a client who allows it, all good
-		return true, nil
-	}
-
-	return slices.Contains(cl.RedirectURLs, redirectURI), nil
+	return cl.RedirectURLs, nil
 }
 
 func (c *Clients) getClient(id string) (Client, bool) {

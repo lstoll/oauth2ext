@@ -18,22 +18,17 @@ func TestStaticClients(t *testing.T) {
 		ClientID          string
 		WantInvalidClient bool
 
-		WantValidRedirect   string
-		WantInvalidRedirect string
-
 		WantValidSecret   string
 		WantInvalidSecret string
 
 		WantRequiresPKCE bool
 	}{
 		{
-			Name:                "Valid simple client",
-			ClientID:            "simple",
-			WantValidRedirect:   "http://myserver.com",
-			WantInvalidRedirect: "http://othermyserver.com",
-			WantValidSecret:     "secret",
-			WantInvalidSecret:   "othersecret",
-			WantRequiresPKCE:    false,
+			Name:              "Valid simple client",
+			ClientID:          "simple",
+			WantValidSecret:   "secret",
+			WantInvalidSecret: "othersecret",
+			WantRequiresPKCE:  false,
 		},
 		{
 			Name:              "Missing client ID",
@@ -41,12 +36,10 @@ func TestStaticClients(t *testing.T) {
 			WantInvalidClient: true,
 		},
 		{
-			Name:                "Public client with localhost redirect and PKCE",
-			ClientID:            "publocalpkce",
-			WantValidRedirect:   "http://localhost:8007/callback",
-			WantInvalidRedirect: "http://othermyserver.com",
-			WantValidSecret:     "", // empty secret should be fine
-			WantRequiresPKCE:    true,
+			Name:             "Public client with localhost redirect and PKCE",
+			ClientID:         "publocalpkce",
+			WantValidSecret:  "", // empty secret should be fine
+			WantRequiresPKCE: true,
 		},
 		{
 			Name:            "Env secret, not set",
@@ -62,12 +55,10 @@ func TestStaticClients(t *testing.T) {
 			WantValidSecret: "explicitsecret",
 		},
 		{
-			Name:                "Env secret, with simple secrets secret and redirect",
-			ClientID:            "envsecret",
-			WantValidSecret:     "defaultsecret",
-			WantInvalidSecret:   "secret", // valid for another client
-			WantValidRedirect:   "http://envsecret.com",
-			WantInvalidRedirect: "http://myserver.com",
+			Name:              "Env secret, with simple secrets secret and redirect",
+			ClientID:          "envsecret",
+			WantValidSecret:   "defaultsecret",
+			WantInvalidSecret: "secret", // valid for another client
 		},
 		{
 			Name:              "Public client with localhost redirect and PKCE",
@@ -111,7 +102,7 @@ func TestStaticClients(t *testing.T) {
 					t.Error("client secret check should fail")
 				}
 
-				if _, err := clients.ValidateClientRedirectURI(tc.ClientID, ""); err == nil {
+				if _, err := clients.RedirectURIs(tc.ClientID); err == nil {
 					t.Error("client redirect uri check should fail")
 				}
 
@@ -140,7 +131,7 @@ func TestStaticClients(t *testing.T) {
 				}
 			}
 			if tc.WantInvalidSecret != "" {
-				valid, err := clients.ValidateClientSecret(tc.ClientID, tc.WantInvalidRedirect)
+				valid, err := clients.ValidateClientSecret(tc.ClientID, tc.WantInvalidSecret)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -148,26 +139,6 @@ func TestStaticClients(t *testing.T) {
 					t.Errorf("want secret %s to be invalid, but it was", tc.WantInvalidSecret)
 				}
 			}
-
-			if tc.WantValidRedirect != "" {
-				valid, err := clients.ValidateClientRedirectURI(tc.ClientID, tc.WantValidRedirect)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !valid {
-					t.Errorf("want redirect %s to be valid, but it was not", tc.WantValidRedirect)
-				}
-			}
-			if tc.WantInvalidRedirect != "" {
-				valid, err := clients.ValidateClientRedirectURI(tc.ClientID, tc.WantInvalidRedirect)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if valid {
-					t.Errorf("want redirect %s to be invalid, but it was", tc.WantInvalidRedirect)
-				}
-			}
-
 		})
 	}
 }

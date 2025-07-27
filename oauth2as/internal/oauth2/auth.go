@@ -104,16 +104,21 @@ type CodeAuthResponse struct {
 	Code        string
 }
 
+// ToRedirectURI builds a redirect URI to direct the user to for this response.
+func (c *CodeAuthResponse) ToRedirectURI() *url.URL {
+	redir := authResponse(c.RedirectURI, c.State)
+	v := redir.Query()
+	v.Add("code", c.Code)
+	redir.RawQuery = v.Encode()
+	return redir
+}
+
 // SendCodeAuthResponse sends the appropriate response to an auth request of
 // response_type code, aka "Code flow"
 //
 // https://tools.ietf.org/html/rfc6749#section-4.1.2
 func SendCodeAuthResponse(w http.ResponseWriter, req *http.Request, resp *CodeAuthResponse) {
-	redir := authResponse(resp.RedirectURI, resp.State)
-	v := redir.Query()
-	v.Add("code", resp.Code)
-	redir.RawQuery = v.Encode()
-	http.Redirect(w, req, redir.String(), http.StatusFound)
+	http.Redirect(w, req, resp.ToRedirectURI().String(), http.StatusFound)
 }
 
 type TokenType string

@@ -5,18 +5,16 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lstoll/oauth2as"
 	"github.com/lstoll/oauth2as/staticclients"
-	"github.com/lstoll/oauth2as/storage"
+	"github.com/lstoll/oauth2ext/claims"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
@@ -86,10 +84,7 @@ func TestE2E(t *testing.T) {
 				},
 			}
 
-			s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
+			s := oauth2as.NewMemStorage()
 
 			/*mux.HandleFunc("/authorization", func(w http.ResponseWriter, req *http.Request) {
 				ar, err := oidcHandlers.StartAuthorization(w, req)
@@ -132,19 +127,64 @@ func TestE2E(t *testing.T) {
 			oidcSvr := httptest.NewServer(nil)
 			t.Cleanup(oidcSvr.Close)
 
-			handlers := &handlers{}
+			opcfg := oauth2as.Config{
+				Issuer:  oidcSvr.URL,
+				Storage: s,
+				Keyset:  testKeysets(),
+				TokenHandler: func(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
+					return &oauth2as.TokenResponse{}, nil
+				},
+				UserinfoHandler: func(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
+					return &oauth2as.UserinfoResponse{
+						Identity: &claims.RawIDClaims{
+							Subject: uireq.Subject,
+						},
+					}, nil
+				},
+				Clients:      clientSource,
+				Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+				UserinfoPath: "/userinfo",
+			}
 
-			op, err := oauth2as.New(oidcSvr.URL, s, clientSource, testKeysets(), handlers, &oauth2as.Options{
-				Logger: slog.With("component", "oidcop"),
-			})
+			op, err := oauth2as.NewServer(opcfg)
 			if err != nil {
 				t.Fatal(err)
 			}
+			oidcSvr.Config.Handler = op
 
+			// Add authorization endpoint handler
+			authorizationHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				// Parse the authorization request
+				authReq, err := op.ParseAuthRequest(req)
+				if err != nil {
+					t.Errorf("failed to parse auth request: %v", err)
+					http.Error(w, "invalid request", http.StatusBadRequest)
+					return
+				}
+
+				// Auto-grant the authorization (for testing purposes)
+				grant := &oauth2as.AuthGrant{
+					Request:       authReq,
+					GrantedScopes: authReq.Scopes,
+					UserID:        "test-user",
+				}
+
+				redirectURI, err := op.GrantAuth(ctx, grant)
+				if err != nil {
+					t.Errorf("failed to grant auth: %v", err)
+					http.Error(w, "authorization failed", http.StatusInternalServerError)
+					return
+				}
+
+				// Redirect to the callback with the authorization code
+				http.Redirect(w, req, redirectURI, http.StatusFound)
+			})
+
+			// Create a new mux that includes both the OIDC server and our authorization handler
 			mux := http.NewServeMux()
-			if err := op.AttachHandlers(mux, nil); err != nil {
-				t.Fatal(err)
-			}
+			mux.HandleFunc("/authorization", authorizationHandler)
+			mux.Handle("/", op) // Handle all other requests with the OIDC server
+
 			oidcSvr.Config.Handler = mux
 
 			// privh, err := testKeysets()[oauth2as.SigningAlgRS256](ctx)
@@ -189,12 +229,31 @@ func TestE2E(t *testing.T) {
 				acopts = append(acopts, oauth2.S256ChallengeOption(verifier))
 			}
 
-			client := &http.Client{}
+			client := &http.Client{
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
 			resp, err := client.Get(o2.AuthCodeURL(state, acopts...))
 			if err != nil {
 				t.Fatalf("error getting auth URL: %v", err)
 			}
 			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusFound {
+				t.Fatalf("expected status found, got %d", resp.StatusCode)
+			}
+
+			// Follow the redirect manually to trigger the callback
+			redirectURL := resp.Header.Get("Location")
+			if redirectURL == "" {
+				t.Fatal("no Location header in redirect response")
+			}
+
+			callbackResp, err := client.Get(redirectURL)
+			if err != nil {
+				t.Fatalf("error following redirect: %v", err)
+			}
+			callbackResp.Body.Close()
 
 			var callbackCode string
 			select {
@@ -270,7 +329,7 @@ var (
 	thMu sync.Mutex
 )
 
-func testKeysets() map[oauth2as.SigningAlg]oauth2as.HandleFn {
+func testKeysets() oauth2as.AlgKeysets {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
@@ -282,46 +341,5 @@ func testKeysets() map[oauth2as.SigningAlg]oauth2as.HandleFn {
 		th = h
 	}
 
-	return map[oauth2as.SigningAlg]oauth2as.HandleFn{
-		oauth2as.SigningAlgRS256: oauth2as.StaticHandleFn(th),
-	}
-}
-
-var _ oauth2as.AuthHandlers = (*handlers)(nil)
-
-type handlers struct {
-	authorizer oauth2as.Authorizer
-}
-
-func (a *handlers) SetAuthorizer(at oauth2as.Authorizer) {
-	a.authorizer = at
-}
-
-func (a *handlers) StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *oauth2as.AuthorizationRequest) {
-	log.Printf("req scopes %v", authReq.Scopes)
-	if err := a.authorizer.Authorize(w, req, authReq.ID, &oauth2as.Authorization{
-		Subject: "test-user",
-		Scopes:  append(authReq.Scopes, oidc.ScopeOpenID),
-	}); err != nil {
-		slog.ErrorContext(req.Context(), "error authorizing", "err", err)
-		http.Error(w, "error authorizing", http.StatusInternalServerError)
-	}
-}
-
-func (a *handlers) Token(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
-	return &oauth2as.TokenResponse{
-		Identity: &oauth2as.Identity{},
-	}, nil
-}
-
-func (a *handlers) RefreshToken(req *oauth2as.RefreshTokenRequest) (*oauth2as.TokenResponse, error) {
-	return &oauth2as.TokenResponse{
-		Identity: &oauth2as.Identity{},
-	}, nil
-}
-
-func (a *handlers) Userinfo(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
-	return &oauth2as.UserinfoResponse{
-		Identity: &oauth2as.Identity{},
-	}, nil
+	return oauth2as.NewSingleAlgKeysets(oauth2as.SigningAlgRS256, th)
 }
