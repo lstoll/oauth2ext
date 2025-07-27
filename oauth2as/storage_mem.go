@@ -175,7 +175,6 @@ func copyStoredGrant(grant *StoredGrant) *StoredGrant {
 		UserID:        grant.UserID,
 		ClientID:      grant.ClientID,
 		GrantedScopes: make([]string, len(grant.GrantedScopes)),
-		Expiry:        grant.Expiry,
 		GrantedAt:     grant.GrantedAt,
 		ExpiresAt:     grant.ExpiresAt,
 	}

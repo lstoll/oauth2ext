@@ -52,17 +52,6 @@ const (
 	DefaultMaxRefreshTime = 30 * 24 * time.Hour
 )
 
-// Options sets configuration values for the OIDC flow implementation
-type Options struct {
-
-	// TODO - do we want to consider splitting the max refresh time, and how
-	// long any single refresh token is valid for?
-
-	// Logger can be used to configure a logger that will have errors and
-	// warning logged. Defaults to discarding this information.
-	Logger *slog.Logger
-}
-
 // Server can be used to handle the various parts of the Server auth flow.
 type Config struct {
 	// Issuer is the issuer we are serving for.
@@ -169,6 +158,7 @@ func NewServer(c Config) (*Server, error) {
 	svr := &Server{
 		config: c,
 		mux:    http.NewServeMux(),
+		logger: slog.New(slog.DiscardHandler),
 		now:    time.Now,
 	}
 
@@ -177,6 +167,10 @@ func NewServer(c Config) (*Server, error) {
 	}
 	if c.TokenPath == "" {
 		c.TokenPath = DefaultTokenEndpoint
+	}
+
+	if c.Logger != nil {
+		svr.logger = c.Logger
 	}
 
 	// Build discovery metadata

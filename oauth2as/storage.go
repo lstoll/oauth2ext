@@ -21,9 +21,6 @@ type StoredGrant struct {
 	// Request captures the request that was used to grant access. Used for
 	// finalizing the code flow.
 	Request *AuthRequest
-	// Expiry is the time at which the
-	// grant will expire.
-	Expiry time.Time
 	// RefreshToken is the refresh token for the grant.
 	RefreshToken *string
 	// GrantedAt is the time at which the grant was granted.

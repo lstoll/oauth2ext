@@ -226,7 +226,10 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 
 	// tresp, err := o.handler.RefreshToken(tr)
 	// TODO - need to re-do this too.
-	tresp, err := s.config.TokenHandler(nil)
+	tr := &TokenRequest{
+		Grant: grant,
+	}
+	tresp, err := s.config.TokenHandler(tr)
 	if err != nil {
 		var uaerr unauthorizedErr
 		if errors.As(err, &uaerr); uaerr != nil && uaerr.Unauthorized() {
@@ -268,6 +271,8 @@ func (s *Server) buildTokenResponse(ctx context.Context, grant *StoredGrant, tre
 	if atExp.IsZero() {
 		atExp = s.now().Add(s.config.AccessTokenValidity)
 	}
+
+	// TODO - only try and issue an ID token if the openid scope was granted.
 
 	idc := tresp.IDClaims
 	if idc == nil {

@@ -563,7 +563,6 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		RefreshToken:  &refreshTokenHash,
 		GrantedAt:     time.Now(),
 		ExpiresAt:     time.Now().Add(60 * time.Minute),
-		Expiry:        time.Now().Add(60 * time.Minute),
 	}
 
 	if err := smgr.CreateGrant(context.Background(), grant); err != nil {
@@ -586,7 +585,6 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		AuthCode:      &codeHash,
 		GrantedAt:     time.Now(),
 		ExpiresAt:     time.Now().Add(1 * time.Minute),
-		Expiry:        time.Now().Add(1 * time.Minute),
 	}
 
 	if err := smgr.CreateGrant(context.Background(), grant); err != nil {
