@@ -19,24 +19,6 @@ import (
 	"github.com/tink-crypto/tink-go/v2/jwt"
 )
 
-// ClientSource is used for validating client informantion for the general flow
-type ClientSource interface {
-	// IsValidClientID should return true if the passed client ID is valid
-	IsValidClientID(clientID string) (ok bool, err error)
-	// RequiresPKCE indicates if this client is required to use PKCE for token
-	// exchange.
-	RequiresPKCE(clientID string) (ok bool, err error)
-	// ValidateClientSecret should confirm if the passed secret is valid for the
-	// given client. If no secret is provided, clientSecret will be empty but
-	// this will still be called.
-	ValidateClientSecret(clientID, clientSecret string) (ok bool, err error)
-	// ValidateRedirectURI should return the list of valid redirect URIs. They
-	// will be compared for an exact match, with the exception of loopback
-	// addresses, which can have a variable port
-	// (https://www.rfc-editor.org/rfc/rfc8252#section-7.3).
-	RedirectURIs(clientID string) ([]string, error)
-}
-
 const (
 	// DefaultAuthValidityTime is used if the AuthValidityTime is not
 	// configured.
@@ -226,14 +208,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	s.mux.ServeHTTP(w, req)
 }
 
-func (s *Server) validateTokenClient(_ context.Context, req *oauth2.TokenRequest, wantClientID string) error {
+func (s *Server) validateTokenClient(ctx context.Context, req *oauth2.TokenRequest, wantClientID string) error {
 	// check to see if we're working with the same client
 	if wantClientID != req.ClientID {
 		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
 	}
 
 	// validate the client
-	cok, err := s.config.Clients.ValidateClientSecret(req.ClientID, req.ClientSecret)
+	cok, err := s.config.Clients.ValidateClientSecret(ctx, req.ClientID, req.ClientSecret)
 	if err != nil {
 		return &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check client id & secret", Cause: err}
 
@@ -241,9 +223,6 @@ func (s *Server) validateTokenClient(_ context.Context, req *oauth2.TokenRequest
 	if !cok {
 		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "Invalid client secret"}
 	}
-
-	// TODO - check redirect url. We don't allow wildcards etc, but still worth doing.
-	// https://www.rfc-editor.org/rfc/rfc6749#section-10.6
 
 	return nil
 }

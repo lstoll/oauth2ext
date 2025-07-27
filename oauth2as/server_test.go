@@ -5,18 +5,19 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/lstoll/oauth2as/internal/oauth2"
-	"github.com/lstoll/oauth2as/internal/staticclients"
 	"github.com/lstoll/oauth2ext/claims"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
@@ -54,18 +55,16 @@ func TestCodeToken(t *testing.T) {
 					return &TokenResponse{}, nil
 				},
 
-				Clients: &staticclients.Clients{
-					Clients: []staticclients.Client{
-						{
-							ID:           clientID,
-							Secrets:      []string{clientSecret},
-							RedirectURLs: []string{redirectURI},
-						},
-						{
-							ID:           otherClientID,
-							Secrets:      []string{otherClientSecret},
-							RedirectURLs: []string{otherClientRedirect},
-						},
+				Clients: staticClientSource{
+					{
+						ID:           clientID,
+						Secrets:      []string{clientSecret},
+						RedirectURLs: []string{redirectURI},
+					},
+					{
+						ID:           otherClientID,
+						Secrets:      []string{otherClientSecret},
+						RedirectURLs: []string{otherClientRedirect},
 					},
 				},
 			},
@@ -221,18 +220,16 @@ func TestRefreshToken(t *testing.T) {
 				TokenHandler: func(req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
 				},
-				Clients: &staticclients.Clients{
-					Clients: []staticclients.Client{
-						{
-							ID:           clientID,
-							Secrets:      []string{clientSecret},
-							RedirectURLs: []string{redirectURI},
-						},
-						{
-							ID:           otherClientID,
-							Secrets:      []string{otherClientSecret},
-							RedirectURLs: []string{otherClientRedirect},
-						},
+				Clients: staticClientSource{
+					{
+						ID:           clientID,
+						Secrets:      []string{clientSecret},
+						RedirectURLs: []string{redirectURI},
+					},
+					{
+						ID:           otherClientID,
+						Secrets:      []string{otherClientSecret},
+						RedirectURLs: []string{otherClientRedirect},
 					},
 				},
 
@@ -472,7 +469,7 @@ func TestUserinfo(t *testing.T) {
 				TokenHandler: func(req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
 				},
-				Clients: &staticclients.Clients{},
+				Clients: staticClientSource{},
 				Logger:  slog.New(slog.NewTextHandler(os.Stderr, nil)),
 			}
 
@@ -563,4 +560,44 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 	}
 
 	return code
+}
+
+type staticClient struct {
+	ID           string
+	Secrets      []string
+	RedirectURLs []string
+	Public       bool
+	Opts         []ClientOpt
+}
+
+type staticClientSource []staticClient
+
+func (c staticClientSource) IsValidClientID(ctx context.Context, clientID string) (ok bool, err error) {
+	return slices.ContainsFunc(c, func(sc staticClient) bool {
+		return sc.ID == clientID
+	}), nil
+}
+
+func (c staticClientSource) ValidateClientSecret(ctx context.Context, clientID, clientSecret string) (ok bool, err error) {
+	return slices.ContainsFunc(c, func(sc staticClient) bool {
+		return sc.ID == clientID && slices.Contains(sc.Secrets, clientSecret)
+	}), nil
+}
+
+func (c staticClientSource) RedirectURIs(ctx context.Context, clientID string) ([]string, error) {
+	for _, sc := range c {
+		if sc.ID == clientID {
+			return sc.RedirectURLs, nil
+		}
+	}
+	return nil, fmt.Errorf("client not found")
+}
+
+func (c staticClientSource) ClientOpts(ctx context.Context, clientID string) ([]ClientOpt, error) {
+	for _, sc := range c {
+		if sc.ID == clientID {
+			return sc.Opts, nil
+		}
+	}
+	return nil, fmt.Errorf("client not found")
 }

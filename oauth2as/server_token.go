@@ -158,11 +158,11 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 
 	// If the client is public and we require pkce, reject it if there's no
 	// verifier.
-	reqPKCE, err := s.config.Clients.RequiresPKCE(treq.ClientID)
+	clientOpts, err := s.config.Clients.ClientOpts(ctx, grant.ClientID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check if client requires PKCE: %w", err)
+		return nil, fmt.Errorf("failed to fetch client opts: %w", err)
 	}
-	if reqPKCE && treq.CodeVerifier == "" {
+	if slices.Contains(clientOpts, ClientOptSkipPKCE) && treq.CodeVerifier == "" {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
 	}
 

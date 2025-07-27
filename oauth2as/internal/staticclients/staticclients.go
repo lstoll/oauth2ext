@@ -1,12 +1,15 @@
 package staticclients
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
 	"strings"
+
+	"github.com/lstoll/oauth2as"
 )
 
 // Clients implements the oidcop.ClientSource against a static list of clients.
@@ -59,31 +62,25 @@ type Client struct {
 	// can't keep their credentials confidential.
 	// https://datatracker.ietf.org/doc/html/rfc6749#section-2.1
 	Public bool `json:"public" yaml:"public"`
-	// PermitLocalhostRedirect allows redirects to localhost, if this is a
-	// public client
-	RequiresPKCE *bool `json:"requiresPKCE" yaml:"requiresPKCE"`
+	// Opts is the list of options for this client.
+	Opts []oauth2as.ClientOpt `json:"opts" yaml:"opts"`
 }
 
-func (c *Clients) IsValidClientID(clientID string) (ok bool, err error) {
+func (c *Clients) IsValidClientID(_ context.Context, clientID string) (ok bool, err error) {
 	_, ok = c.getClient(clientID)
 	return ok, nil
 }
 
-func (c *Clients) RequiresPKCE(clientID string) (ok bool, err error) {
+func (c *Clients) ClientOpts(_ context.Context, clientID string) ([]oauth2as.ClientOpt, error) {
 	cl, ok := c.getClient(clientID)
 	if !ok {
-		return false, fmt.Errorf("invalid client ID")
+		return nil, fmt.Errorf("invalid client ID")
 	}
 
-	if cl.RequiresPKCE == nil {
-		// not set. required if public, not if not
-		return cl.Public, nil
-	}
-
-	return *cl.RequiresPKCE, nil
+	return cl.Opts, nil
 }
 
-func (c *Clients) ValidateClientSecret(clientID, clientSecret string) (ok bool, err error) {
+func (c *Clients) ValidateClientSecret(_ context.Context, clientID, clientSecret string) (ok bool, err error) {
 	cl, ok := c.getClient(clientID)
 	if !ok {
 		return false, fmt.Errorf("invalid client ID")
@@ -92,7 +89,7 @@ func (c *Clients) ValidateClientSecret(clientID, clientSecret string) (ok bool, 
 		return false, fmt.Errorf("invalid client ID")
 	}
 
-	if len(cl.Secrets) == 0 && cl.Public && (cl.RequiresPKCE == nil || !*cl.RequiresPKCE) {
+	if len(cl.Secrets) == 0 && cl.Public && slices.Contains(cl.Opts, oauth2as.ClientOptSkipPKCE) {
 		// we're a public client with no secrets and using PKCE. It's valid
 		return true, nil
 	}
@@ -102,7 +99,7 @@ func (c *Clients) ValidateClientSecret(clientID, clientSecret string) (ok bool, 
 	}), nil
 }
 
-func (c *Clients) RedirectURIs(clientID string) ([]string, error) {
+func (c *Clients) RedirectURIs(_ context.Context, clientID string) ([]string, error) {
 	cl, ok := c.getClient(clientID)
 	if !ok {
 		return nil, fmt.Errorf("invalid client ID")
