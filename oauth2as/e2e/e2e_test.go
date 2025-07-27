@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidcop"
-	"github.com/lstoll/oidcop/staticclients"
-	"github.com/lstoll/oidcop/storage"
+	"github.com/lstoll/oauth2as"
+	"github.com/lstoll/oauth2as/staticclients"
+	"github.com/lstoll/oauth2as/storage"
+	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 	"golang.org/x/oauth2"
@@ -134,7 +134,7 @@ func TestE2E(t *testing.T) {
 
 			handlers := &handlers{}
 
-			op, err := oidcop.New(oidcSvr.URL, s, clientSource, testKeysets(), handlers, &oidcop.Options{
+			op, err := oauth2as.New(oidcSvr.URL, s, clientSource, testKeysets(), handlers, &oauth2as.Options{
 				Logger: slog.With("component", "oidcop"),
 			})
 			if err != nil {
@@ -147,7 +147,7 @@ func TestE2E(t *testing.T) {
 			}
 			oidcSvr.Config.Handler = mux
 
-			// privh, err := testKeysets()[oidcop.SigningAlgRS256](ctx)
+			// privh, err := testKeysets()[oauth2as.SigningAlgRS256](ctx)
 			// if err != nil {
 			// 	t.Fatal(err)
 			// }
@@ -270,7 +270,7 @@ var (
 	thMu sync.Mutex
 )
 
-func testKeysets() map[oidcop.SigningAlg]oidcop.HandleFn {
+func testKeysets() map[oauth2as.SigningAlg]oauth2as.HandleFn {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
@@ -282,24 +282,24 @@ func testKeysets() map[oidcop.SigningAlg]oidcop.HandleFn {
 		th = h
 	}
 
-	return map[oidcop.SigningAlg]oidcop.HandleFn{
-		oidcop.SigningAlgRS256: oidcop.StaticHandleFn(th),
+	return map[oauth2as.SigningAlg]oauth2as.HandleFn{
+		oauth2as.SigningAlgRS256: oauth2as.StaticHandleFn(th),
 	}
 }
 
-var _ oidcop.AuthHandlers = (*handlers)(nil)
+var _ oauth2as.AuthHandlers = (*handlers)(nil)
 
 type handlers struct {
-	authorizer oidcop.Authorizer
+	authorizer oauth2as.Authorizer
 }
 
-func (a *handlers) SetAuthorizer(at oidcop.Authorizer) {
+func (a *handlers) SetAuthorizer(at oauth2as.Authorizer) {
 	a.authorizer = at
 }
 
-func (a *handlers) StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *oidcop.AuthorizationRequest) {
+func (a *handlers) StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *oauth2as.AuthorizationRequest) {
 	log.Printf("req scopes %v", authReq.Scopes)
-	if err := a.authorizer.Authorize(w, req, authReq.ID, &oidcop.Authorization{
+	if err := a.authorizer.Authorize(w, req, authReq.ID, &oauth2as.Authorization{
 		Subject: "test-user",
 		Scopes:  append(authReq.Scopes, oidc.ScopeOpenID),
 	}); err != nil {
@@ -308,20 +308,20 @@ func (a *handlers) StartAuthorization(w http.ResponseWriter, req *http.Request, 
 	}
 }
 
-func (a *handlers) Token(req *oidcop.TokenRequest) (*oidcop.TokenResponse, error) {
-	return &oidcop.TokenResponse{
-		Identity: &oidcop.Identity{},
+func (a *handlers) Token(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
+	return &oauth2as.TokenResponse{
+		Identity: &oauth2as.Identity{},
 	}, nil
 }
 
-func (a *handlers) RefreshToken(req *oidcop.RefreshTokenRequest) (*oidcop.TokenResponse, error) {
-	return &oidcop.TokenResponse{
-		Identity: &oidcop.Identity{},
+func (a *handlers) RefreshToken(req *oauth2as.RefreshTokenRequest) (*oauth2as.TokenResponse, error) {
+	return &oauth2as.TokenResponse{
+		Identity: &oauth2as.Identity{},
 	}, nil
 }
 
-func (a *handlers) Userinfo(w io.Writer, uireq *oidcop.UserinfoRequest) (*oidcop.UserinfoResponse, error) {
-	return &oidcop.UserinfoResponse{
-		Identity: &oidcop.Identity{},
+func (a *handlers) Userinfo(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
+	return &oauth2as.UserinfoResponse{
+		Identity: &oauth2as.Identity{},
 	}, nil
 }

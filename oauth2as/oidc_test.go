@@ -1,4 +1,4 @@
-package oidcop
+package oauth2as
 
 import (
 	"context"
@@ -16,10 +16,11 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
-	"github.com/lstoll/oidc"
-	"github.com/lstoll/oidcop/internal/oauth2"
-	"github.com/lstoll/oidcop/staticclients"
-	"github.com/lstoll/oidcop/storage"
+	"github.com/lstoll/oauth2as/internal/oauth2"
+	"github.com/lstoll/oauth2as/staticclients"
+	"github.com/lstoll/oauth2as/storage"
+	"github.com/lstoll/oauth2ext/claims"
+	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
@@ -758,7 +759,7 @@ func TestUserinfo(t *testing.T) {
 		return nil
 	}
 
-	signAccessToken := func(cl oidc.AccessTokenClaims) string {
+	signAccessToken := func(cl claims.RawAccessTokenClaims) string {
 		h, err := testKeysets()[SigningAlgRS256](context.TODO())
 		if err != nil {
 			t.Fatal(err)
@@ -768,7 +769,7 @@ func TestUserinfo(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		rawATJWT, err := cl.ToJWT(nil)
+		rawATJWT, err := cl.ToRawJWT()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -797,10 +798,10 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Simple output, valid session",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(oidc.AccessTokenClaims{
+				return signAccessToken(claims.RawAccessTokenClaims{
 					Issuer:  issuer,
 					Subject: "sub",
-					Expiry:  oidc.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
+					Expiry:  claims.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,
@@ -811,10 +812,10 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Token for other issuer",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(oidc.AccessTokenClaims{
+				return signAccessToken(claims.RawAccessTokenClaims{
 					Issuer:  "http://other",
 					Subject: "sub",
-					Expiry:  oidc.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
+					Expiry:  claims.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,
@@ -823,10 +824,10 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Expired access token",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(oidc.AccessTokenClaims{
+				return signAccessToken(claims.RawAccessTokenClaims{
 					Issuer:  issuer,
 					Subject: "sub",
-					Expiry:  oidc.UnixTime(time.Now().Add(-1 * time.Minute).Unix()),
+					Expiry:  claims.UnixTime(time.Now().Add(-1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,

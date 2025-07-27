@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lstoll/oidcop/internal/jsonfile"
+	"github.com/lstoll/oauth2as/internal/jsonfile"
 )
 
 var _ Storage = (*JSONFile)(nil)

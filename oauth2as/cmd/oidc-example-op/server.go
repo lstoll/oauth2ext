@@ -11,7 +11,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
-	"github.com/lstoll/oidcop"
+	"github.com/lstoll/oauth2as"
 )
 
 const (
@@ -22,10 +22,10 @@ type metadata struct {
 	Userinfo map[string]any `json:"userinfo"`
 }
 
-var _ oidcop.AuthHandlers = (*server)(nil)
+var _ oauth2as.AuthHandlers = (*server)(nil)
 
 type server struct {
-	authorizer oidcop.Authorizer
+	authorizer oauth2as.Authorizer
 }
 
 const loginPage = `<!DOCTYPE html>
@@ -49,11 +49,11 @@ const loginPage = `<!DOCTYPE html>
 
 var loginTmpl = template.Must(template.New("loginPage").Parse(loginPage))
 
-func (s *server) SetAuthorizer(at oidcop.Authorizer) {
+func (s *server) SetAuthorizer(at oauth2as.Authorizer) {
 	s.authorizer = at
 }
 
-func (s *server) StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *oidcop.AuthorizationRequest) {
+func (s *server) StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *oauth2as.AuthorizationRequest) {
 	// set a cookie with the auth ID, so we can track it.
 	aidc := &http.Cookie{
 		Name:   authReqIDCookieName,
@@ -107,7 +107,7 @@ func (s *server) finishAuthorization(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if err := s.authorizer.Authorize(w, req, authReqUUID, &oidcop.Authorization{
+	if err := s.authorizer.Authorize(w, req, authReqUUID, &oauth2as.Authorization{
 		Subject:  req.FormValue("subject"),
 		Scopes:   strings.Split(req.FormValue("scopes"), " "),
 		ACR:      req.FormValue("acr"),
@@ -119,20 +119,20 @@ func (s *server) finishAuthorization(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (s *server) Token(req *oidcop.TokenRequest) (*oidcop.TokenResponse, error) {
-	return &oidcop.TokenResponse{
-		Identity: &oidcop.Identity{},
+func (s *server) Token(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
+	return &oauth2as.TokenResponse{
+		Identity: &oauth2as.Identity{},
 	}, nil
 }
 
-func (s *server) RefreshToken(req *oidcop.RefreshTokenRequest) (*oidcop.TokenResponse, error) {
-	return &oidcop.TokenResponse{
-		Identity: &oidcop.Identity{},
+func (s *server) RefreshToken(req *oauth2as.RefreshTokenRequest) (*oauth2as.TokenResponse, error) {
+	return &oauth2as.TokenResponse{
+		Identity: &oauth2as.Identity{},
 	}, nil
 }
 
-func (s *server) Userinfo(w io.Writer, uireq *oidcop.UserinfoRequest) (*oidcop.UserinfoResponse, error) {
-	return &oidcop.UserinfoResponse{
-		Identity: &oidcop.Identity{},
+func (s *server) Userinfo(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
+	return &oauth2as.UserinfoResponse{
+		Identity: &oauth2as.Identity{},
 	}, nil
 }

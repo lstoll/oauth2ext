@@ -78,8 +78,10 @@ func TestStaticClients(t *testing.T) {
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
 			for k, v := range tc.WithEnv {
-				os.Setenv(k, v)
-				t.Cleanup(func() { os.Unsetenv(k) })
+				if err := os.Setenv(k, v); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Unsetenv(k) })
 			}
 
 			// after env set
