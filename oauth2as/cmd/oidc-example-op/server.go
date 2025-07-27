@@ -15,10 +15,6 @@ import (
 	"github.com/lstoll/oauth2ext/claims"
 )
 
-type metadata struct {
-	Userinfo map[string]any `json:"userinfo"`
-}
-
 type server struct {
 	core *oauth2as.Server
 }

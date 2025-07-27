@@ -501,35 +501,6 @@ func TestUserinfo(t *testing.T) {
 	}
 }
 
-func checkErrMatcher(t *testing.T, matcher func(error) bool, err error) {
-	t.Helper()
-	if err == nil && matcher != nil {
-		t.Fatal("want error, got none")
-	}
-	if err != nil {
-		if matcher == nil || !matcher(err) {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		// we have an error and it matched
-	}
-}
-
-func matchHTTPErrStatus(code int) func(error) bool {
-	return func(err error) bool {
-		herr, ok := err.(*oauth2.HTTPError)
-		if !ok {
-			return false
-		}
-		return herr.Code == code
-	}
-}
-
-func matchAnyErr() func(error) bool { // nolint:unused,varcheck,deadcode
-	return func(err error) bool {
-		return err != nil
-	}
-}
-
 var (
 	th   *keyset.Handle
 	thMu sync.Mutex

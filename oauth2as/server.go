@@ -52,7 +52,7 @@ const (
 	DefaultMaxRefreshTime = 30 * 24 * time.Hour
 )
 
-// Server can be used to handle the various parts of the Server auth flow.
+// Config is used to set the configuration for creating a server instance.
 type Config struct {
 	// Issuer is the issuer we are serving for.
 	Issuer string
@@ -95,8 +95,6 @@ type Config struct {
 	AuthorizationPath string
 	TokenPath         string
 	UserinfoPath      string
-
-	now func() time.Time
 }
 
 type Server struct {

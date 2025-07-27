@@ -299,6 +299,9 @@ func (s *Server) buildTokenResponse(ctx context.Context, grant *StoredGrant, tre
 	if ac == nil {
 		ac = &claims.RawAccessTokenClaims{}
 	}
+	if ac.Extra == nil {
+		ac.Extra = map[string]any{}
+	}
 
 	ac.Issuer = s.config.Issuer
 	ac.Subject = grant.UserID
@@ -308,6 +311,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, grant *StoredGrant, tre
 	ac.IssuedAt = claims.UnixTime(s.now().Unix())
 	ac.AuthTime = claims.UnixTime(grant.GrantedAt.Unix())
 	ac.JWTID = uuid.Must(uuid.NewRandom()).String()
+	ac.Extra[claimGrantID] = grant.ID.String()
 
 	acjwt, err := ac.ToRawJWT()
 	if err != nil {
