@@ -5,8 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"io"
-	"log"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -132,20 +130,24 @@ func TestE2E(t *testing.T) {
 			oidcSvr := httptest.NewServer(nil)
 			t.Cleanup(oidcSvr.Close)
 
-			handlers := &handlers{}
+			opcfg := oauth2as.Config{
+				Issuer:  oidcSvr.URL,
+				Storage: s,
+				Keyset:  testKeysets(),
+				TokenHandler: func(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
+					return &oauth2as.TokenResponse{Identity: &oauth2as.Identity{}}, nil
+				},
+				UserinfoHandler: func(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
+					return &oauth2as.UserinfoResponse{Identity: &oauth2as.Identity{}}, nil
+				},
+				Clients: clientSource,
+			}
 
-			op, err := oauth2as.New(oidcSvr.URL, s, clientSource, testKeysets(), handlers, &oauth2as.Options{
-				Logger: slog.With("component", "oidcop"),
-			})
+			op, err := oauth2as.NewServer(opcfg)
 			if err != nil {
 				t.Fatal(err)
 			}
-
-			mux := http.NewServeMux()
-			if err := op.AttachHandlers(mux, nil); err != nil {
-				t.Fatal(err)
-			}
-			oidcSvr.Config.Handler = mux
+			oidcSvr.Config.Handler = op
 
 			// privh, err := testKeysets()[oauth2as.SigningAlgRS256](ctx)
 			// if err != nil {
@@ -195,6 +197,9 @@ func TestE2E(t *testing.T) {
 				t.Fatalf("error getting auth URL: %v", err)
 			}
 			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusFound {
+				t.Fatalf("expected status found, got %d", resp.StatusCode)
+			}
 
 			var callbackCode string
 			select {
@@ -270,7 +275,7 @@ var (
 	thMu sync.Mutex
 )
 
-func testKeysets() map[oauth2as.SigningAlg]oauth2as.HandleFn {
+func testKeysets() oauth2as.AlgKeysets {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
@@ -282,46 +287,5 @@ func testKeysets() map[oauth2as.SigningAlg]oauth2as.HandleFn {
 		th = h
 	}
 
-	return map[oauth2as.SigningAlg]oauth2as.HandleFn{
-		oauth2as.SigningAlgRS256: oauth2as.StaticHandleFn(th),
-	}
-}
-
-var _ oauth2as.AuthHandlers = (*handlers)(nil)
-
-type handlers struct {
-	authorizer oauth2as.Authorizer
-}
-
-func (a *handlers) SetAuthorizer(at oauth2as.Authorizer) {
-	a.authorizer = at
-}
-
-func (a *handlers) StartAuthorization(w http.ResponseWriter, req *http.Request, authReq *oauth2as.AuthorizationRequest) {
-	log.Printf("req scopes %v", authReq.Scopes)
-	if err := a.authorizer.Authorize(w, req, authReq.ID, &oauth2as.Authorization{
-		Subject: "test-user",
-		Scopes:  append(authReq.Scopes, oidc.ScopeOpenID),
-	}); err != nil {
-		slog.ErrorContext(req.Context(), "error authorizing", "err", err)
-		http.Error(w, "error authorizing", http.StatusInternalServerError)
-	}
-}
-
-func (a *handlers) Token(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
-	return &oauth2as.TokenResponse{
-		Identity: &oauth2as.Identity{},
-	}, nil
-}
-
-func (a *handlers) RefreshToken(req *oauth2as.RefreshTokenRequest) (*oauth2as.TokenResponse, error) {
-	return &oauth2as.TokenResponse{
-		Identity: &oauth2as.Identity{},
-	}, nil
-}
-
-func (a *handlers) Userinfo(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
-	return &oauth2as.UserinfoResponse{
-		Identity: &oauth2as.Identity{},
-	}, nil
+	return oauth2as.NewSingleAlgKeysets(oauth2as.SigningAlgRS256, th)
 }
