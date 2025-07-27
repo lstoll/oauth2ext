@@ -34,9 +34,11 @@ type ClientSource interface {
 	// given client. If no secret is provided, clientSecret will be empty but
 	// this will still be called.
 	ValidateClientSecret(clientID, clientSecret string) (ok bool, err error)
-	// ValidateRedirectURI should confirm if the given redirect is valid for the client. It should
-	// compare as per https://tools.ietf.org/html/rfc3986#section-6
-	ValidateClientRedirectURI(clientID, redirectURI string) (ok bool, err error)
+	// ValidateRedirectURI should return the list of valid redirect URIs. They
+	// will be compared for an exact match, with the exception of loopback
+	// addresses, which can have a variable port
+	// (https://www.rfc-editor.org/rfc/rfc8252#section-7.3).
+	RedirectURIs(clientID string) ([]string, error)
 }
 
 const (
@@ -234,95 +236,6 @@ const (
 // TODO - oauth2 discovery endpoint
 func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	s.mux.ServeHTTP(w, req)
-}
-
-// StartAuthorization can be used to handle a request to the auth endpoint. It
-// will parse and validate the incoming request, returning a unique identifier.
-// If an error was returned, it should be assumed that this has been returned to
-// the called appropriately. Otherwise, no response will be written. The caller
-// can then use this request to implement the appropriate auth flow. The authID
-// should be kept and treated as sensitive - it will be used to mark the request
-// as Authorized.
-//
-// https://openid.net/specs/openid-connect-core-1_0.html#CodeFlowAuth
-// https://openid.net/specs/openid-connect-core-1_0.html#ImplicitFlowAuth
-func (s *Server) StartAuthorization(w http.ResponseWriter, req *http.Request) {
-	authreq, err := oauth2.ParseAuthRequest(req)
-	if err != nil {
-		_ = oauth2.WriteError(w, req, err)
-		return
-	}
-
-	redir, err := url.Parse(authreq.RedirectURI)
-	if err != nil {
-		_ = oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "redirect_uri is in an invalid format", err, "failed to parse redirect URI")
-		return
-	}
-
-	// If a non valid client ID or redirect URI is specified, we should return
-	// an error directly to the user rather than passing it on the redirect.
-	//
-	// https://tools.ietf.org/html/rfc6749#section-4.1.2.1
-
-	cidok, err := s.config.Clients.IsValidClientID(authreq.ClientID)
-	if err != nil {
-		_ = oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource check client ID")
-		return
-	}
-	if !cidok {
-		_ = oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Client ID is not valid", nil, "")
-		return
-	}
-
-	redirok, err := s.config.Clients.ValidateClientRedirectURI(authreq.ClientID, authreq.RedirectURI)
-	if err != nil {
-		_ = oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "error calling clientsource redirect URI validation")
-		return
-	}
-	if !redirok {
-		_ = oauth2.WriteHTTPError(w, req, http.StatusBadRequest, "Invalid redirect URI", nil, "")
-		return
-	}
-
-	ar := &storage.AuthRequest{
-		ID:            uuid.Must(uuid.NewRandom()),
-		ClientID:      authreq.ClientID,
-		RedirectURI:   redir.String(),
-		State:         authreq.State,
-		Scopes:        authreq.Scopes,
-		Nonce:         authreq.Raw.Get("nonce"),
-		CodeChallenge: authreq.CodeChallenge,
-		Expiry:        s.now().Add(s.config.AuthValidityTime),
-	}
-	if authreq.Raw.Get("acr_values") != "" {
-		ar.ACRValues = strings.Split(authreq.Raw.Get("acr_values"), " ")
-	}
-
-	switch authreq.ResponseType {
-	case oauth2.ResponseTypeCode:
-		ar.ResponseType = storage.AuthRequestResponseTypeCode
-	default:
-		_ = oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeUnsupportedResponseType, authreq.State, "response type must be code", nil)
-		return
-	}
-
-	if err := s.config.Storage.PutAuthRequest(req.Context(), ar); err != nil {
-		_ = oauth2.WriteAuthError(w, req, redir, oauth2.AuthErrorCodeErrServerError, authreq.State, "failed to persist session", err)
-		return
-	}
-
-	areq := &AuthorizationRequest{
-		ID:        ar.ID,
-		Scopes:    ar.Scopes,
-		ClientID:  ar.ClientID,
-		ACRValues: ar.ACRValues,
-	}
-	if authreq.Raw.Get("acr_values") != "" {
-		areq.ACRValues = strings.Split(authreq.Raw.Get("acr_values"), " ")
-	}
-
-	// TODO - return parsed request
-	// o.handler.StartAuthorization(w, req, areq)
 }
 
 type authorizer struct {

@@ -117,18 +117,13 @@ func (c *Clients) ValidateClientSecret(clientID, clientSecret string) (ok bool, 
 	}), nil
 }
 
-func (c *Clients) ValidateClientRedirectURI(clientID, redirectURI string) (ok bool, err error) {
+func (c *Clients) RedirectURIs(clientID string) ([]string, error) {
 	cl, ok := c.getClient(clientID)
 	if !ok {
-		return false, fmt.Errorf("invalid client ID")
+		return nil, fmt.Errorf("invalid client ID")
 	}
 
-	if cl.Public && cl.PermitLocalhostRedirect && reValidPublicRedirectURI.MatchString(redirectURI) {
-		// this is a valid public redirect for a client who allows it, all good
-		return true, nil
-	}
-
-	return slices.Contains(cl.RedirectURLs, redirectURI), nil
+	return cl.RedirectURLs, nil
 }
 
 func (c *Clients) getClient(id string) (Client, bool) {
