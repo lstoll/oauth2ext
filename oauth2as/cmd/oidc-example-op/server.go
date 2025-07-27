@@ -11,7 +11,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
-	"github.com/lstoll/oidcop"
+	"github.com/lstoll/oauth2as"
 )
 
 const (

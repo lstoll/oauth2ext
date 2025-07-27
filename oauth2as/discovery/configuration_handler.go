@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lstoll/oidc"
+	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 )
 

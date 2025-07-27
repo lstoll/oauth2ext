@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/lstoll/oidcop"
-	"github.com/lstoll/oidcop/staticclients"
-	"github.com/lstoll/oidcop/storage"
+	"github.com/lstoll/oauth2as"
+	"github.com/lstoll/oauth2as/staticclients"
+	"github.com/lstoll/oauth2as/storage"
 )
 
 //go:embed clients.json

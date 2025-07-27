@@ -8,9 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lstoll/oidc"
-	corev1 "github.com/lstoll/oidcop/proto/core/v1"
-	"github.com/lstoll/oidcop/storage"
+	corev1 "github.com/lstoll/oauth2as/proto/core/v1"
+	"github.com/lstoll/oauth2as/storage"
+	"github.com/lstoll/oauth2ext/claims"
+	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/protobuf/proto"
@@ -82,16 +83,17 @@ func unmarshalToken(tok string) (id uuid.UUID, b []byte, _ error) {
 }
 
 func (o *OIDC) buildIDAccessTokens(auth *storage.Authorization, identity Identity, extraAccessClaims map[string]any, idExp, atExp time.Time) (id *jwt.RawJWT, access *jwt.RawJWT, _ error) {
-	idc := oidc.IDClaims{
+	idc := claims.RawIDClaims{
 		Issuer:   o.issuer,
 		Subject:  auth.Subject,
-		Expiry:   oidc.UnixTime(idExp.Unix()),
-		Audience: oidc.StrOrSlice{auth.ClientID},
+		Expiry:   claims.UnixTime(idExp.Unix()),
+		Audience: claims.StrOrSlice{auth.ClientID},
 		ACR:      auth.ACR,
 		AMR:      auth.AMR,
-		IssuedAt: oidc.UnixTime(o.now().Unix()),
-		AuthTime: oidc.UnixTime(auth.AuthenticatedAt.Unix()),
+		IssuedAt: claims.UnixTime(o.now().Unix()),
+		AuthTime: claims.UnixTime(auth.AuthenticatedAt.Unix()),
 		Nonce:    auth.Nonce,
+		Extra:    identity.ExtraClaims,
 	}
 	if slices.Contains(auth.Scopes, oidc.ScopeEmail) {
 		_ = ""
@@ -101,28 +103,29 @@ func (o *OIDC) buildIDAccessTokens(auth *storage.Authorization, identity Identit
 		_ = ""
 		// TODO - fill
 	}
-	idjwt, err := idc.ToJWT(identity.ExtraClaims)
+	idjwt, err := idc.ToRawJWT()
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating identity token jwt: %w", err)
 	}
 
-	ac := oidc.AccessTokenClaims{
+	ac := claims.RawAccessTokenClaims{
 		Issuer:   o.issuer,
 		Subject:  auth.Subject,
 		ClientID: auth.ClientID,
-		Expiry:   oidc.UnixTime(atExp.Unix()),
+		Expiry:   claims.UnixTime(atExp.Unix()),
 		// TODO - what do we actually want to do here. Is this going to be just
 		// an identity server, or do we actually want to extend to access? For
 		// now, just make it for the issuer and verify that on userinfo.
-		Audience: oidc.StrOrSlice{o.issuer},
+		Audience: claims.StrOrSlice{o.issuer},
 		ACR:      auth.ACR,
 		AMR:      auth.AMR,
-		IssuedAt: oidc.UnixTime(o.now().Unix()),
-		AuthTime: oidc.UnixTime(auth.AuthenticatedAt.Unix()),
+		IssuedAt: claims.UnixTime(o.now().Unix()),
+		AuthTime: claims.UnixTime(auth.AuthenticatedAt.Unix()),
 		JWTID:    uuid.Must(uuid.NewRandom()).String(),
 		// TODO - groups/roles etc? Or are these just "extra"
+		Extra: extraAccessClaims,
 	}
-	acjwt, err := ac.ToJWT(extraAccessClaims)
+	acjwt, err := ac.ToRawJWT()
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating access token jwt: %w", err)
 	}

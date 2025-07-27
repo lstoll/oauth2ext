@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lstoll/oidcop/storage"
+	"github.com/lstoll/oauth2as/storage"
 )
 
 type Authorizer interface {

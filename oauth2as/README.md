@@ -1,19 +1,5 @@
-# oidcop
+# oauth2as
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/lstoll/oidcop.svg)](https://pkg.go.dev/github.com/lstoll/oidcop)
+[![Go Reference](https://pkg.go.dev/badge/github.com/lstoll/oauth2as.svg)](https://pkg.go.dev/github.com/lstoll/oauth2as)
 
-Go library for implementing OIDC OPs (Servers)
-
-## Example OP
-
-An example server is provided. Can be run:
-
-```
-go run ./cmd/oidc-example-op
-```
-
-And interacted with via
-
-```
-go run github.com/lstoll/oidc/cmd/oidccli -issuer=http://localhost:8085 -client-id=cli -scopes=openid,offline_access -skip-cache info
-```
+Go library for implementing Oauth2/OIDC OPs (Servers). In active development
