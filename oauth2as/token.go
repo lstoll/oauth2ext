@@ -83,7 +83,7 @@ func unmarshalToken(tok string) (id uuid.UUID, b []byte, _ error) {
 	return uid, ut.Token, err
 }
 
-func (o *OIDC) buildIDAccessTokens(auth *storage.Authorization, identity Identity, extraAccessClaims map[string]any, idExp, atExp time.Time) (id *jwt.RawJWT, access *jwt.RawJWT, _ error) {
+func (o *Server) buildIDAccessTokens(auth *storage.Authorization, identity Identity, extraAccessClaims map[string]any, idExp, atExp time.Time) (id *jwt.RawJWT, access *jwt.RawJWT, _ error) {
 	idc := claims.RawIDClaims{
 		Issuer:   o.issuer,
 		Subject:  auth.Subject,

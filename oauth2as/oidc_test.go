@@ -152,7 +152,7 @@ func TestStartAuthorization(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			oidc := &OIDC{
+			oidc := &Server{
 				clients: clientSource,
 				storage: s,
 
@@ -284,7 +284,7 @@ func TestFinishAuthorization(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			oidcs := &OIDC{
+			oidcs := &Server{
 				storage: s,
 				now:     time.Now,
 
@@ -331,13 +331,13 @@ func TestCodeToken(t *testing.T) {
 		otherClientRedirect = "https://other"
 	)
 
-	newOIDC := func() *OIDC {
+	newOIDC := func() *Server {
 		s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		return &OIDC{
+		return &Server{
 			issuer: issuer,
 
 			storage: s,
@@ -543,13 +543,13 @@ func TestRefreshToken(t *testing.T) {
 		otherClientRedirect = "https://other"
 	)
 
-	newOIDC := func() *OIDC {
+	newOIDC := func() *Server {
 		s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		return &OIDC{
+		return &Server{
 			issuer: issuer,
 
 			storage: s,

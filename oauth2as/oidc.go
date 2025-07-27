@@ -118,8 +118,8 @@ type Options struct {
 	Logger *slog.Logger
 }
 
-// OIDC can be used to handle the various parts of the OIDC auth flow.
-type OIDC struct {
+// Server can be used to handle the various parts of the Server auth flow.
+type Server struct {
 	issuer  string
 	storage storage.Storage
 	clients ClientSource
@@ -131,7 +131,7 @@ type OIDC struct {
 	now func() time.Time
 }
 
-func New(issuer string, storage storage.Storage, clientSource ClientSource, keyset map[SigningAlg]HandleFn, handlers AuthHandlers, opts *Options) (*OIDC, error) {
+func New(issuer string, storage storage.Storage, clientSource ClientSource, keyset map[SigningAlg]HandleFn, handlers AuthHandlers, opts *Options) (*Server, error) {
 	if issuer == "" {
 		return nil, fmt.Errorf("issuer must be provided")
 	}
@@ -143,7 +143,7 @@ func New(issuer string, storage storage.Storage, clientSource ClientSource, keys
 		return nil, errors.New("keyset must contain a RS256 handle")
 	}
 
-	o := &OIDC{
+	o := &Server{
 		issuer:  issuer,
 		storage: storage,
 		clients: clientSource,
@@ -157,7 +157,7 @@ func New(issuer string, storage storage.Storage, clientSource ClientSource, keys
 	}
 
 	if o.logger == nil {
-		o.logger = slog.New(&discardHandler{})
+		o.logger = slog.New(slog.DiscardHandler)
 	}
 
 	if o.opts.AuthValidityTime == time.Duration(0) {
@@ -185,7 +185,7 @@ func New(issuer string, storage storage.Storage, clientSource ClientSource, keys
 	return o, nil
 }
 
-func (o *OIDC) BuildDiscovery() *oidc.ProviderMetadata {
+func (o *Server) BuildDiscovery() *oidc.ProviderMetadata {
 	var algs []string
 	for k := range o.keyset {
 		algs = append(algs, string(k))
@@ -216,7 +216,7 @@ const (
 // mux. If the provided metadata specifies a URL for them already it will be
 // used, if not defaults will be set. If metadata is nil, BuildDiscovery will be
 // used.
-func (o *OIDC) AttachHandlers(mux *http.ServeMux, metadata *oidc.ProviderMetadata) error {
+func (o *Server) AttachHandlers(mux *http.ServeMux, metadata *oidc.ProviderMetadata) error {
 	if metadata == nil {
 		metadata = o.BuildDiscovery()
 	}
@@ -285,7 +285,7 @@ func (p *pubHandle) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#CodeFlowAuth
 // https://openid.net/specs/openid-connect-core-1_0.html#ImplicitFlowAuth
-func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) {
+func (o *Server) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 	authreq, err := oauth2.ParseAuthRequest(req)
 	if err != nil {
 		_ = oauth2.WriteError(w, req, err)
@@ -364,7 +364,7 @@ func (o *OIDC) StartAuthorization(w http.ResponseWriter, req *http.Request) {
 }
 
 type authorizer struct {
-	o *OIDC
+	o *Server
 }
 
 func (a *authorizer) Authorize(w http.ResponseWriter, r *http.Request, authReqID uuid.UUID, auth *Authorization) error {
@@ -372,7 +372,7 @@ func (a *authorizer) Authorize(w http.ResponseWriter, r *http.Request, authReqID
 }
 
 // TODO - set a authroizer on the handles.
-func (o *OIDC) finishAuthorization(w http.ResponseWriter, req *http.Request, authReqID uuid.UUID, auth *Authorization) error {
+func (o *Server) finishAuthorization(w http.ResponseWriter, req *http.Request, authReqID uuid.UUID, auth *Authorization) error {
 	authreq, err := o.storage.GetAuthRequest(req.Context(), authReqID)
 	if err != nil {
 		return oauth2.WriteHTTPError(w, req, http.StatusInternalServerError, "internal error", err, "failed to get session")
@@ -402,7 +402,7 @@ func (o *OIDC) finishAuthorization(w http.ResponseWriter, req *http.Request, aut
 	}
 }
 
-func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request, authReq *storage.AuthRequest, auth *storage.Authorization) error {
+func (o *Server) finishCodeAuthorization(w http.ResponseWriter, req *http.Request, authReq *storage.AuthRequest, auth *storage.Authorization) error {
 	ac := &storage.AuthCode{
 		ID:              uuid.Must(uuid.NewRandom()),
 		AuthorizationID: auth.ID,
@@ -461,7 +461,7 @@ func (o *OIDC) finishCodeAuthorization(w http.ResponseWriter, req *http.Request,
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#TokenEndpoint
 // https://openid.net/specs/openid-connect-core-1_0.html#RefreshTokens
-func (o *OIDC) Token(w http.ResponseWriter, req *http.Request) {
+func (o *Server) Token(w http.ResponseWriter, req *http.Request) {
 	treq, err := oauth2.ParseTokenRequest(req)
 	if err != nil {
 		_ = oauth2.WriteError(w, req, err)
@@ -490,7 +490,7 @@ func (o *OIDC) Token(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (o *OIDC) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth2.TokenResponse, error) {
+func (o *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth2.TokenResponse, error) {
 	id, utok, err := unmarshalToken(treq.Code)
 	if err != nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid code", Cause: err}
@@ -561,7 +561,7 @@ func (o *OIDC) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth
 	return o.buildTokenResponse(ctx, auth, nil, tresp)
 }
 
-func (o *OIDC) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
+func (o *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
 	id, utok, err := unmarshalToken(treq.RefreshToken)
 	if err != nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "invalid refresh token", Cause: err}
@@ -624,7 +624,7 @@ func (o *OIDC) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *
 // buildTokenResponse creates the oauth token response for code and refresh.
 // refreshSession can be nil, if it is and we should issue a refresh token, a
 // new refresh session will be created.
-func (o *OIDC) buildTokenResponse(ctx context.Context, auth *storage.Authorization, refreshSess *storage.RefreshSession, tresp *TokenResponse) (*oauth2.TokenResponse, error) {
+func (o *Server) buildTokenResponse(ctx context.Context, auth *storage.Authorization, refreshSess *storage.RefreshSession, tresp *TokenResponse) (*oauth2.TokenResponse, error) {
 	var refreshTok string
 	if !tresp.OverrideRefreshTokenIssuance && slices.Contains(auth.Scopes, oidc.ScopeOfflineAccess) {
 		if refreshSess == nil {
@@ -711,7 +711,7 @@ func (o *OIDC) buildTokenResponse(ctx context.Context, auth *storage.Authorizati
 	}, nil
 }
 
-func (o *OIDC) validateTokenClient(_ context.Context, req *oauth2.TokenRequest, wantClientID string) error {
+func (o *Server) validateTokenClient(_ context.Context, req *oauth2.TokenRequest, wantClientID string) error {
 	// check to see if we're working with the same client
 	if wantClientID != req.ClientID {
 		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
@@ -739,7 +739,7 @@ func (o *OIDC) validateTokenClient(_ context.Context, req *oauth2.TokenRequest, 
 // appropriate response data in JSON format to the passed writer.
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#UserInfoResponse
-func (o *OIDC) Userinfo(w http.ResponseWriter, req *http.Request) {
+func (o *Server) Userinfo(w http.ResponseWriter, req *http.Request) {
 	authSp := strings.SplitN(req.Header.Get("authorization"), " ", 2)
 	if !strings.EqualFold(authSp[0], "bearer") || len(authSp) != 2 {
 		be := &oauth2.BearerError{} // no content, just request auth
