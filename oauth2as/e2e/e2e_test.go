@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/lstoll/oauth2as"
-	"github.com/lstoll/oauth2as/staticclients"
+	"github.com/lstoll/oauth2as/internal/staticclients"
 	"github.com/lstoll/oauth2ext/claims"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lstoll/oauth2as/staticclients"
+	"github.com/lstoll/oauth2as/internal/staticclients"
 )
 
 func TestParseAuthRequest(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/lstoll/oauth2as"
-	"github.com/lstoll/oauth2as/staticclients"
+	"github.com/lstoll/oauth2as/internal/staticclients"
 )
 
 //go:embed clients.json
