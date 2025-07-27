@@ -3,10 +3,9 @@ package oauth2as
 import (
 	"encoding/json"
 	"net/http"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/lstoll/oauth2as/storage"
+	"github.com/lstoll/oauth2ext/claims"
 )
 
 type Authorizer interface {
@@ -55,58 +54,6 @@ type AuthorizationRequest struct {
 	ClientID string
 }
 
-// TokenRequest encapsulates the information from the initial request to the token
-// endpoint. This is passed to the handler, to generate an appropriate response.
-type TokenRequest struct {
-	// Authorization information this session was authorized with
-	Authorization storage.Authorization
-}
-
-// RefreshTokenRequest encapsulates the information for a request to refresh a
-// token.
-type RefreshTokenRequest struct {
-	// Authorization information this session was authorized with
-	Authorization storage.Authorization
-}
-
-// Identity of a user, used to construct ID token claims and UserInfo responses.
-// Depending on the requested scopes, only a subset of this information might be
-// used
-type Identity struct {
-	EMail    string
-	FullName string
-	// Extra claims to include in the ID Token.
-	ExtraClaims map[string]any
-}
-
-// TokenResponse is returned by the token endpoint handler, indicating what it
-// should actually return to the user.
-type TokenResponse struct {
-	// OverrideRefreshTokenIssuance can be used to override issuing a refresh
-	// token if the client requested it, if true.
-	OverrideRefreshTokenIssuance bool
-
-	// OverrideRefreshTokenExpiry can be used to override the expiration of the
-	// refresh token. If not set, the default will be used.
-	OverrideRefreshTokenExpiry time.Time
-
-	// may be zero, if so defaulted
-	IDTokenExpiry     time.Time
-	AccessTokenExpiry time.Time
-
-	// Identity sets the user information, that can be included in the returned
-	// ID token.
-	Identity *Identity
-
-	// AccessTokenExtraClaims sets additional claims to be included in the
-	// access token.
-	AccessTokenExtraClaims map[string]any
-
-	// RefreshTokenValidUntil indicates how long the returned refresh token should
-	// be valid for, if one is issued. If zero, the default will be used.
-	RefreshTokenValidUntil time.Time
-}
-
 // UserinfoRequest contains information about this request to the UserInfo
 // endpoint
 type UserinfoRequest struct {
@@ -117,20 +64,5 @@ type UserinfoRequest struct {
 // UserinfoResponse contains information to response to the userinfo response.
 type UserinfoResponse struct {
 	// Subject is the sub of the user this request is for.
-	Identity *Identity
-}
-
-func (a *Authorization) toStorage(authReqID uuid.UUID, clientID string, authenticatedAt time.Time, nonce string) *storage.Authorization {
-	return &storage.Authorization{
-		ID:              uuid.Must(uuid.NewRandom()),
-		AuthReqID:       authReqID,
-		Subject:         a.Subject,
-		ClientID:        clientID,
-		Scopes:          a.Scopes,
-		ACR:             a.ACR,
-		AMR:             a.AMR,
-		AuthenticatedAt: authenticatedAt,
-		Nonce:           nonce,
-		Metadata:        a.Metadata,
-	}
+	Identity *claims.RawIDClaims
 }

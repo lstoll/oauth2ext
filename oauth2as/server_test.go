@@ -2,13 +2,14 @@ package oauth2as
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"path/filepath"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -16,132 +17,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/lstoll/oauth2as/internal/oauth2"
 	"github.com/lstoll/oauth2as/staticclients"
-	"github.com/lstoll/oauth2as/storage"
 	"github.com/lstoll/oauth2ext/claims"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
-
-func TestFinishAuthorization(t *testing.T) {
-	authReq := &storage.AuthRequest{
-		ID:           uuid.Must(uuid.NewRandom()),
-		RedirectURI:  "https://redir",
-		State:        "state",
-		Scopes:       []string{oidc.ScopeOpenID},
-		Nonce:        "nonce",
-		ResponseType: storage.AuthRequestResponseTypeCode,
-		Expiry:       time.Now().Add(1 * time.Minute),
-	}
-
-	for _, tc := range []struct {
-		Name                 string
-		AuthReqID            uuid.UUID
-		WantReturnedErrMatch func(error) bool
-		WantHTTPStatus       int
-		Check                func(t *testing.T, smgr storage.Storage, rec *httptest.ResponseRecorder)
-	}{
-		{
-			Name:           "Redirects to the correct location",
-			AuthReqID:      authReq.ID,
-			WantHTTPStatus: 302,
-			Check: func(t *testing.T, smgr storage.Storage, rec *httptest.ResponseRecorder) {
-				loc := rec.Header().Get("location")
-
-				// strip query to compare base URL
-				lnqp, err := url.Parse(loc)
-				if err != nil {
-					t.Fatal(err)
-				}
-				lnqp.RawQuery = ""
-
-				if lnqp.String() != authReq.RedirectURI {
-					t.Errorf("want redir %s, got: %s", authReq.RedirectURI, lnqp.String())
-				}
-
-				locp, err := url.Parse(loc)
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				// make sure the code resolves to an authCode
-				codeid, _, err := unmarshalToken(locp.Query().Get("code"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				gotCode, _, err := smgr.GetAuthCode(context.TODO(), codeid)
-				if err != nil || gotCode == nil {
-					t.Errorf("wanted no error fetching code, got: %v", err)
-				}
-
-				// make sure the state was passed
-				state := locp.Query().Get("state")
-				if authReq.State != state {
-					t.Errorf("want state %s, got: %v", authReq.State, state)
-				}
-			},
-		},
-		{
-			Name:                 "Invalid request ID fails",
-			AuthReqID:            uuid.Must(uuid.NewRandom()),
-			WantReturnedErrMatch: matchHTTPErrStatus(403),
-			Check: func(t *testing.T, smgr storage.Storage, _ *httptest.ResponseRecorder) {
-				// TODO what was this checking
-				/*
-					gotSess := &versionedSession{}
-					ok, err := smgr.GetSession(context.Background(), sessID, gotSess)
-					if err != nil {
-						t.Errorf("unexpected error: %v", err)
-					}
-					if ok {
-						t.Errorf("want: no session returned, got: %v", gotSess)
-					}*/
-			},
-		},
-	} {
-		t.Run(tc.Name, func(t *testing.T) {
-			ctx := context.Background()
-
-			s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			if err := s.PutAuthRequest(ctx, authReq); err != nil {
-				t.Fatal(err)
-			}
-
-			t.Skip("TODO - re-do to parse/create auth")
-
-			oidcs := &Server{
-				// storage: s,
-				// now:     time.Now,
-
-				// opts: Options{
-				// 	AuthValidityTime: 1 * time.Minute,
-				// 	CodeValidityTime: 1 * time.Minute,
-				// },
-			}
-			authorizer := &authorizer{o: oidcs}
-
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest("POST", "/", nil)
-
-			err = authorizer.Authorize(rec, req, tc.AuthReqID, &Authorization{Scopes: []string{oidc.ScopeOpenID}})
-			checkErrMatcher(t, tc.WantReturnedErrMatch, err)
-
-			if tc.WantHTTPStatus != 0 {
-				if tc.WantHTTPStatus != rec.Code {
-					t.Errorf("want HTTP status code %d, got: %d", tc.WantHTTPStatus, rec.Code)
-				}
-			}
-
-			if tc.Check != nil {
-				tc.Check(t, s, rec)
-			}
-		})
-	}
-}
 
 type unauthorizedErrImpl struct{ error }
 
@@ -161,10 +41,7 @@ func TestCodeToken(t *testing.T) {
 	)
 
 	newOIDC := func() *Server {
-		s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := NewMemStorage()
 
 		return &Server{
 			config: Config{
@@ -174,9 +51,7 @@ func TestCodeToken(t *testing.T) {
 				Keyset:  testKeysets(),
 
 				TokenHandler: func(req *TokenRequest) (*TokenResponse, error) {
-					return &TokenResponse{
-						Identity: &Identity{},
-					}, nil
+					return &TokenResponse{}, nil
 				},
 
 				Clients: &staticclients.Clients{
@@ -199,46 +74,9 @@ func TestCodeToken(t *testing.T) {
 		}
 	}
 
-	newCodeSess := func(t *testing.T, smgr storage.Storage) (usertok string) {
-		t.Helper()
-
-		id := uuid.Must(uuid.NewRandom())
-		utok, stok, err := newToken(id)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		utokstr, err := marshalToken(utok)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		auth := &storage.Authorization{
-			ID:       uuid.Must(uuid.NewRandom()),
-			Subject:  "testsub",
-			ClientID: clientID,
-		}
-		if err := smgr.PutAuthorization(context.TODO(), auth); err != nil {
-			t.Fatal(err)
-		}
-
-		sess := &storage.AuthCode{
-			ID:              id,
-			AuthorizationID: auth.ID,
-			Code:            stok,
-			Expiry:          time.Now().Add(1 * time.Minute),
-		}
-
-		if err := smgr.PutAuthCode(context.Background(), sess); err != nil {
-			t.Fatal(err)
-		}
-
-		return utokstr
-	}
-
 	t.Run("Happy path", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.config.Storage)
+		codeToken := newCodeGrant(t, o.config.Storage)
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeAuthorizationCode,
@@ -260,7 +98,7 @@ func TestCodeToken(t *testing.T) {
 
 	t.Run("Redeeming an already redeemed code should fail", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.config.Storage)
+		codeToken := newCodeGrant(t, o.config.Storage)
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeAuthorizationCode,
@@ -284,7 +122,7 @@ func TestCodeToken(t *testing.T) {
 
 	t.Run("Invalid client secret should fail", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.config.Storage)
+		codeToken := newCodeGrant(t, o.config.Storage)
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeAuthorizationCode,
@@ -302,7 +140,7 @@ func TestCodeToken(t *testing.T) {
 
 	t.Run("Client secret that differs from the original client should fail", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.config.Storage)
+		codeToken := newCodeGrant(t, o.config.Storage)
 
 		treq := &oauth2.TokenRequest{
 			GrantType:   oauth2.GrantTypeAuthorizationCode,
@@ -322,7 +160,7 @@ func TestCodeToken(t *testing.T) {
 
 	t.Run("Response access token validity time honoured", func(t *testing.T) {
 		o := newOIDC()
-		codeToken := newCodeSess(t, o.config.Storage)
+		codeToken := newCodeGrant(t, o.config.Storage)
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeAuthorizationCode,
@@ -336,7 +174,6 @@ func TestCodeToken(t *testing.T) {
 			return &TokenResponse{
 				IDTokenExpiry:     time.Now().Add(5 * time.Minute),
 				AccessTokenExpiry: time.Now().Add(5 * time.Minute),
-				Identity:          &Identity{},
 			}, nil
 		}
 
@@ -371,10 +208,7 @@ func TestRefreshToken(t *testing.T) {
 	)
 
 	newOIDC := func() *Server {
-		s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := NewMemStorage()
 
 		return &Server{
 
@@ -385,9 +219,7 @@ func TestRefreshToken(t *testing.T) {
 				Keyset:  testKeysets(),
 
 				TokenHandler: func(req *TokenRequest) (*TokenResponse, error) {
-					return &TokenResponse{
-						Identity: &Identity{},
-					}, nil
+					return &TokenResponse{}, nil
 				},
 				Clients: &staticclients.Clients{
 					Clients: []staticclients.Client{
@@ -413,53 +245,12 @@ func TestRefreshToken(t *testing.T) {
 		}
 	}
 
-	newRefreshSess := func(t *testing.T, smgr storage.Storage) (usertok string) {
-		t.Helper()
-
-		id := uuid.Must(uuid.NewRandom())
-		utok, stok, err := newToken(id)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		utokstr, err := marshalToken(utok)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		auth := &storage.Authorization{
-			ID:       uuid.Must(uuid.NewRandom()),
-			Subject:  "testsub",
-			ClientID: clientID,
-			Scopes:   []string{oidc.ScopeOfflineAccess},
-		}
-		if err := smgr.PutAuthorization(context.TODO(), auth); err != nil {
-			t.Fatal(err)
-		}
-
-		sess := &storage.RefreshSession{
-			ID:              id,
-			AuthorizationID: auth.ID,
-			RefreshToken:    stok,
-			Expiry:          time.Now().Add(60 * time.Minute),
-		}
-
-		if err := smgr.PutRefreshSession(context.Background(), sess); err != nil {
-			t.Fatal(err)
-		}
-
-		return utokstr
-	}
-
 	t.Run("Refresh token happy path", func(t *testing.T) {
 		o := newOIDC()
-		refreshToken := newRefreshSess(t, o.config.Storage)
+		refreshToken := newRefreshGrant(t, o.config.Storage)
 
 		o.config.TokenHandler = func(req *TokenRequest) (*TokenResponse, error) {
-			return &TokenResponse{
-				Identity:                   &Identity{},
-				OverrideRefreshTokenExpiry: o.now().Add(10 * time.Minute),
-			}, nil
+			return &TokenResponse{}, nil
 		}
 
 		// keep trying to refresh
@@ -505,7 +296,7 @@ func TestRefreshToken(t *testing.T) {
 
 	t.Run("Refresh token with handler errors", func(t *testing.T) {
 		o := newOIDC()
-		refreshToken := newRefreshSess(t, o.config.Storage)
+		refreshToken := newRefreshGrant(t, o.config.Storage)
 
 		var returnErr error
 		const errDesc = "Refresh unauthorized"
@@ -515,8 +306,7 @@ func TestRefreshToken(t *testing.T) {
 				return nil, returnErr
 			}
 			return &TokenResponse{
-				Identity:                   &Identity{},
-				OverrideRefreshTokenExpiry: o.now().Add(10 * time.Minute),
+				// OverrideRefreshTokenExpiry: o.now().Add(10 * time.Minute),
 			}, nil
 		}
 
@@ -544,7 +334,7 @@ func TestRefreshToken(t *testing.T) {
 		}
 
 		// refresh with generic err
-		refreshToken = newRefreshSess(t, o.config.Storage)
+		refreshToken = newRefreshGrant(t, o.config.Storage)
 
 		returnErr = errors.New("boomtown")
 
@@ -664,22 +454,26 @@ func TestUserinfo(t *testing.T) {
 		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
-			s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
+			s := NewMemStorage()
 
 			config := Config{
 				Issuer:  issuer,
 				Storage: s,
 				Keyset:  testKeysets(),
 				UserinfoHandler: func(w io.Writer, uireq *UserinfoRequest) (*UserinfoResponse, error) {
-					return &UserinfoResponse{Identity: &Identity{}}, nil
+					return &UserinfoResponse{
+						Identity: &claims.RawIDClaims{
+							Issuer:  issuer,
+							Subject: uireq.Subject,
+							Expiry:  claims.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
+						},
+					}, nil
 				},
 				TokenHandler: func(req *TokenRequest) (*TokenResponse, error) {
-					return &TokenResponse{Identity: &Identity{}}, nil
+					return &TokenResponse{}, nil
 				},
 				Clients: &staticclients.Clients{},
+				Logger:  slog.New(slog.NewTextHandler(os.Stderr, nil)),
 			}
 
 			oidc, err := NewServer(config)
@@ -754,4 +548,50 @@ func testKeysets() AlgKeysets {
 	}
 
 	return NewSingleAlgKeysets(SigningAlgRS256, th)
+}
+
+func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
+	refreshToken = rand.Text()
+	refreshTokenHash := hashValue(refreshToken)
+
+	// Create a StoredGrant with the refresh token
+	grant := &StoredGrant{
+		ID:            uuid.New(),
+		UserID:        "testsub",
+		ClientID:      "client-id",
+		GrantedScopes: []string{oidc.ScopeOfflineAccess},
+		RefreshToken:  &refreshTokenHash,
+		GrantedAt:     time.Now(),
+		ExpiresAt:     time.Now().Add(60 * time.Minute),
+		Expiry:        time.Now().Add(60 * time.Minute),
+	}
+
+	if err := smgr.CreateGrant(context.Background(), grant); err != nil {
+		t.Fatal(err)
+	}
+
+	return refreshToken
+}
+
+func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
+	code := rand.Text()
+	codeHash := hashValue(code)
+
+	// Create a StoredGrant with the auth code
+	grant := &StoredGrant{
+		ID:            uuid.New(),
+		UserID:        "testsub",
+		ClientID:      "client-id",
+		GrantedScopes: []string{oidc.ScopeOfflineAccess},
+		AuthCode:      &codeHash,
+		GrantedAt:     time.Now(),
+		ExpiresAt:     time.Now().Add(1 * time.Minute),
+		Expiry:        time.Now().Add(1 * time.Minute),
+	}
+
+	if err := smgr.CreateGrant(context.Background(), grant); err != nil {
+		t.Fatal(err)
+	}
+
+	return code
 }

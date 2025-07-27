@@ -7,14 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lstoll/oauth2as"
 	"github.com/lstoll/oauth2as/staticclients"
-	"github.com/lstoll/oauth2as/storage"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
@@ -84,10 +82,7 @@ func TestE2E(t *testing.T) {
 				},
 			}
 
-			s, err := storage.NewJSONFile(filepath.Join(t.TempDir(), "db.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
+			s := oauth2as.NewMemStorage()
 
 			/*mux.HandleFunc("/authorization", func(w http.ResponseWriter, req *http.Request) {
 				ar, err := oidcHandlers.StartAuthorization(w, req)
@@ -135,10 +130,10 @@ func TestE2E(t *testing.T) {
 				Storage: s,
 				Keyset:  testKeysets(),
 				TokenHandler: func(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
-					return &oauth2as.TokenResponse{Identity: &oauth2as.Identity{}}, nil
+					return &oauth2as.TokenResponse{}, nil
 				},
 				UserinfoHandler: func(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
-					return &oauth2as.UserinfoResponse{Identity: &oauth2as.Identity{}}, nil
+					return &oauth2as.UserinfoResponse{}, nil
 				},
 				Clients: clientSource,
 			}
