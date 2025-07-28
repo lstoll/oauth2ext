@@ -172,7 +172,7 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch client opts: %w", err)
 	}
-	if slices.Contains(clientOpts, ClientOptSkipPKCE) && treq.CodeVerifier == "" {
+	if !slices.Contains(clientOpts, ClientOptSkipPKCE) && treq.CodeVerifier == "" {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
 	}
 
