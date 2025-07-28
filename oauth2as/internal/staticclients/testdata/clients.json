@@ -25,7 +25,9 @@
     {
       "id": "publocalpkceskip",
       "public": true,
-      "requiresPKCE": false
+      "opts": [
+        "skip-pkce"
+      ]
     }
   ]
 }

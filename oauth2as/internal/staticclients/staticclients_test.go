@@ -2,8 +2,15 @@ package staticclients
 
 import (
 	"os"
+	"slices"
 	"testing"
+
+	"github.com/lstoll/oauth2as"
 )
+
+func ptr[T any](v T) *T {
+	return &v
+}
 
 func TestStaticClients(t *testing.T) {
 	cb, err := os.ReadFile("testdata/clients.json")
@@ -21,14 +28,13 @@ func TestStaticClients(t *testing.T) {
 		WantValidSecret   string
 		WantInvalidSecret string
 
-		WantRequiresPKCE bool
+		WantRequiresPKCE *bool
 	}{
 		{
 			Name:              "Valid simple client",
 			ClientID:          "simple",
 			WantValidSecret:   "secret",
 			WantInvalidSecret: "othersecret",
-			WantRequiresPKCE:  false,
 		},
 		{
 			Name:              "Missing client ID",
@@ -39,7 +45,7 @@ func TestStaticClients(t *testing.T) {
 			Name:             "Public client with localhost redirect and PKCE",
 			ClientID:         "publocalpkce",
 			WantValidSecret:  "", // empty secret should be fine
-			WantRequiresPKCE: true,
+			WantRequiresPKCE: ptr(true),
 		},
 		{
 			Name:            "Env secret, not set",
@@ -64,7 +70,7 @@ func TestStaticClients(t *testing.T) {
 			Name:              "Public client with localhost redirect and PKCE",
 			ClientID:          "publocalpkceskip",
 			WantInvalidSecret: "", // empty secret should not work
-			WantRequiresPKCE:  false,
+			WantRequiresPKCE:  ptr(false),
 		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
@@ -81,7 +87,7 @@ func TestStaticClients(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			valid, err := clients.IsValidClientID(tc.ClientID)
+			valid, err := clients.IsValidClientID(t.Context(), tc.ClientID)
 			if err != nil {
 				// we never error
 				t.Fatal(err)
@@ -94,15 +100,15 @@ func TestStaticClients(t *testing.T) {
 					t.Error("client should not be valid but is")
 				}
 
-				if _, err := clients.RequiresPKCE(tc.ClientID); err == nil {
-					t.Error("PKCE check should fail")
+				if _, err := clients.ClientOpts(t.Context(), tc.ClientID); err == nil {
+					t.Error("Client opts check should fail")
 				}
 
-				if _, err := clients.ValidateClientSecret(tc.ClientID, ""); err == nil {
+				if _, err := clients.ValidateClientSecret(t.Context(), tc.ClientID, ""); err == nil {
 					t.Error("client secret check should fail")
 				}
 
-				if _, err := clients.RedirectURIs(tc.ClientID); err == nil {
+				if _, err := clients.RedirectURIs(t.Context(), tc.ClientID); err == nil {
 					t.Error("client redirect uri check should fail")
 				}
 
@@ -113,16 +119,21 @@ func TestStaticClients(t *testing.T) {
 				t.Errorf("client %s should be valid", tc.ClientID)
 			}
 
-			requiresPKCE, err := clients.RequiresPKCE(tc.ClientID)
+			opts, err := clients.ClientOpts(t.Context(), tc.ClientID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.WantRequiresPKCE != requiresPKCE {
-				t.Errorf("want requires PKCE %t, got: %t", tc.WantRequiresPKCE, requiresPKCE)
+			// Test PKCE requirements only if WantRequiresPKCE is explicitly set
+			if tc.WantRequiresPKCE != nil {
+				hasSkipPKCE := slices.Contains(opts, oauth2as.ClientOptSkipPKCE)
+				requiresPKCE := !hasSkipPKCE
+				if *tc.WantRequiresPKCE != requiresPKCE {
+					t.Errorf("want requires PKCE %t, got requires PKCE %t (has skip-pkce option: %t)", *tc.WantRequiresPKCE, requiresPKCE, hasSkipPKCE)
+				}
 			}
 
 			if tc.WantValidSecret != "" {
-				valid, err := clients.ValidateClientSecret(tc.ClientID, tc.WantValidSecret)
+				valid, err := clients.ValidateClientSecret(t.Context(), tc.ClientID, tc.WantValidSecret)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -131,7 +142,7 @@ func TestStaticClients(t *testing.T) {
 				}
 			}
 			if tc.WantInvalidSecret != "" {
-				valid, err := clients.ValidateClientSecret(tc.ClientID, tc.WantInvalidSecret)
+				valid, err := clients.ValidateClientSecret(t.Context(), tc.ClientID, tc.WantInvalidSecret)
 				if err != nil {
 					t.Fatal(err)
 				}

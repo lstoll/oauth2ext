@@ -47,7 +47,7 @@ func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
 		return nil, fmt.Errorf("failed to parse redirect URI %s: %w", authreq.RedirectURI, err)
 	}
 
-	cidok, err := s.config.Clients.IsValidClientID(authreq.ClientID)
+	cidok, err := s.config.Clients.IsValidClientID(req.Context(), authreq.ClientID)
 	if err != nil {
 		return nil, fmt.Errorf("error checking client ID %s: %w", authreq.ClientID, err)
 	}
@@ -55,7 +55,7 @@ func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
 		return nil, fmt.Errorf("client ID %s is not valid", authreq.ClientID)
 	}
 
-	redirs, err := s.config.Clients.RedirectURIs(authreq.ClientID)
+	redirs, err := s.config.Clients.RedirectURIs(req.Context(), authreq.ClientID)
 	if err != nil {
 		return nil, fmt.Errorf("error getting redirect URIs for client ID %s: %w", authreq.ClientID, err)
 	}
@@ -138,7 +138,7 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 	}
 
 	// Handle the case where no redirect URI is provided
-	redirs, err := s.config.Clients.RedirectURIs(grant.Request.ClientID)
+	redirs, err := s.config.Clients.RedirectURIs(ctx, grant.Request.ClientID)
 	if err != nil {
 		return "", fmt.Errorf("error getting redirect URIs for client ID %s: %w", grant.Request.ClientID, err)
 	}

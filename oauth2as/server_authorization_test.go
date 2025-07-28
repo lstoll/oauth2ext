@@ -7,32 +7,28 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/lstoll/oauth2as/staticclients"
 )
 
 func TestParseAuthRequest(t *testing.T) {
 	// Create a test server with static clients
 	server := &Server{
 		config: Config{
-			Clients: &staticclients.Clients{
-				Clients: []staticclients.Client{
-					{
-						ID:           "test-client",
-						Secrets:      []string{"test-secret"},
-						RedirectURLs: []string{"https://client.example.com/callback", "https://client.example.com/callback2"},
-					},
-					{
-						ID:           "single-redirect-client",
-						Secrets:      []string{"single-secret"},
-						RedirectURLs: []string{"https://single.example.com/callback"},
-					},
-					{
-						ID:           "public-client",
-						Secrets:      []string{},
-						Public:       true,
-						RedirectURLs: []string{"https://public.example.com/callback"},
-					},
+			Clients: staticClientSource{
+				{
+					ID:           "test-client",
+					Secrets:      []string{"test-secret"},
+					RedirectURLs: []string{"https://client.example.com/callback", "https://client.example.com/callback2"},
+				},
+				{
+					ID:           "single-redirect-client",
+					Secrets:      []string{"single-secret"},
+					RedirectURLs: []string{"https://single.example.com/callback"},
+				},
+				{
+					ID:           "public-client",
+					Secrets:      []string{},
+					Public:       true,
+					RedirectURLs: []string{"https://public.example.com/callback"},
 				},
 			},
 		},
@@ -205,18 +201,16 @@ func TestGrantAuth(t *testing.T) {
 	server := &Server{
 		config: Config{
 			Storage: storage,
-			Clients: &staticclients.Clients{
-				Clients: []staticclients.Client{
-					{
-						ID:           "test-client",
-						Secrets:      []string{"test-secret"},
-						RedirectURLs: []string{"https://client.example.com/callback"},
-					},
-					{
-						ID:           "multi-redirect-client",
-						Secrets:      []string{"multi-secret"},
-						RedirectURLs: []string{"https://client1.example.com/callback", "https://client2.example.com/callback"},
-					},
+			Clients: staticClientSource{
+				{
+					ID:           "test-client",
+					Secrets:      []string{"test-secret"},
+					RedirectURLs: []string{"https://client.example.com/callback"},
+				},
+				{
+					ID:           "multi-redirect-client",
+					Secrets:      []string{"multi-secret"},
+					RedirectURLs: []string{"https://client1.example.com/callback", "https://client2.example.com/callback"},
 				},
 			},
 			CodeValidityTime: 10 * time.Minute,
@@ -485,13 +479,11 @@ func TestAuthRequestIntegration(t *testing.T) {
 	server := &Server{
 		config: Config{
 			Storage: storage,
-			Clients: &staticclients.Clients{
-				Clients: []staticclients.Client{
-					{
-						ID:           "integration-client",
-						Secrets:      []string{"integration-secret"},
-						RedirectURLs: []string{"https://integration.example.com/callback"},
-					},
+			Clients: staticClientSource{
+				{
+					ID:           "integration-client",
+					Secrets:      []string{"integration-secret"},
+					RedirectURLs: []string{"https://integration.example.com/callback"},
 				},
 			},
 			CodeValidityTime: 10 * time.Minute,
