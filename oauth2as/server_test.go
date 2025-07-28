@@ -60,11 +60,13 @@ func TestCodeToken(t *testing.T) {
 						ID:           clientID,
 						Secrets:      []string{clientSecret},
 						RedirectURLs: []string{redirectURI},
+						Opts:         []ClientOpt{ClientOptSkipPKCE},
 					},
 					{
 						ID:           otherClientID,
 						Secrets:      []string{otherClientSecret},
 						RedirectURLs: []string{otherClientRedirect},
+						Opts:         []ClientOpt{ClientOptSkipPKCE},
 					},
 				},
 			},
@@ -225,11 +227,13 @@ func TestRefreshToken(t *testing.T) {
 						ID:           clientID,
 						Secrets:      []string{clientSecret},
 						RedirectURLs: []string{redirectURI},
+						Opts:         []ClientOpt{ClientOptSkipPKCE},
 					},
 					{
 						ID:           otherClientID,
 						Secrets:      []string{otherClientSecret},
 						RedirectURLs: []string{otherClientRedirect},
+						Opts:         []ClientOpt{ClientOptSkipPKCE},
 					},
 				},
 
