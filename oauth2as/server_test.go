@@ -51,7 +51,7 @@ func TestCodeToken(t *testing.T) {
 				Storage: s,
 				Keyset:  testKeysets(),
 
-				TokenHandler: func(req *TokenRequest) (*TokenResponse, error) {
+				TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
 				},
 
@@ -169,7 +169,7 @@ func TestCodeToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		o.config.TokenHandler = func(req *TokenRequest) (*TokenResponse, error) {
+		o.config.TokenHandler = func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 			return &TokenResponse{
 				IDTokenExpiry:     time.Now().Add(5 * time.Minute),
 				AccessTokenExpiry: time.Now().Add(5 * time.Minute),
@@ -217,7 +217,7 @@ func TestRefreshToken(t *testing.T) {
 				Storage: s,
 				Keyset:  testKeysets(),
 
-				TokenHandler: func(req *TokenRequest) (*TokenResponse, error) {
+				TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
 				},
 				Clients: staticClientSource{
@@ -246,7 +246,7 @@ func TestRefreshToken(t *testing.T) {
 		o := newOIDC()
 		refreshToken := newRefreshGrant(t, o.config.Storage)
 
-		o.config.TokenHandler = func(req *TokenRequest) (*TokenResponse, error) {
+		o.config.TokenHandler = func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 			return &TokenResponse{}, nil
 		}
 
@@ -298,7 +298,7 @@ func TestRefreshToken(t *testing.T) {
 		var returnErr error
 		const errDesc = "Refresh unauthorized"
 
-		o.config.TokenHandler = func(req *TokenRequest) (*TokenResponse, error) {
+		o.config.TokenHandler = func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 			if returnErr != nil {
 				return nil, returnErr
 			}
@@ -457,7 +457,7 @@ func TestUserinfo(t *testing.T) {
 				Issuer:  issuer,
 				Storage: s,
 				Keyset:  testKeysets(),
-				UserinfoHandler: func(w io.Writer, uireq *UserinfoRequest) (*UserinfoResponse, error) {
+				UserinfoHandler: func(_ context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error) {
 					return &UserinfoResponse{
 						Identity: &claims.RawIDClaims{
 							Issuer:  issuer,
@@ -466,7 +466,7 @@ func TestUserinfo(t *testing.T) {
 						},
 					}, nil
 				},
-				TokenHandler: func(req *TokenRequest) (*TokenResponse, error) {
+				TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
 				},
 				Clients: staticClientSource{},

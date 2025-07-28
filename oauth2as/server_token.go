@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -21,6 +22,8 @@ import (
 const (
 	claimGrantID = "grid"
 )
+
+type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, error)
 
 // TokenRequest encapsulates the information from the initial request to the token
 // endpoint. This is passed to the handler, to generate an appropriate response.
@@ -64,6 +67,13 @@ type TokenResponse struct {
 	// - jti
 	// and the token header
 	AccessTokenClaims *claims.RawAccessTokenClaims
+
+	// OverrideIDSubject can be used to override the subject of the ID token.
+	// If not set, the default will be used.
+	OverrideIDSubject string
+	// OverrideAccessTokenSubject can be used to override the subject of the
+	// access token. If not set, the default will be used.
+	OverrideAccessTokenSubject string
 
 	// RefreshTokenValidUntil indicates how long the returned refresh token should
 	// be valid for, if one is issued. If zero, the default will be used.
@@ -179,7 +189,7 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 	}
 
 	// TODO - this should be optional
-	tresp, err := s.config.TokenHandler(tr)
+	tresp, err := s.config.TokenHandler(ctx, tr)
 	if err != nil {
 		var uaerr unauthorizedErr
 		if errors.As(err, &uaerr); uaerr != nil && uaerr.Unauthorized() {
@@ -229,7 +239,7 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 	tr := &TokenRequest{
 		Grant: grant,
 	}
-	tresp, err := s.config.TokenHandler(tr)
+	tresp, err := s.config.TokenHandler(ctx, tr)
 	if err != nil {
 		var uaerr unauthorizedErr
 		if errors.As(err, &uaerr); uaerr != nil && uaerr.Unauthorized() {
@@ -288,6 +298,10 @@ func (s *Server) buildTokenResponse(ctx context.Context, grant *StoredGrant, tre
 	// TODO nonce
 	// idc.Nonce = grant.Request.Nonce
 
+	if tresp.OverrideIDSubject != "" {
+		idc.Subject = tresp.OverrideIDSubject
+	}
+
 	// Apps should fill the profile info as needed.
 
 	idjwt, err := idc.ToRawJWT()
@@ -312,6 +326,10 @@ func (s *Server) buildTokenResponse(ctx context.Context, grant *StoredGrant, tre
 	ac.AuthTime = claims.UnixTime(grant.GrantedAt.Unix())
 	ac.JWTID = uuid.Must(uuid.NewRandom()).String()
 	ac.Extra[claimGrantID] = grant.ID.String()
+
+	if tresp.OverrideAccessTokenSubject != "" {
+		ac.Subject = tresp.OverrideAccessTokenSubject
+	}
 
 	acjwt, err := ac.ToRawJWT()
 	if err != nil {
@@ -357,4 +375,12 @@ func hashValue(v string) string {
 
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
+	h := sha256.New()
+	h.Write([]byte(codeVerifier))
+	hashedVerifier := h.Sum(nil)
+	computedChallenge := base64.RawURLEncoding.EncodeToString(hashedVerifier)
+	return computedChallenge == storedCodeChallenge
 }

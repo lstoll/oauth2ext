@@ -1,11 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"io"
 	"log/slog"
 	"strings"
 
@@ -116,7 +116,7 @@ func (s *server) finishAuthorization(w http.ResponseWriter, req *http.Request) {
 	http.Redirect(w, req, redirectURI, http.StatusFound)
 }
 
-func (s *server) handleToken(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
+func (s *server) handleToken(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
 	return &oauth2as.TokenResponse{
 		IDClaims: &claims.RawIDClaims{
 			Subject: req.Grant.UserID,
@@ -127,7 +127,7 @@ func (s *server) handleToken(req *oauth2as.TokenRequest) (*oauth2as.TokenRespons
 	}, nil
 }
 
-func (s *server) handleUserinfo(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
+func (s *server) handleUserinfo(_ context.Context, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
 	return &oauth2as.UserinfoResponse{
 		Identity: &claims.RawIDClaims{
 			Subject: uireq.Subject,

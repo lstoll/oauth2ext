@@ -131,10 +131,10 @@ func TestE2E(t *testing.T) {
 				Issuer:  oidcSvr.URL,
 				Storage: s,
 				Keyset:  testKeysets(),
-				TokenHandler: func(req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
+				TokenHandler: func(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
 					return &oauth2as.TokenResponse{}, nil
 				},
-				UserinfoHandler: func(w io.Writer, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
+				UserinfoHandler: func(_ context.Context, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
 					return &oauth2as.UserinfoResponse{
 						Identity: &claims.RawIDClaims{
 							Subject: uireq.Subject,
