@@ -2,10 +2,10 @@ package oauth2as
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lstoll/oauth2as/internal/oauth2"
+	"github.com/lstoll/oauth2as/internal/token"
 	"github.com/lstoll/oauth2ext/claims"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
@@ -21,6 +22,9 @@ import (
 
 const (
 	claimGrantID = "grid"
+
+	tokenUsageAuthCode = "auth_code"
+	tokenUsageRefresh  = "refresh_token"
 )
 
 type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, error)
@@ -28,8 +32,22 @@ type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, er
 // TokenRequest encapsulates the information from the initial request to the token
 // endpoint. This is passed to the handler, to generate an appropriate response.
 type TokenRequest struct {
-	// Grant is the grant that was used to obtain the token.
-	Grant *StoredGrant
+	// GrantID is the ID of the grant that was used to obtain the token.
+	GrantID uuid.UUID
+	// UserID is the user ID that was granted access.
+	UserID string
+	// ClientID is the client ID that was used to obtain the token.
+	ClientID string
+	// GrantedScopes are the scopes that were granted.
+	GrantedScopes []string
+	// Metadata is the metadata that was associated with the grant.
+	Metadata map[string]string
+	// EncryptedMetadata is the decrypted metadata that was associated with the
+	// grant.
+	EncryptedMetadata map[string]string
+
+	// IsRefresh indicates if this is a refresh token request.
+	IsRefresh bool
 }
 
 // TokenResponse is returned by the token endpoint handler, indicating what it
@@ -78,6 +96,13 @@ type TokenResponse struct {
 	// RefreshTokenValidUntil indicates how long the returned refresh token should
 	// be valid for, if one is issued. If zero, the default will be used.
 	RefreshTokenValidUntil time.Time
+
+	// Metadata is the metadata that was associated with the grant. If nil, the
+	// existing metadata will be re-used.
+	Metadata map[string]string
+	// EncryptedMetadata is the encrypted metadata that was associated with the
+	// grant. If nil, the existing encrypted metadata will be re-used.
+	EncryptedMetadata map[string]string
 }
 
 // Token is used to handle the access token endpoint for code flow requests.
@@ -135,9 +160,13 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "code is required"}
 	}
 
-	codeHash := hashValue(treq.Code)
+	// Create token from user token to get the stored value
+	authToken, err := token.FromUserToken(treq.Code, tokenUsageAuthCode)
+	if err != nil {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
+	}
 
-	grant, err := s.config.Storage.GetGrantByAuthCode(ctx, codeHash)
+	grant, err := s.config.Storage.GetGrantByAuthCode(ctx, authToken.Stored())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get grant by auth code: %w", err)
 	}
@@ -157,7 +186,7 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 	if s.now().After(grant.ExpiresAt) {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "code expired"}
 	}
-	if *oldAuthCode != codeHash {
+	if subtle.ConstantTimeCompare(oldAuthCode, authToken.Stored()) == 0 {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
 	}
 
@@ -183,9 +212,34 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 		}
 	}
 
+	// Unpack encrypted metadata if present
+	var encryptedMetadata map[string]string
+	if grant.EncryptedMetadata != nil {
+		// Create token from the auth code to decrypt metadata
+		authToken, err := token.FromUserToken(treq.Code, tokenUsageAuthCode)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create token from auth code: %w", err)
+		}
+
+		decrypted, err := authToken.Decrypt(grant.EncryptedMetadata, grant.ID.String())
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt metadata: %w", err)
+		}
+
+		if err := json.Unmarshal(decrypted, &encryptedMetadata); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal decrypted metadata: %w", err)
+		}
+	}
+
 	// we have a validated request. Call out to the handler to get the details.
 	tr := &TokenRequest{
-		Grant: grant,
+		GrantID:           grant.ID,
+		UserID:            grant.UserID,
+		ClientID:          grant.ClientID,
+		GrantedScopes:     grant.GrantedScopes,
+		Metadata:          grant.Metadata,
+		EncryptedMetadata: encryptedMetadata,
+		IsRefresh:         false,
 	}
 
 	// TODO - this should be optional
@@ -206,9 +260,13 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "refresh token is required"}
 	}
 
-	refreshTokenHash := hashValue(treq.RefreshToken)
+	// Create token from user token to get the stored value
+	refreshToken, err := token.FromUserToken(treq.RefreshToken, tokenUsageRefresh)
+	if err != nil {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+	}
 
-	grant, err := s.config.Storage.GetGrantByRefreshToken(ctx, refreshTokenHash)
+	grant, err := s.config.Storage.GetGrantByRefreshToken(ctx, refreshToken.Stored())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get grant by auth code: %w", err)
 	}
@@ -230,14 +288,40 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 	if s.now().After(grant.ExpiresAt) {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
 	}
-	if refreshTokenHash != *oldRefreshToken {
+	if subtle.ConstantTimeCompare(refreshToken.Stored(), oldRefreshToken) == 0 {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+	}
+
+	// Unpack encrypted metadata if present
+	var encryptedMetadata map[string]string
+	if grant.EncryptedMetadata != nil {
+		// Create token from the old refresh token to decrypt metadata
+		// We need to use the stored refresh token hash to reconstruct the token
+		oldRefreshToken, err := token.FromUserToken(treq.RefreshToken, tokenUsageRefresh)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create token from refresh token: %w", err)
+		}
+
+		decrypted, err := oldRefreshToken.Decrypt(grant.EncryptedMetadata, grant.ID.String())
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt metadata: %w", err)
+		}
+
+		if err := json.Unmarshal(decrypted, &encryptedMetadata); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal decrypted metadata: %w", err)
+		}
 	}
 
 	// tresp, err := o.handler.RefreshToken(tr)
 	// TODO - need to re-do this too.
 	tr := &TokenRequest{
-		Grant: grant,
+		GrantID:           grant.ID,
+		UserID:            grant.UserID,
+		ClientID:          grant.ClientID,
+		GrantedScopes:     grant.GrantedScopes,
+		Metadata:          grant.Metadata,
+		EncryptedMetadata: encryptedMetadata,
+		IsRefresh:         true,
 	}
 	tresp, err := s.config.TokenHandler(ctx, tr)
 	if err != nil {
@@ -268,8 +352,48 @@ func (s *Server) buildTokenResponse(ctx context.Context, grant *StoredGrant, tre
 	}()
 
 	if slices.Contains(grant.GrantedScopes, oidc.ScopeOfflineAccess) {
-		refreshTok = rand.Text()
-		grant.RefreshToken = ptr(hashValue(refreshTok))
+		newToken := token.New(tokenUsageRefresh)
+		refreshTok = newToken.User()
+		grant.RefreshToken = newToken.Stored()
+		saveGrant = true
+	}
+
+	// Update metadata if provided
+	if tresp.Metadata != nil {
+		grant.Metadata = tresp.Metadata
+		saveGrant = true
+	}
+
+	// Update encrypted metadata if provided
+	if tresp.EncryptedMetadata != nil {
+		// Create a new token for encrypting the metadata
+		// For refresh tokens, we need to use the new refresh token
+		var encryptToken token.Token
+		var err error
+		if refreshTok != "" {
+			// We have a new refresh token, use it to encrypt
+			encryptToken, err = token.FromUserToken(refreshTok, tokenUsageRefresh)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create token from refresh token: %w", err)
+			}
+		} else {
+			// No refresh token, create a new one for encryption
+			encryptToken = token.New(tokenUsageRefresh)
+		}
+
+		// Marshal the encrypted metadata
+		emdjson, err := json.Marshal(tresp.EncryptedMetadata)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal encrypted metadata: %w", err)
+		}
+
+		// Encrypt the metadata
+		encryptedMetadata, err := encryptToken.Encrypt(string(emdjson), grant.ID.String())
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt metadata: %w", err)
+		}
+
+		grant.EncryptedMetadata = encryptedMetadata
 		saveGrant = true
 	}
 
@@ -365,16 +489,6 @@ func (s *Server) buildTokenResponse(ctx context.Context, grant *StoredGrant, tre
 			"id_token": string(sidt),
 		},
 	}, nil
-}
-
-func hashValue(v string) string {
-	h := sha256.New()
-	h.Write([]byte(v))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-func ptr[T any](v T) *T {
-	return &v
 }
 
 func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {

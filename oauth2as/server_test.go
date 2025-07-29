@@ -2,7 +2,6 @@ package oauth2as
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lstoll/oauth2as/internal/oauth2"
+	"github.com/lstoll/oauth2as/internal/token"
 	"github.com/lstoll/oauth2ext/claims"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
@@ -523,8 +523,8 @@ func testKeysets() AlgKeysets {
 }
 
 func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
-	refreshToken = rand.Text()
-	refreshTokenHash := hashValue(refreshToken)
+	newToken := token.New(tokenUsageRefresh)
+	refreshToken = newToken.User()
 
 	// Create a StoredGrant with the refresh token
 	grant := &StoredGrant{
@@ -532,7 +532,7 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		UserID:        "testsub",
 		ClientID:      "client-id",
 		GrantedScopes: []string{oidc.ScopeOfflineAccess},
-		RefreshToken:  &refreshTokenHash,
+		RefreshToken:  newToken.Stored(),
 		GrantedAt:     time.Now(),
 		ExpiresAt:     time.Now().Add(60 * time.Minute),
 	}
@@ -545,8 +545,8 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 }
 
 func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
-	code := rand.Text()
-	codeHash := hashValue(code)
+	newToken := token.New(tokenUsageAuthCode)
+	code := newToken.User()
 
 	// Create a StoredGrant with the auth code
 	grant := &StoredGrant{
@@ -554,7 +554,7 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		UserID:        "testsub",
 		ClientID:      "client-id",
 		GrantedScopes: []string{oidc.ScopeOfflineAccess},
-		AuthCode:      &codeHash,
+		AuthCode:      newToken.Stored(),
 		GrantedAt:     time.Now(),
 		ExpiresAt:     time.Now().Add(1 * time.Minute),
 	}
