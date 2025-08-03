@@ -80,11 +80,11 @@ func TestE2E(t *testing.T) {
 					Secrets:      []string{clientSecret},
 					RedirectURLs: []string{cliSvr.URL},
 					Public:       tc.WithPKCE,
-					Opts:         []oauth2as.ClientOpt{oauth2as.ClientOptSkipPKCE},
+					Opts:         []oauth2as.ClientOpt{oauth2as.ClientOptSkipPKCE()},
 				},
 			}
 			if !tc.WithPKCE {
-				clientSource[0].Opts = []oauth2as.ClientOpt{oauth2as.ClientOptSkipPKCE}
+				clientSource[0].Opts = []oauth2as.ClientOpt{oauth2as.ClientOptSkipPKCE()}
 			}
 
 			s := oauth2as.NewMemStorage()

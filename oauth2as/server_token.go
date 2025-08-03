@@ -25,6 +25,8 @@ const (
 
 	tokenUsageAuthCode = "auth_code"
 	tokenUsageRefresh  = "refresh_token"
+
+	defaultSigningAlg SigningAlg = SigningAlgRS256
 )
 
 type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, error)
@@ -195,14 +197,24 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 		return nil, err
 	}
 
-	// If the client is public and we require pkce, reject it if there's no
-	// verifier.
-	clientOpts, err := s.config.Clients.ClientOpts(ctx, grant.ClientID)
+	optsForClient, err := s.config.Clients.ClientOpts(ctx, grant.ClientID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch client opts: %w", err)
 	}
-	if !slices.Contains(clientOpts, ClientOptSkipPKCE) && treq.CodeVerifier == "" {
+	copts := &clientOpts{}
+	for _, opt := range optsForClient {
+		opt(copts)
+	}
+
+	// If the client is public and we require pkce, reject it if there's no
+	// verifier.
+	if !copts.skipPKCE && treq.CodeVerifier == "" {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
+	}
+
+	alg := defaultSigningAlg
+	if copts.signingAlg != "" {
+		alg = copts.signingAlg
 	}
 
 	// Verify the code verifier against the session data
@@ -252,7 +264,7 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	return s.buildTokenResponse(ctx, grant, tresp)
+	return s.buildTokenResponse(ctx, alg, grant, tresp)
 }
 
 func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
@@ -282,6 +294,20 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 
 	if err := s.config.Storage.UpdateGrant(ctx, grant); err != nil {
 		return nil, fmt.Errorf("failed to update grant: %w", err)
+	}
+
+	optsForClient, err := s.config.Clients.ClientOpts(ctx, grant.ClientID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch client opts: %w", err)
+	}
+	copts := &clientOpts{}
+	for _, opt := range optsForClient {
+		opt(copts)
+	}
+
+	alg := defaultSigningAlg
+	if copts.signingAlg != "" {
+		alg = copts.signingAlg
 	}
 
 	// storage should do this, but double check.
@@ -332,13 +358,13 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	return s.buildTokenResponse(ctx, grant, tresp)
+	return s.buildTokenResponse(ctx, alg, grant, tresp)
 }
 
 // buildTokenResponse creates the oauth token response for code and refresh.
 // refreshSession can be nil, if it is and we should issue a refresh token, a
 // new refresh session will be created.
-func (s *Server) buildTokenResponse(ctx context.Context, grant *StoredGrant, tresp *TokenResponse) (_ *oauth2.TokenResponse, retErr error) {
+func (s *Server) buildTokenResponse(ctx context.Context, alg SigningAlg, grant *StoredGrant, tresp *TokenResponse) (_ *oauth2.TokenResponse, retErr error) {
 	var (
 		refreshTok string
 		saveGrant  bool
@@ -460,7 +486,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, grant *StoredGrant, tre
 		return nil, fmt.Errorf("creating access token jwt: %w", err)
 	}
 
-	h, err := s.config.Keyset.HandleFor(SigningAlgRS256)
+	h, err := s.config.Keyset.HandleFor(alg)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting handle", Cause: err}
 	}

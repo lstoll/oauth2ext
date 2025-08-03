@@ -2,6 +2,7 @@ package oauth2as
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +41,10 @@ func TestCodeToken(t *testing.T) {
 		otherClientID       = "other-client"
 		otherClientSecret   = "other-secret"
 		otherClientRedirect = "https://other"
+
+		es256ClientID       = "es256-client"
+		es256ClientSecret   = "es256-secret"
+		es256ClientRedirect = "https://es256"
 	)
 
 	newOIDC := func() *Server {
@@ -49,7 +55,7 @@ func TestCodeToken(t *testing.T) {
 				Issuer: issuer,
 
 				Storage: s,
-				Keyset:  testKeysets(),
+				Keyset:  newMultiAlgKeysets(),
 
 				TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
@@ -60,13 +66,19 @@ func TestCodeToken(t *testing.T) {
 						ID:           clientID,
 						Secrets:      []string{clientSecret},
 						RedirectURLs: []string{redirectURI},
-						Opts:         []ClientOpt{ClientOptSkipPKCE},
+						Opts:         []ClientOpt{ClientOptSkipPKCE()},
 					},
 					{
 						ID:           otherClientID,
 						Secrets:      []string{otherClientSecret},
 						RedirectURLs: []string{otherClientRedirect},
-						Opts:         []ClientOpt{ClientOptSkipPKCE},
+						Opts:         []ClientOpt{ClientOptSkipPKCE()},
+					},
+					{
+						ID:           es256ClientID,
+						Secrets:      []string{es256ClientSecret},
+						RedirectURLs: []string{es256ClientRedirect},
+						Opts:         []ClientOpt{ClientOptSkipPKCE(), ClientOptSigningAlg(SigningAlgES256)},
 					},
 				},
 			},
@@ -193,6 +205,69 @@ func TestCodeToken(t *testing.T) {
 			t.Errorf("want token exp within 2s of %f, got: %f", 5*time.Minute.Seconds(), tresp.ExpiresIn.Seconds())
 		}
 	})
+
+	t.Run("Should issue different tokens for different algorithms", func(t *testing.T) {
+		o := newOIDC()
+		newToken := token.New(tokenUsageAuthCode)
+
+		// Create a StoredGrant with the auth code
+		grant := &StoredGrant{
+			ID:            uuid.New(),
+			UserID:        "testsub",
+			ClientID:      es256ClientID,
+			GrantedScopes: []string{oidc.ScopeOfflineAccess},
+			AuthCode:      newToken.Stored(),
+			GrantedAt:     time.Now(),
+			ExpiresAt:     time.Now().Add(1 * time.Minute),
+		}
+
+		if err := o.config.Storage.CreateGrant(context.Background(), grant); err != nil {
+			t.Fatal(err)
+		}
+
+		treq := &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeAuthorizationCode,
+			Code:         newToken.User(),
+			RedirectURI:  redirectURI,
+			ClientID:     es256ClientID,
+			ClientSecret: es256ClientSecret,
+		}
+
+		tresp, err := o.codeToken(context.TODO(), treq)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		idt, ok := tresp.ExtraParams["id_token"].(string)
+		if !ok {
+			t.Fatalf("id_token not found in extra params")
+		}
+
+		parts := strings.Split(idt, ".")
+		if len(parts) != 3 {
+			t.Fatalf("id_token should have 3 parts, got: %v", parts)
+		}
+
+		header, err := base64.RawURLEncoding.DecodeString(parts[0])
+		if err != nil {
+			t.Fatalf("failed to decode id_token header: %v", err)
+		}
+
+		var headerMap map[string]interface{}
+		if err := json.Unmarshal(header, &headerMap); err != nil {
+			t.Fatalf("failed to unmarshal id_token header: %v", err)
+		}
+
+		alg, ok := headerMap["alg"].(string)
+		if !ok {
+			t.Fatalf("alg not found in id_token header")
+		}
+
+		if alg != "ES256" {
+			t.Fatalf("want alg to be ES256, got: %s", alg)
+		}
+	})
+
 }
 
 func TestRefreshToken(t *testing.T) {
@@ -227,13 +302,13 @@ func TestRefreshToken(t *testing.T) {
 						ID:           clientID,
 						Secrets:      []string{clientSecret},
 						RedirectURLs: []string{redirectURI},
-						Opts:         []ClientOpt{ClientOptSkipPKCE},
+						Opts:         []ClientOpt{ClientOptSkipPKCE()},
 					},
 					{
 						ID:           otherClientID,
 						Secrets:      []string{otherClientSecret},
 						RedirectURLs: []string{otherClientRedirect},
-						Opts:         []ClientOpt{ClientOptSkipPKCE},
+						Opts:         []ClientOpt{ClientOptSkipPKCE()},
 					},
 				},
 
@@ -504,6 +579,7 @@ func TestUserinfo(t *testing.T) {
 
 var (
 	th   *keyset.Handle
+	thES *keyset.Handle
 	thMu sync.Mutex
 )
 
@@ -604,4 +680,49 @@ func (c staticClientSource) ClientOpts(ctx context.Context, clientID string) ([]
 		}
 	}
 	return nil, fmt.Errorf("client not found")
+}
+
+type multiAlgKeysets struct {
+	handles map[SigningAlg]*keyset.Handle
+}
+
+func (m *multiAlgKeysets) HandleFor(alg SigningAlg) (*keyset.Handle, error) {
+	h, ok := m.handles[alg]
+	if !ok {
+		return nil, fmt.Errorf("unsupported algorithm: %s", alg)
+	}
+	return h, nil
+}
+
+func (m *multiAlgKeysets) SupportedAlgorithms() []SigningAlg {
+	supported := make([]SigningAlg, 0, len(m.handles))
+	for alg := range m.handles {
+		supported = append(supported, alg)
+	}
+	return supported
+}
+
+func newMultiAlgKeysets() AlgKeysets {
+	thMu.Lock()
+	defer thMu.Unlock()
+	// we only make one, because it's slow
+	if th == nil {
+		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
+		if err != nil {
+			panic(err)
+		}
+		th = h
+	}
+	if thES == nil {
+		h, err := keyset.NewHandle(jwt.ES256Template())
+		if err != nil {
+			panic(err)
+		}
+		thES = h
+	}
+
+	return &multiAlgKeysets{handles: map[SigningAlg]*keyset.Handle{
+		SigningAlgRS256: th,
+		SigningAlgES256: thES,
+	}}
 }
