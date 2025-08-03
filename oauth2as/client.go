@@ -5,14 +5,27 @@ import (
 	"net/url"
 )
 
+type clientOpts struct {
+	skipPKCE   bool
+	signingAlg SigningAlg
+}
+
 // ClientOpt is a flag that can be set on a given client, to adjust various
 // behaviours.
-type ClientOpt string
+type ClientOpt func(opts *clientOpts)
 
-const (
-	// ClientOptSkipPKCE indicates that the client is not required to use PKCE
-	ClientOptSkipPKCE ClientOpt = "skip-pkce"
-)
+// ClientOptSkipPKCE indicates that the client is not required to use PKCE
+func ClientOptSkipPKCE() ClientOpt {
+	return func(opts *clientOpts) {
+		opts.skipPKCE = true
+	}
+}
+
+func ClientOptSigningAlg(alg SigningAlg) ClientOpt {
+	return func(opts *clientOpts) {
+		opts.signingAlg = alg
+	}
+}
 
 // ClientSource is used for validating client informantion for the general flow
 type ClientSource interface {
