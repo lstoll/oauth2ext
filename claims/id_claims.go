@@ -205,10 +205,14 @@ func (i *RawIDClaims) ToRawJWT() (*jwt.RawJWT, error) {
 	opts := &jwt.RawJWTOptions{
 		Issuer:    th.PtrOrNil(i.Issuer),
 		Subject:   th.PtrOrNil(i.Subject),
-		Audiences: i.Audience,
 		ExpiresAt: exp,
 		NotBefore: nbf,
 		IssuedAt:  iat,
+	}
+	if len(i.Audience) == 1 {
+		opts.Audience = th.Ptr(i.Audience[0])
+	} else if len(i.Audience) > 1 {
+		opts.Audiences = i.Audience
 	}
 	opts.CustomClaims = make(map[string]any)
 

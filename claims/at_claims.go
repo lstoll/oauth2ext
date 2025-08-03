@@ -202,10 +202,14 @@ func (a *RawAccessTokenClaims) ToRawJWT() (*jwt.RawJWT, error) {
 		TypeHeader: th.Ptr(JWTTYPAccessToken),
 		Issuer:     th.PtrOrNil(a.Issuer),
 		Subject:    th.PtrOrNil(a.Subject),
-		Audiences:  a.Audience,
 		ExpiresAt:  exp,
 		JWTID:      th.PtrOrNil(a.JWTID),
 		IssuedAt:   iat,
+	}
+	if len(a.Audience) == 1 {
+		opts.Audience = th.Ptr(a.Audience[0])
+	} else if len(a.Audience) > 1 {
+		opts.Audiences = a.Audience
 	}
 
 	// Use a temp map to not modify the CustomClaims map directly

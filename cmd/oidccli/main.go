@@ -32,11 +32,11 @@ type baseOpts struct {
 }
 
 type rawOpts struct {
-	UseIDToken bool
+	UseAccessToken bool
 }
 
 type kubeOpts struct {
-	UseIDToken bool
+	UseAccessToken bool
 }
 
 type infoOpts struct{}
@@ -59,7 +59,7 @@ func main() {
 
 	rawFlags := rawOpts{}
 	rawFs := flag.NewFlagSet("raw", flag.ExitOnError)
-	rawFs.BoolVar(&rawFlags.UseIDToken, "use-id-token", rawFlags.UseIDToken, "Use ID token, rather than access token")
+	rawFs.BoolVar(&rawFlags.UseAccessToken, "use-access-token", rawFlags.UseAccessToken, "Use access token, rather than id_token")
 	subcommands = append(subcommands, &subCommand{
 		Flags:       rawFs,
 		Description: "Output a raw JWT for this client",
@@ -67,7 +67,7 @@ func main() {
 
 	kubeFlags := kubeOpts{}
 	kubeFs := flag.NewFlagSet("kubernetes", flag.ExitOnError)
-	kubeFs.BoolVar(&kubeFlags.UseIDToken, "use-id-token", kubeFlags.UseIDToken, "Use ID token, rather than access token")
+	kubeFs.BoolVar(&kubeFlags.UseAccessToken, "use-access-token", kubeFlags.UseAccessToken, "Use access token, rather than id_token")
 	subcommands = append(subcommands, &subCommand{
 		Flags:       kubeFs,
 		Description: "Output credentials in a format that can be consumed by kubectl/client-go",
@@ -225,7 +225,7 @@ func raw(ts oauth2.TokenSource, opts rawOpts) error {
 		return fmt.Errorf("fetching token: %v", err)
 	}
 	raw := tok.AccessToken
-	if opts.UseIDToken {
+	if !opts.UseAccessToken {
 		idt, ok := oidc.GetIDToken(tok)
 		if !ok {
 			return fmt.Errorf("response has no id_token")
@@ -260,7 +260,7 @@ func kubernetes(ts oauth2.TokenSource, opts kubeOpts) error {
 		return fmt.Errorf("fetching token: %v", err)
 	}
 	var raw = tok.AccessToken
-	if opts.UseIDToken {
+	if !opts.UseAccessToken {
 		idt, ok := oidc.GetIDToken(tok)
 		if !ok {
 			return fmt.Errorf("response has no id_token")
