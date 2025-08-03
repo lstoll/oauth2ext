@@ -11,7 +11,7 @@ type StoredGrant struct {
 	// ID is the unique identifier for this grant.
 	ID uuid.UUID
 	// AuthCode is the authorization code for the initial token exchange.
-	AuthCode *string
+	AuthCode []byte
 	// UserID is the user ID that was granted access.
 	UserID string
 	// ClientID is the client ID that was granted access.
@@ -22,11 +22,17 @@ type StoredGrant struct {
 	// finalizing the code flow.
 	Request *AuthRequest
 	// RefreshToken is the refresh token for the grant.
-	RefreshToken *string
+	RefreshToken []byte
 	// GrantedAt is the time at which the grant was granted.
 	GrantedAt time.Time
 	// ExpiresAt is the time at which the grant will expire.
 	ExpiresAt time.Time
+
+	// Metadata is arbitrary metadata that can be stored with the grant.
+	Metadata map[string]string
+	// EncryptedMetadata stores the encrypted metadata associated with this
+	// grant.
+	EncryptedMetadata []byte
 
 	// TODO -acr, AMR etc.
 }
@@ -43,9 +49,9 @@ type Storage interface {
 	// a nil grant.
 	GetGrant(ctx context.Context, id uuid.UUID) (*StoredGrant, error)
 	// GetGrantByAuthCode retrieves a grant by authorization code. If no grant
-	// is found, it should return a nil grant.
-	GetGrantByAuthCode(ctx context.Context, authCode string) (*StoredGrant, error)
+	// is found, it should return a nil grant. The code is a raw byte slice.
+	GetGrantByAuthCode(ctx context.Context, authCode []byte) (*StoredGrant, error)
 	// GetGrantByRefreshToken retrieves a grant by refresh token. If no grant
-	// is found, it should return a nil grant.
-	GetGrantByRefreshToken(ctx context.Context, refreshToken string) (*StoredGrant, error)
+	// is found, it should return a nil grant. The token is a raw byte slice.
+	GetGrantByRefreshToken(ctx context.Context, refreshToken []byte) (*StoredGrant, error)
 }

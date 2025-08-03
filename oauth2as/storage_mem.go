@@ -2,6 +2,8 @@ package oauth2as
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/hex"
 	"sync"
 
 	"github.com/google/uuid"
@@ -37,13 +39,13 @@ func (m *MemStorage) CreateGrant(ctx context.Context, grant *StoredGrant) error 
 	m.grants[grant.ID] = grant
 
 	// Store auth code mapping if present
-	if grant.AuthCode != nil {
-		m.authCodes[*grant.AuthCode] = grant.ID
+	if len(grant.AuthCode) > 0 {
+		m.authCodes[hex.EncodeToString(grant.AuthCode)] = grant.ID
 	}
 
 	// Store refresh token mapping if present
-	if grant.RefreshToken != nil {
-		m.refreshTokens[*grant.RefreshToken] = grant.ID
+	if len(grant.RefreshToken) > 0 {
+		m.refreshTokens[hex.EncodeToString(grant.RefreshToken)] = grant.ID
 	}
 
 	return nil
@@ -61,26 +63,26 @@ func (m *MemStorage) UpdateGrant(ctx context.Context, grant *StoredGrant) error 
 	}
 
 	// Remove old auth code mapping if it changed
-	if existing.AuthCode != nil && (grant.AuthCode == nil || *existing.AuthCode != *grant.AuthCode) {
-		delete(m.authCodes, *existing.AuthCode)
+	if len(existing.AuthCode) > 0 && (len(grant.AuthCode) == 0 || subtle.ConstantTimeCompare(existing.AuthCode, grant.AuthCode) == 0) {
+		delete(m.authCodes, hex.EncodeToString(existing.AuthCode))
 	}
 
 	// Remove old refresh token mapping if it changed
-	if existing.RefreshToken != nil && (grant.RefreshToken == nil || *existing.RefreshToken != *grant.RefreshToken) {
-		delete(m.refreshTokens, *existing.RefreshToken)
+	if len(existing.RefreshToken) > 0 && (len(grant.RefreshToken) == 0 || subtle.ConstantTimeCompare(existing.RefreshToken, grant.RefreshToken) == 0) {
+		delete(m.refreshTokens, hex.EncodeToString(existing.RefreshToken))
 	}
 
 	// Update the grant
 	m.grants[grant.ID] = grant
 
 	// Add new auth code mapping if present
-	if grant.AuthCode != nil {
-		m.authCodes[*grant.AuthCode] = grant.ID
+	if len(grant.AuthCode) > 0 {
+		m.authCodes[hex.EncodeToString(grant.AuthCode)] = grant.ID
 	}
 
 	// Add new refresh token mapping if present
-	if grant.RefreshToken != nil {
-		m.refreshTokens[*grant.RefreshToken] = grant.ID
+	if len(grant.RefreshToken) > 0 {
+		m.refreshTokens[hex.EncodeToString(grant.RefreshToken)] = grant.ID
 	}
 
 	return nil
@@ -97,13 +99,13 @@ func (m *MemStorage) ExpireGrant(ctx context.Context, id uuid.UUID) error {
 	}
 
 	// Remove auth code mapping if present
-	if grant.AuthCode != nil {
-		delete(m.authCodes, *grant.AuthCode)
+	if len(grant.AuthCode) > 0 {
+		delete(m.authCodes, hex.EncodeToString(grant.AuthCode))
 	}
 
 	// Remove refresh token mapping if present
-	if grant.RefreshToken != nil {
-		delete(m.refreshTokens, *grant.RefreshToken)
+	if len(grant.RefreshToken) > 0 {
+		delete(m.refreshTokens, hex.EncodeToString(grant.RefreshToken))
 	}
 
 	// Remove the grant
@@ -127,11 +129,11 @@ func (m *MemStorage) GetGrant(ctx context.Context, id uuid.UUID) (*StoredGrant, 
 }
 
 // GetGrantByAuthCode retrieves a grant by its authorization code. Returns nil if not found.
-func (m *MemStorage) GetGrantByAuthCode(ctx context.Context, authCode string) (*StoredGrant, error) {
+func (m *MemStorage) GetGrantByAuthCode(ctx context.Context, authCode []byte) (*StoredGrant, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	grantID, exists := m.authCodes[authCode]
+	grantID, exists := m.authCodes[hex.EncodeToString(authCode)]
 	if !exists {
 		return nil, nil
 	}
@@ -146,11 +148,11 @@ func (m *MemStorage) GetGrantByAuthCode(ctx context.Context, authCode string) (*
 }
 
 // GetGrantByRefreshToken retrieves a grant by its refresh token. Returns nil if not found.
-func (m *MemStorage) GetGrantByRefreshToken(ctx context.Context, refreshToken string) (*StoredGrant, error) {
+func (m *MemStorage) GetGrantByRefreshToken(ctx context.Context, refreshToken []byte) (*StoredGrant, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	grantID, exists := m.refreshTokens[refreshToken]
+	grantID, exists := m.refreshTokens[hex.EncodeToString(refreshToken)]
 	if !exists {
 		return nil, nil
 	}
@@ -183,14 +185,14 @@ func copyStoredGrant(grant *StoredGrant) *StoredGrant {
 	copy(copied.GrantedScopes, grant.GrantedScopes)
 
 	// Copy pointers
-	if grant.AuthCode != nil {
-		authCode := *grant.AuthCode
-		copied.AuthCode = &authCode
+	if len(grant.AuthCode) > 0 {
+		copied.AuthCode = make([]byte, len(grant.AuthCode))
+		copy(copied.AuthCode, grant.AuthCode)
 	}
 
-	if grant.RefreshToken != nil {
-		refreshToken := *grant.RefreshToken
-		copied.RefreshToken = &refreshToken
+	if len(grant.RefreshToken) > 0 {
+		copied.RefreshToken = make([]byte, len(grant.RefreshToken))
+		copy(copied.RefreshToken, grant.RefreshToken)
 	}
 
 	// Copy AuthRequest if present

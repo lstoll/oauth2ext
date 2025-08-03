@@ -2,7 +2,7 @@ package oauth2as
 
 import (
 	"context"
-	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lstoll/oauth2as/internal/oauth2"
+	"github.com/lstoll/oauth2as/internal/token"
 )
 
 type AuthRequest struct {
@@ -109,6 +110,14 @@ type AuthGrant struct {
 	// UserID is the user ID that was granted access. This is used to form the subject
 	// claim, and is provided on subsequent actions.
 	UserID string
+	// Metadata is arbitraty metadata that can be stored with the grant. Can be
+	// used for auditing or tracking other information that is associated with
+	// the grant. This is not sensitive, and can be accessed at any time.
+	Metadata map[string]string
+	// EncryptedMetadata is the encrypted metadata that can be stored with the
+	// grant. This is only available to token callbacks. Can be used to store
+	// sensitive, grant-specific information like upstream auth tokens.
+	EncryptedMetadata map[string]string
 }
 
 func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI string, _ error) {
@@ -119,18 +128,31 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		return "", fmt.Errorf("auth request is required")
 	}
 
-	code := rand.Text()
-	codeHash := hashValue(code)
+	grantID := uuid.New()
+
+	authCode := token.New(tokenUsageAuthCode)
 
 	sg := &StoredGrant{
-		ID:            uuid.New(), // do we want v7? would that leak info?
+		ID:            grantID,
 		UserID:        grant.UserID,
 		ClientID:      grant.Request.ClientID,
 		GrantedScopes: grant.GrantedScopes,
-		AuthCode:      &codeHash,
+		AuthCode:      authCode.Stored(),
 		Request:       grant.Request,
 		GrantedAt:     s.now(),
 		ExpiresAt:     s.now().Add(s.config.CodeValidityTime),
+		Metadata:      grant.Metadata,
+	}
+	if grant.EncryptedMetadata != nil {
+		emdjson, err := json.Marshal(grant.EncryptedMetadata)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal metadata: %w", err)
+		}
+		encryptedMetadata, err := authCode.Encrypt(string(emdjson), grantID.String())
+		if err != nil {
+			return "", fmt.Errorf("failed to encrypt metadata: %w", err)
+		}
+		sg.EncryptedMetadata = encryptedMetadata
 	}
 
 	if err := s.config.Storage.CreateGrant(ctx, sg); err != nil {
@@ -166,7 +188,7 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 	codeResp := &oauth2.CodeAuthResponse{
 		RedirectURI: redir,
 		State:       grant.Request.State,
-		Code:        code,
+		Code:        authCode.User(),
 	}
 
 	return codeResp.ToRedirectURI().String(), nil
