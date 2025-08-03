@@ -1,19 +1,20 @@
-package e2e
+package oauth2as_test
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lstoll/oauth2as"
-	"github.com/lstoll/oauth2as/internal/staticclients"
 	"github.com/lstoll/oauth2ext/claims"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
@@ -73,16 +74,17 @@ func TestE2E(t *testing.T) {
 			}))
 			defer cliSvr.Close()
 
-			clientSource := &staticclients.Clients{
-				Clients: []staticclients.Client{
-					{
-						ID:           clientID,
-						Secrets:      []string{clientSecret},
-						RedirectURLs: []string{cliSvr.URL},
-						Public:       tc.WithPKCE,
-						Opts:         []oauth2as.ClientOpt{oauth2as.ClientOptSkipPKCE},
-					},
+			clientSource := staticClientSource{
+				{
+					ID:           clientID,
+					Secrets:      []string{clientSecret},
+					RedirectURLs: []string{cliSvr.URL},
+					Public:       tc.WithPKCE,
+					Opts:         []oauth2as.ClientOpt{oauth2as.ClientOptSkipPKCE},
 				},
+			}
+			if !tc.WithPKCE {
+				clientSource[0].Opts = []oauth2as.ClientOpt{oauth2as.ClientOptSkipPKCE}
 			}
 
 			s := oauth2as.NewMemStorage()
@@ -343,4 +345,44 @@ func testKeysets() oauth2as.AlgKeysets {
 	}
 
 	return oauth2as.NewSingleAlgKeysets(oauth2as.SigningAlgRS256, th)
+}
+
+type staticClient struct {
+	ID           string
+	Secrets      []string
+	RedirectURLs []string
+	Public       bool
+	Opts         []oauth2as.ClientOpt
+}
+
+type staticClientSource []staticClient
+
+func (c staticClientSource) IsValidClientID(ctx context.Context, clientID string) (ok bool, err error) {
+	return slices.ContainsFunc(c, func(sc staticClient) bool {
+		return sc.ID == clientID
+	}), nil
+}
+
+func (c staticClientSource) ValidateClientSecret(ctx context.Context, clientID, clientSecret string) (ok bool, err error) {
+	return slices.ContainsFunc(c, func(sc staticClient) bool {
+		return sc.ID == clientID && slices.Contains(sc.Secrets, clientSecret)
+	}), nil
+}
+
+func (c staticClientSource) RedirectURIs(ctx context.Context, clientID string) ([]string, error) {
+	for _, sc := range c {
+		if sc.ID == clientID {
+			return sc.RedirectURLs, nil
+		}
+	}
+	return nil, fmt.Errorf("client not found")
+}
+
+func (c staticClientSource) ClientOpts(ctx context.Context, clientID string) ([]oauth2as.ClientOpt, error) {
+	for _, sc := range c {
+		if sc.ID == clientID {
+			return sc.Opts, nil
+		}
+	}
+	return nil, fmt.Errorf("client not found")
 }
