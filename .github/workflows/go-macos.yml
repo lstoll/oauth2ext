@@ -41,6 +41,7 @@ jobs:
         go test ./...
       env:
         CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
+        TEST_KEYCHAIN: 1
 
     # The goal here is to test against the keychain. We expect the same binary
     # to be able to read existing data in repeated invocations, and a new binary
