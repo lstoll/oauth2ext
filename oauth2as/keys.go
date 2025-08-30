@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/lstoll/oauth2ext/jwt"
+	tinkjwt "github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 	tinkpb "github.com/tink-crypto/tink-go/v2/proto/tink_go_proto"
 )
@@ -30,9 +31,9 @@ const (
 func (s SigningAlg) Template() *tinkpb.KeyTemplate {
 	switch s {
 	case SigningAlgRS256:
-		return jwt.RS256_2048_F4_Key_Template()
+		return tinkjwt.RS256_2048_F4_Key_Template()
 	case SigningAlgES256:
-		return jwt.ES256Template()
+		return tinkjwt.ES256Template()
 	default:
 		panic(fmt.Sprintf("invalid signing alg %s", s))
 	}
@@ -68,11 +69,30 @@ func NewSingleAlgKeysets(alg SigningAlg, h *keyset.Handle) AlgKeysets {
 //
 // TODO - would be nice to find a better way, or have the discovery handler just
 // take a JWKS as well.
+
+var _ jwt.PublicKeyset = (*pubHandle)(nil)
+
 type pubHandle struct {
 	h AlgKeysets
 }
 
-func (p *pubHandle) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
+func (p *pubHandle) GetKeysByKID(ctx context.Context, kid string) ([]jwt.PublicKey, error) {
+	sks, err := p.buildStaticKeyset(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return sks.GetKeysByKID(ctx, kid)
+}
+
+func (p *pubHandle) GetKeys(ctx context.Context) ([]jwt.PublicKey, error) {
+	sks, err := p.buildStaticKeyset(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return sks.GetKeys(ctx)
+}
+
+func (p *pubHandle) buildStaticKeyset(_ context.Context) (*jwt.StaticKeyset, error) {
 	mergejwksm := map[string]any{
 		"keys": []any{},
 	}
@@ -88,7 +108,7 @@ func (p *pubHandle) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
 			return nil, fmt.Errorf("getting public handle for %s: %w", alg, err)
 		}
 
-		jwks, err := jwt.JWKSetFromPublicKeysetHandle(pub)
+		jwks, err := tinkjwt.JWKSetFromPublicKeysetHandle(pub)
 		if err != nil {
 			return nil, fmt.Errorf("getting JWKS for %s: %w", alg, err)
 		}
@@ -108,10 +128,5 @@ func (p *pubHandle) PublicHandle(ctx context.Context) (*keyset.Handle, error) {
 		return nil, fmt.Errorf("marshalling merged JWKS: %w", err)
 	}
 
-	mergeh, err := jwt.JWKSetToPublicKeysetHandle(mergejwks)
-	if err != nil {
-		return nil, fmt.Errorf("converting merged JWKS to public handle: %w", err)
-	}
-
-	return mergeh, nil
+	return jwt.NewStaticKeysetFromJWKS(mergejwks)
 }

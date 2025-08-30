@@ -18,11 +18,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lstoll/oauth2ext/claims"
+	"github.com/lstoll/oauth2ext/internal/th"
+	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/token"
 	"github.com/lstoll/oauth2ext/oidc"
-	"github.com/tink-crypto/tink-go/v2/jwt"
+	tinkjwt "github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
@@ -446,17 +447,22 @@ func TestUserinfo(t *testing.T) {
 		return nil
 	}
 
-	signAccessToken := func(cl claims.RawAccessTokenClaims) string {
+	signAccessToken := func(cl jwt.AccessTokenClaims) string {
 		h, err := testKeysets().HandleFor(SigningAlgRS256)
 		if err != nil {
 			t.Fatal(err)
 		}
-		signer, err := jwt.NewSigner(h)
+		signer, err := tinkjwt.NewSigner(h)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		rawATJWT, err := cl.ToRawJWT()
+		clJSON, err := json.Marshal(cl)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		rawATJWT, err := tinkjwt.NewRawJWTFromJSON(th.Ptr(jwt.JWTTYPAccessToken), clJSON)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -485,10 +491,10 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Simple output, valid session",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(claims.RawAccessTokenClaims{
+				return signAccessToken(jwt.AccessTokenClaims{
 					Issuer:  issuer,
 					Subject: "sub",
-					Expiry:  claims.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
+					Expiry:  jwt.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,
@@ -499,10 +505,10 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Token for other issuer",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(claims.RawAccessTokenClaims{
+				return signAccessToken(jwt.AccessTokenClaims{
 					Issuer:  "http://other",
 					Subject: "sub",
-					Expiry:  claims.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
+					Expiry:  jwt.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,
@@ -511,10 +517,10 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Expired access token",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(claims.RawAccessTokenClaims{
+				return signAccessToken(jwt.AccessTokenClaims{
 					Issuer:  issuer,
 					Subject: "sub",
-					Expiry:  claims.UnixTime(time.Now().Add(-1 * time.Minute).Unix()),
+					Expiry:  jwt.UnixTime(time.Now().Add(-1 * time.Minute).Unix()),
 				})
 			},
 			Handler: echoHandler,
@@ -538,10 +544,10 @@ func TestUserinfo(t *testing.T) {
 				Keyset:  testKeysets(),
 				UserinfoHandler: func(_ context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error) {
 					return &UserinfoResponse{
-						Identity: &claims.RawIDClaims{
+						Identity: &jwt.IDClaims{
 							Issuer:  issuer,
 							Subject: uireq.Subject,
-							Expiry:  claims.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
+							Expiry:  jwt.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
 						},
 					}, nil
 				},
@@ -578,24 +584,24 @@ func TestUserinfo(t *testing.T) {
 }
 
 var (
-	th   *keyset.Handle
-	thES *keyset.Handle
-	thMu sync.Mutex
+	thandle *keyset.Handle
+	thES    *keyset.Handle
+	thMu    sync.Mutex
 )
 
 func testKeysets() AlgKeysets {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
-	if th == nil {
-		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
+	if thandle == nil {
+		h, err := keyset.NewHandle(tinkjwt.RS256_2048_F4_Key_Template())
 		if err != nil {
 			panic(err)
 		}
-		th = h
+		thandle = h
 	}
 
-	return NewSingleAlgKeysets(SigningAlgRS256, th)
+	return NewSingleAlgKeysets(SigningAlgRS256, thandle)
 }
 
 func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
@@ -706,15 +712,15 @@ func newMultiAlgKeysets() AlgKeysets {
 	thMu.Lock()
 	defer thMu.Unlock()
 	// we only make one, because it's slow
-	if th == nil {
-		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
+	if thandle == nil {
+		h, err := keyset.NewHandle(tinkjwt.RS256_2048_F4_Key_Template())
 		if err != nil {
 			panic(err)
 		}
-		th = h
+		thandle = h
 	}
 	if thES == nil {
-		h, err := keyset.NewHandle(jwt.ES256Template())
+		h, err := keyset.NewHandle(tinkjwt.ES256Template())
 		if err != nil {
 			panic(err)
 		}
@@ -722,7 +728,7 @@ func newMultiAlgKeysets() AlgKeysets {
 	}
 
 	return &multiAlgKeysets{handles: map[SigningAlg]*keyset.Handle{
-		SigningAlgRS256: th,
+		SigningAlgRS256: thandle,
 		SigningAlgES256: thES,
 	}}
 }

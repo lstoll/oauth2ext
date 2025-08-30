@@ -1,10 +1,11 @@
 package oidc
 
 import (
-	"context"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/lstoll/oauth2ext/internal"
 	"golang.org/x/oauth2"
 )
 
@@ -20,14 +21,17 @@ import (
 // Deprecated: Services should expect oauth2 access tokens, and use the userinfo
 // endpoint if profile information is required. This will not be removed, but is
 // marked as deprecated to require explcit opt-in for linting etc.
-func NewIDTokenSource(ts oauth2.TokenSource, provider *Provider) oauth2.TokenSource {
-	return &idTokenSource{wrapped: ts, provider: provider}
+func NewIDTokenSource(ts oauth2.TokenSource) oauth2.TokenSource {
+	return &idTokenSource{wrapped: ts}
 }
 
 type idTokenSource struct {
-	mu       sync.Mutex
-	wrapped  oauth2.TokenSource
-	provider *Provider
+	mu      sync.Mutex
+	wrapped oauth2.TokenSource
+}
+
+type expClaims struct {
+	Expiry int `json:"exp,omitempty"`
 }
 
 func (i *idTokenSource) Token() (*oauth2.Token, error) {
@@ -45,17 +49,12 @@ func (i *idTokenSource) Token() (*oauth2.Token, error) {
 	newToken := new(oauth2.Token)
 	*newToken = *t
 	newToken.AccessToken = idt
-	if i.provider != nil {
-		verified, err := i.provider.VerifyIDToken(context.TODO(), t, IDTokenValidationOpts{IgnoreAudience: true})
-		if err != nil {
-			return nil, fmt.Errorf("verifying id token: %w", err)
-		}
-		exp, err := verified.ExpiresAt()
-		if err != nil {
-			return nil, fmt.Errorf("getting expiry from token: %w", err)
-		}
-		newToken.ExpiresIn = 0
-		newToken.Expiry = exp
+
+	var expClaims expClaims
+	if err := internal.InsecureExtractJWTPayload(idt, &expClaims); err != nil {
+		return nil, fmt.Errorf("extracting id token claims: %w", err)
 	}
+	newToken.Expiry = time.Unix(int64(expClaims.Expiry), 0)
+	newToken.ExpiresIn = int64(time.Until(newToken.Expiry).Seconds())
 	return newToken, nil
 }

@@ -1,8 +1,6 @@
 package oidcmiddleware
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lstoll/oauth2ext/claims"
+	"github.com/lstoll/oauth2ext/internal"
+	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oidc"
 	"golang.org/x/oauth2"
 )
@@ -118,11 +117,15 @@ func (c *Cookiestore) SaveOIDCSession(w http.ResponseWriter, r *http.Request, d 
 
 	// Save or delete the main token cookie
 	if d.Token != nil {
-		tok, exp, err := peekIDT(d.Token.Token)
-		if err != nil {
-			return fmt.Errorf("processing id_token: %w", err)
+		var cl jwt.IDClaims
+		idt, ok := oidc.GetIDToken(d.Token.Token)
+		if !ok {
+			return fmt.Errorf("token contains no ID token")
 		}
-		if err := setCookieIfNotSet(w, r, c.newTokenCookie(tok, exp)); err != nil {
+		if err := internal.InsecureExtractJWTPayload(idt, &cl); err != nil {
+			return fmt.Errorf("extracting id token claims: %w", err)
+		}
+		if err := setCookieIfNotSet(w, r, c.newTokenCookie(idt, cl.Expiry.Time())); err != nil {
 			return fmt.Errorf("saving token cookie: %w", err)
 		}
 	} else {
@@ -254,34 +257,4 @@ func setCookieIfNotSet(w http.ResponseWriter, r *http.Request, c *http.Cookie) e
 		http.SetCookie(w, c)
 	}
 	return nil
-}
-
-// peekIDT is a helper to extract expiration from a token. The token SHOULD NOT
-// BE TRUSTED, AS IT HAS NOT BEEN VERIFIED. used calculating cookie expiration.
-func peekIDT(t *oauth2.Token) (tok string, exp time.Time, _ error) {
-	idt, ok := t.Extra("id_token").(string)
-	if !ok {
-		return "", time.Time{}, errors.New("token contains no ID token")
-	}
-
-	if strings.Count(idt, ".") != 2 {
-		return "", time.Time{}, fmt.Errorf("id_token not a JWT")
-	}
-
-	parts := strings.SplitN(idt, ".", 3)
-	if len(parts) != 3 {
-		return "", time.Time{}, fmt.Errorf("id_token not a JWT")
-	}
-
-	cb, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("id_token payload decode failed: %w", err)
-	}
-
-	var cl *claims.RawIDClaims
-	if err := json.Unmarshal(cb, &cl); err != nil {
-		return "", time.Time{}, fmt.Errorf("unmarshaling claims failed: %w", err)
-	}
-
-	return idt, cl.Expiry.Time(), nil
 }

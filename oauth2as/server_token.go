@@ -13,11 +13,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lstoll/oauth2ext/claims"
+	"github.com/lstoll/oauth2ext/internal/th"
+	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/token"
 	"github.com/lstoll/oauth2ext/oidc"
-	"github.com/tink-crypto/tink-go/v2/jwt"
+	tinkjwt "github.com/tink-crypto/tink-go/v2/jwt"
 )
 
 const (
@@ -76,7 +77,7 @@ type TokenResponse struct {
 	// - iat
 	// - auth_time
 	// - nonce
-	IDClaims *claims.RawIDClaims
+	IDClaims *jwt.IDClaims
 	// AccessTokenClaims is the claims that will be included in the access token.
 	// The following claims will always be overridden:
 	// - sub
@@ -86,7 +87,7 @@ type TokenResponse struct {
 	// - iat
 	// - jti
 	// and the token header
-	AccessTokenClaims *claims.RawAccessTokenClaims
+	AccessTokenClaims *jwt.AccessTokenClaims
 
 	// OverrideIDSubject can be used to override the subject of the ID token.
 	// If not set, the default will be used.
@@ -436,15 +437,15 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg SigningAlg, grant *
 
 	idc := tresp.IDClaims
 	if idc == nil {
-		idc = &claims.RawIDClaims{}
+		idc = &jwt.IDClaims{}
 	}
 
 	idc.Issuer = s.config.Issuer
 	idc.Subject = grant.UserID
-	idc.Expiry = claims.UnixTime(idExp.Unix())
-	idc.Audience = claims.StrOrSlice{grant.ClientID}
-	idc.IssuedAt = claims.UnixTime(s.now().Unix())
-	idc.AuthTime = claims.UnixTime(grant.GrantedAt.Unix())
+	idc.Expiry = jwt.UnixTime(idExp.Unix())
+	idc.Audience = jwt.StrOrSlice{grant.ClientID}
+	idc.IssuedAt = jwt.UnixTime(s.now().Unix())
+	idc.AuthTime = jwt.UnixTime(grant.GrantedAt.Unix())
 	// TODO nonce
 	// idc.Nonce = grant.Request.Nonce
 
@@ -454,34 +455,46 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg SigningAlg, grant *
 
 	// Apps should fill the profile info as needed.
 
-	idjwt, err := idc.ToRawJWT()
+	idjson, err := json.Marshal(idc)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling id token claims: %w", err)
+	}
+
+	idjwt, err := tinkjwt.NewRawJWTFromJSON(nil, idjson)
 	if err != nil {
 		return nil, fmt.Errorf("creating identity token jwt: %w", err)
 	}
 
 	ac := tresp.AccessTokenClaims
 	if ac == nil {
-		ac = &claims.RawAccessTokenClaims{}
+		ac = &jwt.AccessTokenClaims{}
 	}
-	if ac.Extra == nil {
-		ac.Extra = map[string]any{}
-	}
+	// if ac.Extra == nil {
+	// 	ac.Extra = map[string]any{}
+	// }
 
 	ac.Issuer = s.config.Issuer
 	ac.Subject = grant.UserID
 	ac.ClientID = grant.ClientID
-	ac.Expiry = claims.UnixTime(atExp.Unix())
-	ac.Audience = claims.StrOrSlice{s.config.Issuer}
-	ac.IssuedAt = claims.UnixTime(s.now().Unix())
-	ac.AuthTime = claims.UnixTime(grant.GrantedAt.Unix())
+	ac.Expiry = jwt.UnixTime(atExp.Unix())
+	ac.Audience = jwt.StrOrSlice{s.config.Issuer}
+	ac.IssuedAt = jwt.UnixTime(s.now().Unix())
+	ac.AuthTime = jwt.UnixTime(grant.GrantedAt.Unix())
 	ac.JWTID = uuid.Must(uuid.NewRandom()).String()
-	ac.Extra[claimGrantID] = grant.ID.String()
+	// TODO(lstoll) - add this to the claims
+	// ac.Extra[claimGrantID] = grant.ID.String()
+	_ = claimGrantID
 
 	if tresp.OverrideAccessTokenSubject != "" {
 		ac.Subject = tresp.OverrideAccessTokenSubject
 	}
 
-	acjwt, err := ac.ToRawJWT()
+	acJSON, err := json.Marshal(ac)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling access token claims: %w", err)
+	}
+
+	acjwt, err := tinkjwt.NewRawJWTFromJSON(th.Ptr(jwt.JWTTYPAccessToken), acJSON)
 	if err != nil {
 		return nil, fmt.Errorf("creating access token jwt: %w", err)
 	}
@@ -491,7 +504,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg SigningAlg, grant *
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting handle", Cause: err}
 	}
 
-	signer, err := jwt.NewSigner(h)
+	signer, err := tinkjwt.NewSigner(h)
 	if err != nil {
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating signer from handle", Cause: err}
 	}

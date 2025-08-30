@@ -38,7 +38,7 @@ func main() {
 
 	flag.Parse()
 
-	provider, err := oidc.DiscoverProvider(ctx, cfg.Issuer, nil)
+	provider, err := oidc.DiscoverProvider(ctx, cfg.Issuer)
 	if err != nil {
 		log.Fatalf("discovering issuer: %v", err)
 	}

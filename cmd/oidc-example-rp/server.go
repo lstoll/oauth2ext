@@ -132,29 +132,21 @@ func (s *server) callback(w http.ResponseWriter, req *http.Request) {
 
 	idt, hasIDToken := oidc.GetIDToken(token)
 	if hasIDToken {
-		jwt, err := s.provider.VerifyIDToken(req.Context(), token, oidc.IDTokenValidationOpts{
-			Audience: string(s.oa2Cfg.ClientID),
-		})
+		idClaims, err := s.provider.IDTokenVerifier(s.oa2Cfg.ClientID).Verify(req.Context(), token)
 		if err != nil {
 			slog.ErrorContext(req.Context(), "verifying ID token", "err", err)
 			http.Error(w, fmt.Sprintf("verifying token: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		jwtjson, err := jwt.JSONPayload()
-		if err != nil {
-			slog.ErrorContext(req.Context(), "getting ID token payload", "err", err)
-			http.Error(w, fmt.Sprintf("getting ID token payload: %v", err), http.StatusInternalServerError)
-			return
-		}
-		mapclaims := make(map[string]any)
-		if err := json.Unmarshal(jwtjson, &mapclaims); err != nil {
+		allClaims := make(map[string]any)
+		if err := idClaims.UnmarshalClaims(&allClaims); err != nil {
 			slog.ErrorContext(req.Context(), "unmarshaling payload to map", "err", err)
 			http.Error(w, fmt.Sprintf("unmarshaling payload to map: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		cljson, err := json.MarshalIndent(mapclaims, "", "  ")
+		cljson, err := json.MarshalIndent(allClaims, "", "  ")
 		if err != nil {
 			http.Error(w, "couldn't serialize claims", http.StatusBadRequest)
 			return
