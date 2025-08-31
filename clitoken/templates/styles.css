@@ -1,0 +1,212 @@
+:root {
+    --primary-color: #2ecc71;
+    --error-color: #e63946;
+    --text-color: #1d3557;
+    --bg-color: #f8f9fa;
+    --card-bg: #ffffff;
+    --border-color: #dee2e6;
+    --shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --primary-color: #27ae60;
+        --error-color: #ff6b6b;
+        --text-color: #f8f9fa;
+        --bg-color: #1a1a1a;
+        --card-bg: #2d2d2d;
+        --border-color: #404040;
+        --shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font-family);
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    line-height: 1.6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 20px;
+}
+
+.container {
+    background-color: var(--card-bg);
+    border-radius: 12px;
+    padding: 40px;
+    box-shadow: var(--shadow);
+    border: 1px solid var(--border-color);
+    max-width: 500px;
+    width: 100%;
+    text-align: center;
+    animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.icon {
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 24px;
+    background-color: var(--error-color);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        transform: scale(1);
+    }
+    50% {
+        transform: scale(1.05);
+    }
+}
+
+.icon::before {
+    content: "✕";
+    color: white;
+    font-size: 32px;
+    font-weight: bold;
+}
+
+.checkmark {
+    width: 80px;
+    height: 80px;
+    margin: 0 auto 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--primary-color);
+    animation: checkmarkAppear 0.6s ease-out 0.3s both;
+}
+
+@keyframes checkmarkAppear {
+    0% {
+        transform: scale(0);
+        opacity: 0;
+    }
+    50% {
+        transform: scale(1.2);
+    }
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+.checkmark::before {
+    content: "✓";
+    color: white;
+    font-size: 40px;
+    font-weight: bold;
+    animation: checkmarkDraw 0.4s ease-out 0.9s both;
+}
+
+@keyframes checkmarkDraw {
+    0% {
+        opacity: 0;
+        transform: scale(0.5);
+    }
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+h1 {
+    font-size: 28px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    animation: fadeIn 0.6s ease-out 0.6s both;
+}
+
+h1.success {
+    color: var(--primary-color);
+}
+
+h1.error {
+    color: var(--error-color);
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.message {
+    font-size: 16px;
+    color: var(--text-color);
+    margin-bottom: 24px;
+    word-wrap: break-word;
+    animation: fadeIn 0.6s ease-out 0.8s both;
+}
+
+.instruction {
+    font-size: 14px;
+    color: #6c757d;
+    padding: 16px;
+    background-color: var(--bg-color);
+    border-radius: 8px;
+    border-left: 4px solid var(--primary-color);
+    animation: fadeIn 0.6s ease-out 0.8s both;
+}
+
+.instruction.error {
+    border-left-color: var(--error-color);
+}
+
+@media (max-width: 480px) {
+    .container {
+        padding: 24px;
+    }
+
+    h1 {
+        font-size: 24px;
+    }
+
+    .icon {
+        width: 48px;
+        height: 48px;
+    }
+
+    .icon::before {
+        font-size: 24px;
+    }
+
+    .checkmark {
+        width: 64px;
+        height: 64px;
+    }
+
+    .checkmark::before {
+        font-size: 32px;
+    }
+}
