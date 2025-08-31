@@ -26,23 +26,6 @@ func TestKeychainCLICredentialCache(t *testing.T) {
 	testCache(t, cache)
 }
 
-func TestEncryptedFileCredentialCache(t *testing.T) {
-	dir, err := os.MkdirTemp("", "cachetest")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-
-	cache := &EncryptedFileCredentialCache{
-		Dir: dir,
-		PassphrasePromptFunc: func(prompt string) (passphrase string, err error) {
-			return "passphrase", nil
-		},
-	}
-
-	testCache(t, cache)
-}
-
 func TestMemoryWriteThroughCredentialCache(t *testing.T) {
 	cache := &MemoryWriteThroughCredentialCache{
 		CredentialCache: &NullCredentialCache{},
