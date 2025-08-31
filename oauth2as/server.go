@@ -8,8 +8,8 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/lstoll/oauth2as/discovery"
-	"github.com/lstoll/oauth2as/internal/oauth2"
+	"github.com/lstoll/oauth2ext/oauth2as/discovery"
+	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
 	"github.com/lstoll/oauth2ext/oidc"
 )
 

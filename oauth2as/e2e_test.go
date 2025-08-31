@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lstoll/oauth2as"
 	"github.com/lstoll/oauth2ext/claims"
+	"github.com/lstoll/oauth2ext/oauth2as"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
