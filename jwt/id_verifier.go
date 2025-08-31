@@ -28,8 +28,8 @@ func (i *IDTokenVerifier) Verify(ctx context.Context, token *oauth2.Token) (*IDC
 
 func (i *IDTokenVerifier) VerifyRaw(ctx context.Context, rawJWT string) (*IDClaims, error) {
 	vopts := verifyOpts{
-		Issuer:          i.Provider.Issuer(),
-		SupportedAlgs:   algsToJOSEAlgs(i.Provider.SupportedAlgs()),
+		Issuer:          i.Provider.GetIssuer(),
+		SupportedAlgs:   algsToJOSEAlgs(i.Provider.GetSupportedAlgs()),
 		WantAnyAudience: jwt.Audience{i.ClientID},
 		SkipAudience:    i.IgnoreClientID,
 		WantAnyACR:      i.WantAnyACR,
@@ -45,7 +45,6 @@ func (i *IDTokenVerifier) VerifyRaw(ctx context.Context, rawJWT string) (*IDClai
 	if err := jwt.UnmarshalClaims(&cl); err != nil {
 		return nil, fmt.Errorf("unmarshalling id_token: %w", err)
 	}
-	cl.jwt = jwt
 
 	return &cl, nil
 }
@@ -54,5 +53,5 @@ func (i *IDTokenVerifier) keyset() PublicKeyset {
 	if i.OverrideKeyset != nil {
 		return i.OverrideKeyset
 	}
-	return i.Provider.Keyset()
+	return i.Provider.GetKeyset()
 }

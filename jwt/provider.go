@@ -1,7 +1,7 @@
 package jwt
 
 type Provider interface {
-	Issuer() string
-	Keyset() PublicKeyset
-	SupportedAlgs() []string
+	GetIssuer() string
+	GetKeyset() PublicKeyset
+	GetSupportedAlgs() []string
 }

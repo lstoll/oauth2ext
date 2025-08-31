@@ -22,8 +22,9 @@ func (a *AccessTokenVerifier) Verify(ctx context.Context, token *oauth2.Token) (
 
 func (a *AccessTokenVerifier) VerifyRaw(ctx context.Context, rawJWT string) (*AccessTokenClaims, error) {
 	vopts := verifyOpts{
-		Issuer:          a.Provider.Issuer(),
-		SupportedAlgs:   algsToJOSEAlgs(a.Provider.SupportedAlgs()),
+		Issuer:          a.Provider.GetIssuer(),
+		WantType:        JWTTYPAccessToken,
+		SupportedAlgs:   algsToJOSEAlgs(a.Provider.GetSupportedAlgs()),
 		WantAnyAudience: jwt.Audience(a.WantAnyAudience),
 		SkipAudience:    a.IgnoreAudience,
 		ValidTimeBuffer: defaultValidTimeBuffer,
@@ -38,7 +39,6 @@ func (a *AccessTokenVerifier) VerifyRaw(ctx context.Context, rawJWT string) (*Ac
 	if err := jwt.UnmarshalClaims(&cl); err != nil {
 		return nil, fmt.Errorf("unmarshalling access_token: %w", err)
 	}
-	cl.jwt = jwt
 
 	return &cl, nil
 }
@@ -47,5 +47,5 @@ func (a *AccessTokenVerifier) keyset() PublicKeyset {
 	if a.OverrideKeyset != nil {
 		return a.OverrideKeyset
 	}
-	return a.Provider.Keyset()
+	return a.Provider.GetKeyset()
 }

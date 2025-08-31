@@ -469,21 +469,19 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg SigningAlg, grant *
 	if ac == nil {
 		ac = &jwt.AccessTokenClaims{}
 	}
-	// if ac.Extra == nil {
-	// 	ac.Extra = map[string]any{}
-	// }
+	if ac.Extra == nil {
+		ac.Extra = map[string]any{}
+	}
 
 	ac.Issuer = s.config.Issuer
 	ac.Subject = grant.UserID
 	ac.ClientID = grant.ClientID
 	ac.Expiry = jwt.UnixTime(atExp.Unix())
-	ac.Audience = jwt.StrOrSlice{s.config.Issuer}
+	ac.Audience = jwt.StrOrSlice{grant.ClientID}
 	ac.IssuedAt = jwt.UnixTime(s.now().Unix())
 	ac.AuthTime = jwt.UnixTime(grant.GrantedAt.Unix())
 	ac.JWTID = uuid.Must(uuid.NewRandom()).String()
-	// TODO(lstoll) - add this to the claims
-	// ac.Extra[claimGrantID] = grant.ID.String()
-	_ = claimGrantID
+	ac.Extra[claimGrantID] = grant.ID.String()
 
 	if tresp.OverrideAccessTokenSubject != "" {
 		ac.Subject = tresp.OverrideAccessTokenSubject

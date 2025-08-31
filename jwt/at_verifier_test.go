@@ -55,7 +55,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 		{
 			name: "valid access token",
 			setupToken: func() (string, error) {
-				return testSigner.Sign(validClaims, "")
+				return testSigner.Sign(validClaims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -104,7 +104,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 		{
 			name: "wrong audience",
 			setupToken: func() (string, error) {
-				return testSigner.Sign(validClaims, "")
+				return testSigner.Sign(validClaims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -124,7 +124,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			setupToken: func() (string, error) {
 				claims := validClaims
 				claims.Audience = StrOrSlice{"wrong-audience"}
-				return testSigner.Sign(claims, "")
+				return testSigner.Sign(claims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -144,7 +144,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			setupToken: func() (string, error) {
 				claims := validClaims
 				claims.Audience = StrOrSlice{"test-audience", "another-audience"}
-				return testSigner.Sign(claims, "")
+				return testSigner.Sign(claims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -163,7 +163,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			setupToken: func() (string, error) {
 				claims := validClaims
 				claims.Issuer = "https://wrong-issuer.com"
-				return testSigner.Sign(claims, "")
+				return testSigner.Sign(claims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -183,7 +183,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			setupToken: func() (string, error) {
 				claims := validClaims
 				claims.Expiry = UnixTime(time.Now().Add(-1 * time.Hour).Unix())
-				return testSigner.Sign(claims, "")
+				return testSigner.Sign(claims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -205,7 +205,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 				// Note: The verification logic doesn't check for future IssuedAt times
 				claims := validClaims
 				claims.IssuedAt = UnixTime(time.Now().Add(1 * time.Hour).Unix()) // Issued in the future
-				return testSigner.Sign(claims, "")
+				return testSigner.Sign(claims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -222,7 +222,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 		{
 			name: "wrong key",
 			setupToken: func() (string, error) {
-				return testSigner.Sign(validClaims, "")
+				return testSigner.Sign(validClaims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -240,7 +240,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 		{
 			name: "override keyset",
 			setupToken: func() (string, error) {
-				return testSigner.Sign(validClaims, "")
+				return testSigner.Sign(validClaims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -282,7 +282,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 					Subject: "test-subject",
 					// Missing Audience, Expiry, IssuedAt, JWTID, ClientID
 				}
-				return testSigner.Sign(incompleteClaims, "")
+				return testSigner.Sign(incompleteClaims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -311,7 +311,7 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 					JWTID:    "test-jti",
 					ClientID: "test-client-id",
 				}
-				return testSigner.Sign(minimalClaims, "")
+				return testSigner.Sign(minimalClaims, JWTTYPAccessToken)
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
@@ -401,7 +401,7 @@ func TestAccessTokenVerifier_Verify(t *testing.T) {
 		{
 			name: "valid token with access_token",
 			setupToken: func() *oauth2.Token {
-				accessToken, err := testSigner.Sign(validClaims, "")
+				accessToken, err := testSigner.Sign(validClaims, JWTTYPAccessToken)
 				if err != nil {
 					t.Fatalf("Failed to sign token: %v", err)
 				}

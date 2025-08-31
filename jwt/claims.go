@@ -1,6 +1,14 @@
 package jwt
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"maps"
+	"reflect"
+	"strings"
+
+	josejson "github.com/go-jose/go-jose/v4/json"
+)
 
 // IDClaims represents the set of JWT claims for a user ID Token, or userinfo
 // endpoint.
@@ -88,14 +96,92 @@ type IDClaims struct {
 	// value is a case sensitive string containing a StringOrURI value.
 	AZP string `json:"azp,omitempty"`
 
-	jwt *verifiedJWT
+	// Extra claims that are not part of the standard claims.
+	Extra map[string]any `json:"-"`
+
+	raw []byte
 }
 
-func (c *IDClaims) UnmarshalClaims(dest any) error {
-	if c.jwt == nil {
-		return errors.New("can only unmarshal claims from a verified JWT")
+func (i *IDClaims) MarshalJSON() ([]byte, error) {
+	// Get all the json tags from the struct to check for conflicts
+	tags := make(map[string]struct{})
+	val := reflect.TypeOf(*i)
+	for j := 0; j < val.NumField(); j++ {
+		field := val.Field(j)
+		tag := field.Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := strings.Split(tag, ",")[0]
+		if name != "" {
+			tags[name] = struct{}{}
+		}
 	}
-	return c.jwt.UnmarshalClaims(dest)
+
+	for k := range i.Extra {
+		if _, ok := tags[k]; ok {
+			return nil, fmt.Errorf("extra claim %q conflicts with standard claim", k)
+		}
+	}
+
+	type alias IDClaims
+	b, err := josejson.Marshal(alias(*i)) // use alias to prevent recursion
+	if err != nil {
+		return nil, err
+	}
+
+	var m map[string]any
+	if err := josejson.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+
+	maps.Copy(m, i.Extra)
+
+	return josejson.Marshal(m)
+}
+
+func (i *IDClaims) UnmarshalJSON(b []byte) error {
+	type alias IDClaims
+	if err := josejson.Unmarshal(b, (*alias)(i)); err != nil {
+		return err
+	}
+
+	var m map[string]any
+	if err := josejson.Unmarshal(b, &m); err != nil {
+		return err
+	}
+
+	// Get all the json tags from the struct to know which fields are standard
+	tags := make(map[string]struct{})
+	val := reflect.TypeOf(*i)
+	for j := 0; j < val.NumField(); j++ {
+		field := val.Field(j)
+		tag := field.Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := strings.Split(tag, ",")[0]
+		if name != "" {
+			tags[name] = struct{}{}
+		}
+	}
+	i.Extra = make(map[string]any)
+	for k, v := range m {
+		if _, ok := tags[k]; !ok {
+			i.Extra[k] = v
+		}
+	}
+
+	i.raw = b
+
+	return nil
+}
+
+func (i *IDClaims) UnmarshalClaims(dest any) error {
+	if len(i.raw) == 0 {
+		return errors.New("can only unmarshal claims from a JSON created IDClaims")
+	}
+	return josejson.Unmarshal(i.raw, dest)
 }
 
 // JWTTYPAccessToken is the type header for OAuth2 JWT Access tokens.
@@ -186,12 +272,92 @@ type AccessTokenClaims struct {
 	// https://www.rfc-editor.org/rfc/rfc7643#section-4.1.2
 	Entitlements []string `json:"entitlements,omitempty"`
 
-	jwt *verifiedJWT
+	// Extra claims that are not part of the standard claims.
+	Extra map[string]any `json:"-"`
+
+	raw []byte
 }
 
+// UnmarshalClaims unmarshals the raw claims that were used to create these
+// claims into a new destination.
 func (a *AccessTokenClaims) UnmarshalClaims(dest any) error {
-	if a.jwt == nil {
-		return errors.New("can only unmarshal claims from a verified JWT")
+	if len(a.raw) == 0 {
+		return errors.New("can only unmarshal claims from a JSON created AccessTokenClaims")
 	}
-	return a.jwt.UnmarshalClaims(dest)
+	return josejson.Unmarshal(a.raw, dest)
+}
+
+func (a *AccessTokenClaims) MarshalJSON() ([]byte, error) {
+	// Get all the json tags from the struct to check for conflicts
+	tags := make(map[string]struct{})
+	val := reflect.TypeOf(*a)
+	for j := 0; j < val.NumField(); j++ {
+		field := val.Field(j)
+		tag := field.Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := strings.Split(tag, ",")[0]
+		if name != "" {
+			tags[name] = struct{}{}
+		}
+	}
+
+	for k := range a.Extra {
+		if _, ok := tags[k]; ok {
+			return nil, fmt.Errorf("extra claim %q conflicts with standard claim", k)
+		}
+	}
+
+	type alias AccessTokenClaims
+	b, err := josejson.Marshal(alias(*a)) // use alias to prevent recursion
+	if err != nil {
+		return nil, err
+	}
+
+	var m map[string]any
+	if err := josejson.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+
+	maps.Copy(m, a.Extra)
+
+	return josejson.Marshal(m)
+}
+
+func (a *AccessTokenClaims) UnmarshalJSON(b []byte) error {
+	type alias AccessTokenClaims
+	if err := josejson.Unmarshal(b, (*alias)(a)); err != nil {
+		return err
+	}
+
+	var m map[string]any
+	if err := josejson.Unmarshal(b, &m); err != nil {
+		return err
+	}
+
+	// Get all the json tags from the struct to know which fields are standard
+	tags := make(map[string]struct{})
+	val := reflect.TypeOf(*a)
+	for j := 0; j < val.NumField(); j++ {
+		field := val.Field(j)
+		tag := field.Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := strings.Split(tag, ",")[0]
+		if name != "" {
+			tags[name] = struct{}{}
+		}
+	}
+	a.Extra = make(map[string]any)
+	for k, v := range m {
+		if _, ok := tags[k]; !ok {
+			a.Extra[k] = v
+		}
+	}
+
+	a.raw = b
+
+	return nil
 }

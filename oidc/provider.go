@@ -37,7 +37,8 @@ type Provider struct {
 	// will be used. This will be overridden by the context if provided.
 	HTTPClient *http.Client
 
-	keyset jwt.PublicKeyset
+	// Keyset for verifying tokens issued by this provider.
+	Keyset jwt.PublicKeyset
 }
 
 // DiscoverProvider will discover Provider from the given issuer. The returned
@@ -66,7 +67,7 @@ func DiscoverProvider(ctx context.Context, issuer string) (*Provider, error) {
 		return nil, fmt.Errorf("error decoding provider metadata response: %v", err)
 	}
 
-	p.keyset = &jwt.HTTPJWKSKeyset{
+	p.Keyset = &jwt.HTTPJWKSKeyset{
 		HTTPClient: p.HTTPClient,
 		URL:        p.Metadata.JWKSURI,
 	}
@@ -82,15 +83,15 @@ func (p *Provider) Endpoint() oauth2.Endpoint {
 	}
 }
 
-func (p *Provider) Keyset() jwt.PublicKeyset {
-	return p.keyset
+func (p *Provider) GetKeyset() jwt.PublicKeyset {
+	return p.Keyset
 }
 
-func (p *Provider) SupportedAlgs() []string {
+func (p *Provider) GetSupportedAlgs() []string {
 	return p.Metadata.IDTokenSigningAlgValuesSupported
 }
 
-func (p *Provider) Issuer() string {
+func (p *Provider) GetIssuer() string {
 	return p.Metadata.Issuer
 }
 
