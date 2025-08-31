@@ -18,13 +18,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lstoll/oauth2ext/internal/th"
 	"github.com/lstoll/oauth2ext/jwt"
+	"github.com/lstoll/oauth2ext/oauth2as/internal"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/token"
 	"github.com/lstoll/oauth2ext/oidc"
-	tinkjwt "github.com/tink-crypto/tink-go/v2/jwt"
-	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
 type unauthorizedErrImpl struct{ error }
@@ -56,7 +54,7 @@ func TestCodeToken(t *testing.T) {
 				Issuer: issuer,
 
 				Storage: s,
-				Keyset:  newMultiAlgKeysets(),
+				Signer:  testSigner(t),
 
 				TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
@@ -79,7 +77,7 @@ func TestCodeToken(t *testing.T) {
 						ID:           es256ClientID,
 						Secrets:      []string{es256ClientSecret},
 						RedirectURLs: []string{es256ClientRedirect},
-						Opts:         []ClientOpt{ClientOptSkipPKCE(), ClientOptSigningAlg(SigningAlgES256)},
+						Opts:         []ClientOpt{ClientOptSkipPKCE(), ClientOptSigningAlg(jwt.SigningAlgES256)},
 					},
 				},
 			},
@@ -293,7 +291,7 @@ func TestRefreshToken(t *testing.T) {
 				Issuer: issuer,
 
 				Storage: s,
-				Keyset:  testKeysets(),
+				Signer:  testSigner(t),
 
 				TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
@@ -448,26 +446,7 @@ func TestUserinfo(t *testing.T) {
 	}
 
 	signAccessToken := func(cl jwt.AccessTokenClaims) string {
-		h, err := testKeysets().HandleFor(SigningAlgRS256)
-		if err != nil {
-			t.Fatal(err)
-		}
-		signer, err := tinkjwt.NewSigner(h)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		clJSON, err := json.Marshal(cl)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		rawATJWT, err := tinkjwt.NewRawJWTFromJSON(th.Ptr(jwt.JWTTYPAccessToken), clJSON)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		sat, err := signer.SignAndEncode(rawATJWT)
+		sat, err := testSigner(t).(*internal.TestSigner).SignClaimsWithAlgorithm("ES256", jwt.JWTTYPAccessToken, cl)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -541,7 +520,7 @@ func TestUserinfo(t *testing.T) {
 			config := Config{
 				Issuer:  issuer,
 				Storage: s,
-				Keyset:  testKeysets(),
+				Signer:  testSigner(t),
 				UserinfoHandler: func(_ context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error) {
 					return &UserinfoResponse{
 						Identity: &jwt.IDClaims{
@@ -584,24 +563,15 @@ func TestUserinfo(t *testing.T) {
 }
 
 var (
-	thandle *keyset.Handle
-	thES    *keyset.Handle
-	thMu    sync.Mutex
+	signer     *internal.TestSigner
+	signerOnce sync.Once
 )
 
-func testKeysets() AlgKeysets {
-	thMu.Lock()
-	defer thMu.Unlock()
-	// we only make one, because it's slow
-	if thandle == nil {
-		h, err := keyset.NewHandle(tinkjwt.RS256_2048_F4_Key_Template())
-		if err != nil {
-			panic(err)
-		}
-		thandle = h
-	}
-
-	return NewSingleAlgKeysets(SigningAlgRS256, thandle)
+func testSigner(t *testing.T) AlgorithmSigner {
+	signerOnce.Do(func() {
+		signer = internal.NewTestSigner(t, "RS256", "ES256")
+	})
+	return signer
 }
 
 func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
@@ -686,49 +656,4 @@ func (c staticClientSource) ClientOpts(ctx context.Context, clientID string) ([]
 		}
 	}
 	return nil, fmt.Errorf("client not found")
-}
-
-type multiAlgKeysets struct {
-	handles map[SigningAlg]*keyset.Handle
-}
-
-func (m *multiAlgKeysets) HandleFor(alg SigningAlg) (*keyset.Handle, error) {
-	h, ok := m.handles[alg]
-	if !ok {
-		return nil, fmt.Errorf("unsupported algorithm: %s", alg)
-	}
-	return h, nil
-}
-
-func (m *multiAlgKeysets) SupportedAlgorithms() []SigningAlg {
-	supported := make([]SigningAlg, 0, len(m.handles))
-	for alg := range m.handles {
-		supported = append(supported, alg)
-	}
-	return supported
-}
-
-func newMultiAlgKeysets() AlgKeysets {
-	thMu.Lock()
-	defer thMu.Unlock()
-	// we only make one, because it's slow
-	if thandle == nil {
-		h, err := keyset.NewHandle(tinkjwt.RS256_2048_F4_Key_Template())
-		if err != nil {
-			panic(err)
-		}
-		thandle = h
-	}
-	if thES == nil {
-		h, err := keyset.NewHandle(tinkjwt.ES256Template())
-		if err != nil {
-			panic(err)
-		}
-		thES = h
-	}
-
-	return &multiAlgKeysets{handles: map[SigningAlg]*keyset.Handle{
-		SigningAlgRS256: thandle,
-		SigningAlgES256: thES,
-	}}
 }
