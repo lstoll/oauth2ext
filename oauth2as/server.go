@@ -75,7 +75,9 @@ type Config struct {
 
 type Server struct {
 	config Config
-	mux    *http.ServeMux
+
+	oidcProvider *oidc.Provider
+	mux          *http.ServeMux
 
 	logger *slog.Logger
 
@@ -153,24 +155,27 @@ func NewServer(c Config) (*Server, error) {
 		mdAlgs = append(mdAlgs, string(k))
 	}
 
-	metadata := &oidc.ProviderMetadata{
-		Issuer: c.Issuer,
-		ResponseTypesSupported: []string{
-			"code",
+	svr.oidcProvider = &oidc.Provider{
+		Metadata: &oidc.ProviderMetadata{
+			Issuer: c.Issuer,
+			ResponseTypesSupported: []string{
+				"code",
+			},
+			SubjectTypesSupported:            []string{"public"},
+			IDTokenSigningAlgValuesSupported: mdAlgs,
+			GrantTypesSupported:              []string{"authorization_code"},
+			CodeChallengeMethodsSupported:    []oidc.CodeChallengeMethod{oidc.CodeChallengeMethodS256},
+			JWKSURI:                          issURL.ResolveReference(&url.URL{Path: "/.well-known/jwks.json"}).String(),
+			AuthorizationEndpoint:            issURL.ResolveReference(&url.URL{Path: c.AuthorizationPath}).String(),
+			TokenEndpoint:                    issURL.ResolveReference(&url.URL{Path: c.TokenPath}).String(),
 		},
-		SubjectTypesSupported:            []string{"public"},
-		IDTokenSigningAlgValuesSupported: mdAlgs,
-		GrantTypesSupported:              []string{"authorization_code"},
-		CodeChallengeMethodsSupported:    []oidc.CodeChallengeMethod{oidc.CodeChallengeMethodS256},
-		JWKSURI:                          issURL.ResolveReference(&url.URL{Path: "/.well-known/jwks.json"}).String(),
-		AuthorizationEndpoint:            issURL.ResolveReference(&url.URL{Path: c.AuthorizationPath}).String(),
-		TokenEndpoint:                    issURL.ResolveReference(&url.URL{Path: c.TokenPath}).String(),
+		Keyset: &pubHandle{h: c.Keyset},
 	}
 	if c.UserinfoPath != "" {
-		metadata.UserinfoEndpoint = issURL.ResolveReference(&url.URL{Path: c.UserinfoPath}).String()
+		svr.oidcProvider.Metadata.UserinfoEndpoint = issURL.ResolveReference(&url.URL{Path: c.UserinfoPath}).String()
 	}
 
-	discoh, err := discovery.NewConfigurationHandler(metadata, &pubHandle{h: c.Keyset})
+	discoh, err := discovery.NewConfigurationHandler(svr.oidcProvider.Metadata, &pubHandle{h: c.Keyset})
 	if err != nil {
 		return nil, fmt.Errorf("creating configuration handler: %w", err)
 	}
@@ -224,12 +229,4 @@ func (s *Server) validateTokenClient(ctx context.Context, req *oauth2.TokenReque
 type unauthorizedErr interface {
 	error
 	Unauthorized() bool
-}
-
-func ptrOrNil[T comparable](v T) *T {
-	var e T
-	if v == e {
-		return nil
-	}
-	return &v
 }

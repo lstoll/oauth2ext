@@ -3,12 +3,12 @@ package oauth2as
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
-	tinkjwt "github.com/tink-crypto/tink-go/v2/jwt"
 )
 
 type UserinfoHandler func(ctx context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error)
@@ -41,59 +41,25 @@ func (s *Server) Userinfo(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// TODO - replace this verification logic with oidc.Provider
-
 	// TODO - check the audience is the issuer, as we have hardcoded.
 
-	h, err := s.config.Keyset.HandleFor(SigningAlgRS256)
-	if err != nil {
-		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
-		_ = oauth2.WriteError(w, req, herr)
-		return
-	}
-	ph, err := h.Public()
-	if err != nil {
-		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
-		_ = oauth2.WriteError(w, req, herr)
-		return
+	verifier := &jwt.AccessTokenVerifier{
+		Provider:       s.oidcProvider,
+		IgnoreAudience: true,
 	}
 
-	jwtVerifier, err := tinkjwt.NewVerifier(ph)
+	atClaims, err := verifier.VerifyRaw(req.Context(), authSp[1])
 	if err != nil {
-		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
-		_ = oauth2.WriteError(w, req, herr)
-		return
-	}
-
-	jwtValidator, err := tinkjwt.NewValidator(&tinkjwt.ValidatorOpts{
-		ExpectedIssuer:     &s.config.Issuer,
-		IgnoreAudiences:    true, // we don't care about the audience here, this is just introspecting the user
-		ExpectedTypeHeader: ptrOrNil("at+jwt"),
-	})
-	if err != nil {
-		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
-		_ = oauth2.WriteError(w, req, herr)
-		return
-	}
-
-	jwt, err := jwtVerifier.VerifyAndDecode(authSp[1], jwtValidator)
-	if err != nil {
+		slog.ErrorContext(req.Context(), "invalid access token", "error", err)
 		be := &oauth2.BearerError{Code: oauth2.BearerErrorCodeInvalidRequest, Description: "invalid access token"}
 		herr := &oauth2.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), Cause: err}
 		_ = oauth2.WriteError(w, req, herr)
 		return
 	}
 
-	sub, err := jwt.Subject()
-	if err != nil {
-		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
-		_ = oauth2.WriteError(w, req, herr)
-		return
-	}
-
 	// If we make it to here, we have been presented a valid token for a valid session. Run the handler.
 	uireq := &UserinfoRequest{
-		Subject: sub,
+		Subject: atClaims.Subject,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

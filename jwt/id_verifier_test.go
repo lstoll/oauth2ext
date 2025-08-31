@@ -16,15 +16,15 @@ type mockProvider struct {
 	supportedAlgs []string
 }
 
-func (m *mockProvider) Issuer() string {
+func (m *mockProvider) GetIssuer() string {
 	return m.issuer
 }
 
-func (m *mockProvider) Keyset() PublicKeyset {
+func (m *mockProvider) GetKeyset() PublicKeyset {
 	return m.keyset
 }
 
-func (m *mockProvider) SupportedAlgs() []string {
+func (m *mockProvider) GetSupportedAlgs() []string {
 	return m.supportedAlgs
 }
 
