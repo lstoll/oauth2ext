@@ -1,4 +1,4 @@
-package claims
+package jwt
 
 import (
 	"encoding/json"
@@ -71,24 +71,4 @@ func (u *UnixTime) UnmarshalJSON(b []byte) error {
 	}
 	*u = UnixTime(int64(flt))
 	return nil
-}
-
-func sliceToAnySlice[T any](v []T) []any {
-	r := make([]any, len(v))
-	for i, s := range v {
-		r[i] = s
-	}
-	return r
-}
-
-func anySliceToSlice[T any](v []any) ([]T, error) {
-	r := make([]T, len(v))
-	for i, s := range v {
-		v, ok := s.(T)
-		if !ok {
-			return nil, fmt.Errorf("type assert of %#v failed", s)
-		}
-		r[i] = v
-	}
-	return r, nil
 }

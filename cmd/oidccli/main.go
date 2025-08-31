@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lstoll/oauth2ext/clitoken"
+	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oidc"
 	"github.com/lstoll/oauth2ext/tokencache"
 	"golang.org/x/oauth2"
@@ -138,7 +139,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	provider, err := oidc.DiscoverProvider(ctx, baseFlags.Issuer, nil)
+	provider, err := oidc.DiscoverProvider(ctx, baseFlags.Issuer)
 	if err != nil {
 		fmt.Printf("discovering issuer %s: %v", baseFlags.Issuer, err)
 		os.Exit(1)
@@ -287,49 +288,54 @@ func info(ctx context.Context, provider *oidc.Provider, ts oauth2.TokenSource, _
 	fmt.Printf("Access Token: %s\n", tok.AccessToken)
 	fmt.Printf("Access Token expires: %s\n", tok.Expiry.String())
 	if isJWT(tok.AccessToken) {
-		jwt, err := provider.VerifyAccessToken(ctx, tok, oidc.AccessTokenValidationOpts{IgnoreAudience: true})
+		verifier := &jwt.AccessTokenVerifier{
+			Provider:       provider,
+			IgnoreAudience: true,
+		}
+		claims, err := verifier.Verify(ctx, tok)
 		if err != nil {
 			return fmt.Errorf("access token verification: %w", err)
 		}
-		exp, err := jwt.ExpiresAt()
-		if err != nil {
-			return fmt.Errorf("getting expires at: %w", err)
+
+		allClaims := make(map[string]any)
+		if err := claims.UnmarshalClaims(&allClaims); err != nil {
+			return fmt.Errorf("unmarshalling access token claims: %w", err)
 		}
-		clJSON, err := jwt.JSONPayload()
+
+		clJSON, err := json.MarshalIndent(allClaims, "", "  ")
 		if err != nil {
-			return fmt.Errorf("getting json payload: %w", err)
+			return fmt.Errorf("marshalling access token claims: %w", err)
 		}
-		fmt.Printf("Access token claims expires: %s\n", exp.String())
-		fmt.Printf("Access token claims: %s\n", string(clJSON))
-		jb, err := jwt.JSONPayload()
-		if err != nil {
-			return fmt.Errorf("getting json payload: %w", err)
-		}
-		fmt.Printf("Access token full claims: %v\n", string(jb))
+
+		fmt.Printf("Access token: %s\n", tok.AccessToken)
+		fmt.Printf("Access token expires at: %s\n", claims.Expiry.Time().String())
+		fmt.Printf("Access token claims: \n%s\n", string(clJSON))
 	}
 	fmt.Printf("Refresh Token: %s\n", tok.RefreshToken)
 	idt, ok := oidc.GetIDToken(tok)
 	if ok {
-		jwt, err := provider.VerifyIDToken(ctx, tok, oidc.IDTokenValidationOpts{IgnoreAudience: true})
+		verifier := &jwt.IDTokenVerifier{
+			Provider:       provider,
+			IgnoreClientID: true,
+		}
+		claims, err := verifier.VerifyRaw(ctx, idt)
 		if err != nil {
 			return fmt.Errorf("ID token verification: %w", err)
 		}
-		exp, err := jwt.ExpiresAt()
-		if err != nil {
-			return fmt.Errorf("getting expires at: %w", err)
+
+		allClaims := make(map[string]any)
+		if err := claims.UnmarshalClaims(&allClaims); err != nil {
+			return fmt.Errorf("unmarshalling id token claims: %w", err)
 		}
-		clJSON, err := jwt.JSONPayload()
+
+		clJSON, err := json.MarshalIndent(allClaims, "", "  ")
 		if err != nil {
-			return fmt.Errorf("getting json payload: %w", err)
+			return fmt.Errorf("marshalling id token claims: %w", err)
 		}
+
 		fmt.Printf("ID token: %s\n", idt)
-		fmt.Printf("ID token claims expires: %s\n", exp.String())
-		fmt.Printf("ID token standard claims: %s\n", string(clJSON))
-		jb, err := jwt.JSONPayload()
-		if err != nil {
-			return fmt.Errorf("getting json payload: %w", err)
-		}
-		fmt.Printf("ID token full claims: %v\n", string(jb))
+		fmt.Printf("ID token expires at: %s\n", claims.Expiry.Time().String())
+		fmt.Printf("ID token claims: \n%s\n", string(clJSON))
 	}
 
 	return nil

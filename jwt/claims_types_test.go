@@ -1,4 +1,4 @@
-package claims
+package jwt
 
 import (
 	"encoding/json"

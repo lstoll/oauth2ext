@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/lstoll/oauth2ext/claims"
+	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
-	"github.com/tink-crypto/tink-go/v2/jwt"
+	tinkjwt "github.com/tink-crypto/tink-go/v2/jwt"
 )
 
 type UserinfoHandler func(ctx context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error)
@@ -23,7 +23,7 @@ type UserinfoRequest struct {
 // UserinfoResponse contains information to response to the userinfo response.
 type UserinfoResponse struct {
 	// Subject is the sub of the user this request is for.
-	Identity *claims.RawIDClaims
+	Identity *jwt.IDClaims
 }
 
 // Userinfo can handle a request to the userinfo endpoint. If the request is not
@@ -58,14 +58,14 @@ func (s *Server) Userinfo(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	jwtVerifier, err := jwt.NewVerifier(ph)
+	jwtVerifier, err := tinkjwt.NewVerifier(ph)
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err}
 		_ = oauth2.WriteError(w, req, herr)
 		return
 	}
 
-	jwtValidator, err := jwt.NewValidator(&jwt.ValidatorOpts{
+	jwtValidator, err := tinkjwt.NewValidator(&tinkjwt.ValidatorOpts{
 		ExpectedIssuer:     &s.config.Issuer,
 		IgnoreAudiences:    true, // we don't care about the audience here, this is just introspecting the user
 		ExpectedTypeHeader: ptrOrNil("at+jwt"),

@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lstoll/oauth2ext/claims"
+	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oauth2as"
 	"github.com/lstoll/oauth2ext/oidc"
-	"github.com/tink-crypto/tink-go/v2/jwt"
+	tinkjwt "github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 	"golang.org/x/oauth2"
 )
@@ -139,7 +139,7 @@ func TestE2E(t *testing.T) {
 				},
 				UserinfoHandler: func(_ context.Context, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
 					return &oauth2as.UserinfoResponse{
-						Identity: &claims.RawIDClaims{
+						Identity: &jwt.IDClaims{
 							Subject: uireq.Subject,
 						},
 					}, nil
@@ -213,7 +213,7 @@ func TestE2E(t *testing.T) {
 			// mux.Handle("GET /.well-known/openid-configuration", discoh)
 			// mux.Handle("GET /.well-known/jwks.json", discoh)
 
-			provider, err := oidc.DiscoverProvider(ctx, oidcSvr.URL, nil)
+			provider, err := oidc.DiscoverProvider(ctx, oidcSvr.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -277,7 +277,9 @@ func TestE2E(t *testing.T) {
 
 			ts := o2.TokenSource(ctx, tok)
 
-			_, uir, err := provider.Userinfo(ctx, ts)
+			var uir map[string]any
+
+			err = provider.Userinfo(ctx, ts, &uir)
 			if err != nil {
 				t.Fatalf("error fetching userinfo: %v", err)
 			}
@@ -294,7 +296,7 @@ func TestE2E(t *testing.T) {
 				// }
 				tok.Expiry = time.Now().Add(-1 * time.Second) // needs to line up with remote change, else we won't refresh
 
-				_, uir, err := provider.Userinfo(ctx, ts)
+				err := provider.Userinfo(ctx, ts, &uir)
 				if err != nil {
 					t.Fatalf("error fetching userinfo: %v", err)
 				}
@@ -337,7 +339,7 @@ func testKeysets() oauth2as.AlgKeysets {
 	defer thMu.Unlock()
 	// we only make one, because it's slow
 	if th == nil {
-		h, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
+		h, err := keyset.NewHandle(tinkjwt.RS256_2048_F4_Key_Template())
 		if err != nil {
 			panic(err)
 		}

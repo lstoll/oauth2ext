@@ -10,8 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
+	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oidc"
-	"github.com/tink-crypto/tink-go/v2/jwt"
 )
 
 const awsSTSUserAgent = "AWS Security Token Service"
@@ -28,7 +29,7 @@ var _ http.Handler = (*ConfigurationHandler)(nil)
 // Any prefix should be stripped before calling this ConfigurationHandler
 type ConfigurationHandler struct {
 	md     *oidc.ProviderMetadata
-	keyset oidc.PublicHandle
+	keyset jwt.PublicKeyset
 
 	mux *http.ServeMux
 
@@ -60,7 +61,7 @@ func DefaultCoreMetadata(issuer string) *oidc.ProviderMetadata {
 }
 
 // NewConfigurationHandler configures and returns a ConfigurationHandler.
-func NewConfigurationHandler(metadata *oidc.ProviderMetadata, keyset oidc.PublicHandle) (*ConfigurationHandler, error) {
+func NewConfigurationHandler(metadata *oidc.ProviderMetadata, keyset jwt.PublicKeyset) (*ConfigurationHandler, error) {
 	h := &ConfigurationHandler{
 		md:       metadata,
 		keyset:   keyset,
@@ -130,11 +131,19 @@ func (h *ConfigurationHandler) getJWKS(ctx context.Context) error {
 	defer h.currJWKSMu.Unlock()
 
 	if h.currJWKS == nil || time.Now().After(h.lastKeysUpdate.Add(h.cacheFor)) {
-		ph, err := h.keyset.PublicHandle(ctx)
+		pks, err := h.keyset.GetKeys(ctx)
 		if err != nil {
 			return fmt.Errorf("getting public handle: %w", err)
 		}
-		publicJWKset, err := jwt.JWKSetFromPublicKeysetHandle(ph)
+		var jwks jose.JSONWebKeySet
+		for _, k := range pks {
+			jwks.Keys = append(jwks.Keys, jose.JSONWebKey{
+				KeyID:     k.KeyID,
+				Algorithm: string(k.Alg),
+				Key:       k.Key,
+			})
+		}
+		publicJWKset, err := json.Marshal(jwks)
 		if err != nil {
 			return fmt.Errorf("creating jwks from handle: %w", err)
 		}
