@@ -10,8 +10,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"golang.org/x/text/language"
-	"golang.org/x/text/search"
 )
 
 func TestWriteError(t *testing.T) {
@@ -189,7 +187,5 @@ func TestBearerError(t *testing.T) {
 }
 
 func containsInsensitive(str, substring string) bool {
-	s := search.New(language.Und, search.IgnoreCase)
-	i, _ := s.IndexString(str, substring)
-	return i >= 0
+	return strings.Contains(strings.ToLower(str), strings.ToLower(substring))
 }
