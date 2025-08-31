@@ -3,11 +3,13 @@ package oauth2as
 import (
 	"context"
 	"net/url"
+
+	"github.com/lstoll/oauth2ext/jwt"
 )
 
 type clientOpts struct {
 	skipPKCE   bool
-	signingAlg SigningAlg
+	signingAlg jwt.SigningAlg
 }
 
 // ClientOpt is a flag that can be set on a given client, to adjust various
@@ -21,7 +23,7 @@ func ClientOptSkipPKCE() ClientOpt {
 	}
 }
 
-func ClientOptSigningAlg(alg SigningAlg) ClientOpt {
+func ClientOptSigningAlg(alg jwt.SigningAlg) ClientOpt {
 	return func(opts *clientOpts) {
 		opts.signingAlg = alg
 	}

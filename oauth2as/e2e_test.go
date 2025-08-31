@@ -16,9 +16,8 @@ import (
 
 	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oauth2as"
+	"github.com/lstoll/oauth2ext/oauth2as/internal"
 	"github.com/lstoll/oauth2ext/oidc"
-	tinkjwt "github.com/tink-crypto/tink-go/v2/jwt"
-	"github.com/tink-crypto/tink-go/v2/keyset"
 	"golang.org/x/oauth2"
 )
 
@@ -133,7 +132,7 @@ func TestE2E(t *testing.T) {
 			opcfg := oauth2as.Config{
 				Issuer:  oidcSvr.URL,
 				Storage: s,
-				Keyset:  testKeysets(),
+				Signer:  getTestSigner(t),
 				TokenHandler: func(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
 					return &oauth2as.TokenResponse{}, nil
 				},
@@ -330,23 +329,15 @@ func randomStateValue() string {
 }
 
 var (
-	th   *keyset.Handle
-	thMu sync.Mutex
+	testSigner     *internal.TestSigner
+	testSignerOnce sync.Once
 )
 
-func testKeysets() oauth2as.AlgKeysets {
-	thMu.Lock()
-	defer thMu.Unlock()
-	// we only make one, because it's slow
-	if th == nil {
-		h, err := keyset.NewHandle(tinkjwt.RS256_2048_F4_Key_Template())
-		if err != nil {
-			panic(err)
-		}
-		th = h
-	}
-
-	return oauth2as.NewSingleAlgKeysets(oauth2as.SigningAlgRS256, th)
+func getTestSigner(t *testing.T) oauth2as.AlgorithmSigner {
+	testSignerOnce.Do(func() {
+		testSigner = internal.NewTestSigner(t, "RS256", "ES256")
+	})
+	return testSigner
 }
 
 type staticClient struct {

@@ -12,13 +12,12 @@ import (
 	"slices"
 	"time"
 
+	josejson "github.com/go-jose/go-jose/v4/json"
 	"github.com/google/uuid"
-	"github.com/lstoll/oauth2ext/internal/th"
 	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/token"
 	"github.com/lstoll/oauth2ext/oidc"
-	tinkjwt "github.com/tink-crypto/tink-go/v2/jwt"
 )
 
 const (
@@ -27,7 +26,7 @@ const (
 	tokenUsageAuthCode = "auth_code"
 	tokenUsageRefresh  = "refresh_token"
 
-	defaultSigningAlg SigningAlg = SigningAlgRS256
+	defaultSigningAlg jwt.SigningAlg = jwt.SigningAlgES256
 )
 
 type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, error)
@@ -68,33 +67,30 @@ type TokenResponse struct {
 	IDTokenExpiry     time.Time
 	AccessTokenExpiry time.Time
 
-	// IDClaims is the claims that will be included in the ID token. This is
-	// optional. The following claims will always be overridden:
-	// - sub
+	// IDClaims are the claims that will be included in the ID token. These will
+	// be serialized to JSON, and then returned in the token. This is optional.
+	// The following claims will always be overridden:
 	// - iss
-	// - aud
-	// - exp
 	// - iat
 	// - auth_time
 	// - nonce
-	IDClaims *jwt.IDClaims
-	// AccessTokenClaims is the claims that will be included in the access token.
-	// The following claims will always be overridden:
+	// The following claims will be defaulted if not set:
 	// - sub
-	// - iss
-	// - aud
 	// - exp
+	// - aud
+	IDClaims any
+	// AccessTokenClaims is the claims that will be included in the access token.
+	// The claims will be serialized to JSON, and then returned in the token.
+	// The following claims will always be overridden:
+	// - iss
+	// - client_id
 	// - iat
 	// - jti
-	// and the token header
-	AccessTokenClaims *jwt.AccessTokenClaims
-
-	// OverrideIDSubject can be used to override the subject of the ID token.
-	// If not set, the default will be used.
-	OverrideIDSubject string
-	// OverrideAccessTokenSubject can be used to override the subject of the
-	// access token. If not set, the default will be used.
-	OverrideAccessTokenSubject string
+	// The following claims will be defaulted if not set:
+	// - sub
+	// - exp
+	// - aud
+	AccessTokenClaims any
 
 	// RefreshTokenValidUntil indicates how long the returned refresh token should
 	// be valid for, if one is issued. If zero, the default will be used.
@@ -365,7 +361,7 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 // buildTokenResponse creates the oauth token response for code and refresh.
 // refreshSession can be nil, if it is and we should issue a refresh token, a
 // new refresh session will be created.
-func (s *Server) buildTokenResponse(ctx context.Context, alg SigningAlg, grant *StoredGrant, tresp *TokenResponse) (_ *oauth2.TokenResponse, retErr error) {
+func (s *Server) buildTokenResponse(ctx context.Context, alg jwt.SigningAlg, grant *StoredGrant, tresp *TokenResponse) (_ *oauth2.TokenResponse, retErr error) {
 	var (
 		refreshTok string
 		saveGrant  bool
@@ -424,108 +420,129 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg SigningAlg, grant *
 		saveGrant = true
 	}
 
+	// TODO - only try and issue an ID token if the openid scope was granted.
+
+	idc, err := s.buildIDClaims(grant, tresp)
+	if err != nil {
+		return nil, fmt.Errorf("building id token claims: %w", err)
+	}
+	ac, err := s.buildAccessTokenClaims(grant, tresp)
+	if err != nil {
+		return nil, fmt.Errorf("building access token claims: %w", err)
+	}
+
+	acExp := ac["exp"].(jwt.UnixTime).Time()
+
+	idPayload, err := josejson.Marshal(idc)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling id token claims: %w", err)
+	}
+	atPayload, err := josejson.Marshal(ac)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling access token claims: %w", err)
+	}
+
+	idSigned, err := s.config.Signer.SignWithAlgorithm(ctx, string(alg), "", idPayload)
+	if err != nil {
+		return nil, fmt.Errorf("signing id token: %w", err)
+	}
+	atSigned, err := s.config.Signer.SignWithAlgorithm(ctx, string(alg), jwt.JWTTYPAccessToken, atPayload)
+	if err != nil {
+		return nil, fmt.Errorf("signing access token: %w", err)
+	}
+
+	return &oauth2.TokenResponse{
+		AccessToken:  atSigned,
+		RefreshToken: refreshTok,
+		TokenType:    "bearer",
+		ExpiresIn:    acExp.Sub(s.now()),
+		ExtraParams: map[string]interface{}{
+			"id_token": string(idSigned),
+		},
+	}, nil
+}
+
+func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (map[string]any, error) {
 	idExp := tresp.IDTokenExpiry
 	if idExp.IsZero() {
 		idExp = s.now().Add(s.config.IDTokenValidity)
 	}
+
+	idc := make(map[string]any)
+	idcb, err := json.Marshal(tresp.IDClaims)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling id token claims: %w", err)
+	}
+	if err := json.Unmarshal(idcb, &idc); err != nil {
+		return nil, fmt.Errorf("unmarshalling id token claims: %w", err)
+	}
+
+	if idc == nil {
+		// handle case where no claims are set. they we just MVP a token
+		idc = make(map[string]any)
+	}
+
+	// fixed values
+	idc["iss"] = s.config.Issuer
+	idc["iat"] = jwt.UnixTime(s.now().Unix())
+	idc["auth_time"] = jwt.UnixTime(grant.GrantedAt.Unix())
+
+	// defaulted values
+	if _, subok := idc["sub"]; !subok {
+		idc["sub"] = grant.UserID
+	}
+	if _, expok := idc["exp"]; !expok {
+		idc["exp"] = jwt.UnixTime(idExp.Unix())
+	}
+	if _, audok := idc["aud"]; !audok {
+		idc["aud"] = jwt.StrOrSlice{grant.ClientID}
+	}
+
+	// TODO nonce
+	// idc.Nonce = grant.Request.Nonce
+
+	return idc, nil
+}
+
+func (s *Server) buildAccessTokenClaims(grant *StoredGrant, tresp *TokenResponse) (map[string]any, error) {
 	atExp := tresp.AccessTokenExpiry
 	if atExp.IsZero() {
 		atExp = s.now().Add(s.config.AccessTokenValidity)
 	}
 
-	// TODO - only try and issue an ID token if the openid scope was granted.
-
-	idc := tresp.IDClaims
-	if idc == nil {
-		idc = &jwt.IDClaims{}
-	}
-
-	idc.Issuer = s.config.Issuer
-	idc.Subject = grant.UserID
-	idc.Expiry = jwt.UnixTime(idExp.Unix())
-	idc.Audience = jwt.StrOrSlice{grant.ClientID}
-	idc.IssuedAt = jwt.UnixTime(s.now().Unix())
-	idc.AuthTime = jwt.UnixTime(grant.GrantedAt.Unix())
-	// TODO nonce
-	// idc.Nonce = grant.Request.Nonce
-
-	if tresp.OverrideIDSubject != "" {
-		idc.Subject = tresp.OverrideIDSubject
-	}
-
-	// Apps should fill the profile info as needed.
-
-	idjson, err := json.Marshal(idc)
-	if err != nil {
-		return nil, fmt.Errorf("marshalling id token claims: %w", err)
-	}
-
-	idjwt, err := tinkjwt.NewRawJWTFromJSON(nil, idjson)
-	if err != nil {
-		return nil, fmt.Errorf("creating identity token jwt: %w", err)
-	}
-
-	ac := tresp.AccessTokenClaims
-	if ac == nil {
-		ac = &jwt.AccessTokenClaims{}
-	}
-	if ac.Extra == nil {
-		ac.Extra = map[string]any{}
-	}
-
-	ac.Issuer = s.config.Issuer
-	ac.Subject = grant.UserID
-	ac.ClientID = grant.ClientID
-	ac.Expiry = jwt.UnixTime(atExp.Unix())
-	ac.Audience = jwt.StrOrSlice{grant.ClientID}
-	ac.IssuedAt = jwt.UnixTime(s.now().Unix())
-	ac.AuthTime = jwt.UnixTime(grant.GrantedAt.Unix())
-	ac.JWTID = uuid.Must(uuid.NewRandom()).String()
-	ac.Extra[claimGrantID] = grant.ID.String()
-
-	if tresp.OverrideAccessTokenSubject != "" {
-		ac.Subject = tresp.OverrideAccessTokenSubject
-	}
-
-	acJSON, err := json.Marshal(ac)
+	var ac map[string]any
+	acb, err := json.Marshal(tresp.AccessTokenClaims)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling access token claims: %w", err)
 	}
-
-	acjwt, err := tinkjwt.NewRawJWTFromJSON(th.Ptr(jwt.JWTTYPAccessToken), acJSON)
-	if err != nil {
-		return nil, fmt.Errorf("creating access token jwt: %w", err)
+	if err := json.Unmarshal(acb, &ac); err != nil {
+		return nil, fmt.Errorf("unmarshalling access token claims: %w", err)
 	}
 
-	h, err := s.config.Keyset.HandleFor(alg)
-	if err != nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "getting handle", Cause: err}
+	if ac == nil {
+		// handle case where no claims are set. they we just MVP a token
+		ac = make(map[string]any)
 	}
 
-	signer, err := tinkjwt.NewSigner(h)
-	if err != nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "creating signer from handle", Cause: err}
+	// fixed values
+	ac["iss"] = s.config.Issuer
+	ac["iat"] = jwt.UnixTime(s.now().Unix())
+	ac["client_id"] = grant.ClientID
+	ac["jti"] = uuid.Must(uuid.NewRandom()).String()
+	ac[claimGrantID] = grant.ID.String()
+
+	// defaulted values
+	if _, subok := ac["sub"]; !subok {
+		ac["sub"] = grant.UserID
+	}
+	if _, expok := ac["exp"]; !expok {
+		ac["exp"] = jwt.UnixTime(atExp.Unix())
+	}
+	if _, audok := ac["aud"]; !audok {
+		ac["aud"] = jwt.StrOrSlice{grant.ClientID}
 	}
 
-	sidt, err := signer.SignAndEncode(idjwt)
-	if err != nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign id token", Cause: err}
-	}
-
-	sat, err := signer.SignAndEncode(acjwt)
-	if err != nil {
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to sign access token", Cause: err}
-	}
-
-	return &oauth2.TokenResponse{
-		AccessToken:  sat,
-		RefreshToken: refreshTok,
-		TokenType:    "bearer",
-		ExpiresIn:    atExp.Sub(s.now()),
-		ExtraParams: map[string]interface{}{
-			"id_token": string(sidt),
-		},
-	}, nil
+	return ac, nil
 }
 
 func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {

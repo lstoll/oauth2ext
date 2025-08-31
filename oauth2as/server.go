@@ -35,7 +35,7 @@ type Config struct {
 	// Storage is the storage backend to use for the server.
 	Storage Storage
 	Clients ClientSource
-	Keyset  AlgKeysets
+	Signer  AlgorithmSigner
 
 	Logger *slog.Logger
 
@@ -101,7 +101,7 @@ func NewServer(c Config) (*Server, error) {
 	if c.Clients == nil {
 		return nil, fmt.Errorf("clients is required")
 	}
-	if c.Keyset == nil {
+	if c.Signer == nil {
 		return nil, fmt.Errorf("keyset is required")
 	}
 
@@ -151,7 +151,7 @@ func NewServer(c Config) (*Server, error) {
 
 	// Build discovery metadata
 	var mdAlgs []string
-	for _, k := range c.Keyset.SupportedAlgorithms() {
+	for _, k := range c.Signer.SupportedAlgorithms() {
 		mdAlgs = append(mdAlgs, string(k))
 	}
 
@@ -169,13 +169,13 @@ func NewServer(c Config) (*Server, error) {
 			AuthorizationEndpoint:            issURL.ResolveReference(&url.URL{Path: c.AuthorizationPath}).String(),
 			TokenEndpoint:                    issURL.ResolveReference(&url.URL{Path: c.TokenPath}).String(),
 		},
-		Keyset: &pubHandle{h: c.Keyset},
+		Keyset: c.Signer,
 	}
 	if c.UserinfoPath != "" {
 		svr.oidcProvider.Metadata.UserinfoEndpoint = issURL.ResolveReference(&url.URL{Path: c.UserinfoPath}).String()
 	}
 
-	discoh, err := discovery.NewConfigurationHandler(svr.oidcProvider.Metadata, &pubHandle{h: c.Keyset})
+	discoh, err := discovery.NewConfigurationHandler(svr.oidcProvider.Metadata, c.Signer)
 	if err != nil {
 		return nil, fmt.Errorf("creating configuration handler: %w", err)
 	}
