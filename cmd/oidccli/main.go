@@ -12,6 +12,7 @@ import (
 	"github.com/lstoll/oauth2ext/clitoken"
 	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oidc"
+	"github.com/lstoll/oauth2ext/oidcclientreg"
 	"github.com/lstoll/oauth2ext/tokencache"
 	"golang.org/x/oauth2"
 )
@@ -22,14 +23,15 @@ type subCommand struct {
 }
 
 type baseOpts struct {
-	Issuer       string
-	ClientID     string
-	ClientSecret string
-	PortLow      int
-	PortHigh     int
-	Offline      bool
-	SkipCache    bool
-	Scopes       string
+	Issuer         string
+	ClientID       string
+	ClientSecret   string
+	PortLow        int
+	PortHigh       int
+	Offline        bool
+	SkipCache      bool
+	Scopes         string
+	RegisterClient bool
 }
 
 type rawOpts struct {
@@ -48,13 +50,14 @@ func main() {
 	baseFlags := baseOpts{}
 	baseFs := flag.NewFlagSet("oidccli", flag.ExitOnError)
 	baseFs.StringVar(&baseFlags.Issuer, "issuer", baseFlags.Issuer, "OIDC Issuer URL (required)")
-	baseFs.StringVar(&baseFlags.ClientID, "client-id", baseFlags.ClientID, "OIDC Client ID (required)")
-	baseFs.StringVar(&baseFlags.ClientSecret, "client-secret", baseFlags.ClientSecret, "OIDC Client Secret")
+	baseFs.StringVar(&baseFlags.ClientID, "client-id", baseFlags.ClientID, "OIDC Client ID (required unless -register-client is set)")
+	baseFs.StringVar(&baseFlags.ClientSecret, "client-secret", baseFlags.ClientSecret, "OIDC Client Secret (required unless -register-client is set)")
 	baseFs.IntVar(&baseFlags.PortLow, "port-low", 0, "Lowest TCP port to bind on localhost for callbacks. By default, a port will be randomly assigned by the operating system.")
 	baseFs.IntVar(&baseFlags.PortHigh, "port-high", 0, "Highest TCP port to bind on localhost for callbacks. By default, a port will be randomly assigned by the operating system.")
 	baseFs.BoolVar(&baseFlags.Offline, "offline", baseFlags.Offline, "Offline use (request refresh token). This token will be cached locally, can be used to avoid re-launching the auth flow when the token expires")
 	baseFs.BoolVar(&baseFlags.SkipCache, "skip-cache", baseFlags.SkipCache, "Do not perform any local caching on token")
 	baseFs.StringVar(&baseFlags.Scopes, "scopes", baseFlags.Scopes, "Comma separated list of extra scopes to request")
+	baseFs.BoolVar(&baseFlags.RegisterClient, "register-client", baseFlags.RegisterClient, "Perform dynamic client registration and use the returned client ID/secret")
 
 	var subcommands []*subCommand
 
@@ -96,8 +99,18 @@ func main() {
 	if baseFlags.Issuer == "" {
 		missingFlags = append(missingFlags, "issuer")
 	}
-	if baseFlags.ClientID == "" {
-		missingFlags = append(missingFlags, "client-id")
+
+	// Validate flag combinations
+	if baseFlags.RegisterClient {
+		if baseFlags.ClientID != "" || baseFlags.ClientSecret != "" {
+			fmt.Print("error: -register-client cannot be used with -client-id or -client-secret\n\n")
+			printFullUsage(baseFs, subcommands)
+			os.Exit(1)
+		}
+	} else {
+		if baseFlags.ClientID == "" {
+			missingFlags = append(missingFlags, "client-id")
+		}
 	}
 
 	var execFn func(context.Context, *oidc.Provider, oauth2.TokenSource) error
@@ -143,6 +156,25 @@ func main() {
 	if err != nil {
 		fmt.Printf("discovering issuer %s: %v", baseFlags.Issuer, err)
 		os.Exit(1)
+	}
+
+	// Perform dynamic client registration if requested
+	if baseFlags.RegisterClient {
+		clientID, clientSecret, err := registerClient(ctx, provider)
+		if err != nil {
+			fmt.Printf("registering client: %v", err)
+			os.Exit(1)
+		}
+
+		// Print the client credentials
+		fmt.Printf("Client ID: %s\n", clientID)
+		if clientSecret != "" {
+			fmt.Printf("Client Secret: %s\n", clientSecret)
+		}
+
+		// Use the registered client credentials
+		baseFlags.ClientID = clientID
+		baseFlags.ClientSecret = clientSecret
 	}
 
 	scopes := []string{oidc.ScopeOpenID}
@@ -344,4 +376,22 @@ func info(ctx context.Context, provider *oidc.Provider, ts oauth2.TokenSource, _
 // isJWT guesses is something is a JWT
 func isJWT(s string) bool {
 	return strings.Count(s, ".") == 2
+}
+
+// registerClient performs dynamic client registration with the OIDC provider
+func registerClient(ctx context.Context, provider *oidc.Provider) (string, string, error) {
+	// Create registration request
+	request := &oidcclientreg.ClientRegistrationRequest{
+		RedirectURIs:    []string{"http://127.0.0.1/callback"},
+		ApplicationType: "native",
+		ResponseTypes:   []string{"code"},
+		GrantTypes:      []string{"authorization_code"},
+	}
+
+	response, err := oidcclientreg.RegisterWithProvider(ctx, provider, request)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to register client: %w", err)
+	}
+
+	return response.ClientID, response.ClientSecret, nil
 }
