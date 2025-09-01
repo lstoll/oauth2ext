@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -175,6 +176,8 @@ func main() {
 		// Use the registered client credentials
 		baseFlags.ClientID = clientID
 		baseFlags.ClientSecret = clientSecret
+		// We always create a new client, so caching doesn't help.
+		baseFlags.SkipCache = true
 	}
 
 	scopes := []string{oidc.ScopeOpenID}
@@ -386,6 +389,10 @@ func registerClient(ctx context.Context, provider *oidc.Provider) (string, strin
 		ApplicationType: "native",
 		ResponseTypes:   []string{"code"},
 		GrantTypes:      []string{"authorization_code"},
+	}
+
+	if slices.Contains(provider.Metadata.IDTokenSigningAlgValuesSupported, "ES256") {
+		request.IDTokenSignedResponseAlg = "ES256"
 	}
 
 	response, err := oidcclientreg.RegisterWithProvider(ctx, provider, request)
