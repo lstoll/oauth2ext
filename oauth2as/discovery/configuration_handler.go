@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -15,21 +16,18 @@ import (
 	"github.com/lstoll/oauth2ext/oidc"
 )
 
-const awsSTSUserAgent = "AWS Security Token Service"
-
 const DefaultCacheFor = 1 * time.Minute
 
-var _ http.Handler = (*ConfigurationHandler)(nil)
+var _ http.Handler = (*OIDCConfigurationHandler)(nil)
 
-// ConfigurationHandler is a http.ConfigurationHandler that can serve the OIDC
-// provider metadata endpoint, and keys from a source.
+// OIDCConfigurationHandler is a http.ConfigurationHandler that can serve the
+// OIDC provider metadata endpoint, and keys from a source.
 //
-// It should be mounted at `<issuer>/.well-known/openid-configuration`, and all
-// subpaths. This can be achieved with the stdlib mux by using a trailing slash.
-// Any prefix should be stripped before calling this ConfigurationHandler
-type ConfigurationHandler struct {
-	md     *oidc.ProviderMetadata
-	keyset jwt.PublicKeyset
+// It should be mounted at `GET /.well-known/openid-configuration`, and `GET
+// /.well-known/jwks.json` (unless overridden)
+type OIDCConfigurationHandler struct {
+	md         *oidc.ProviderMetadata
+	jwksSource JWKSSource
 
 	mux *http.ServeMux
 
@@ -60,13 +58,81 @@ func DefaultCoreMetadata(issuer string) *oidc.ProviderMetadata {
 	}
 }
 
-// NewConfigurationHandler configures and returns a ConfigurationHandler.
-func NewConfigurationHandler(metadata *oidc.ProviderMetadata, keyset jwt.PublicKeyset) (*ConfigurationHandler, error) {
-	h := &ConfigurationHandler{
-		md:       metadata,
-		keyset:   keyset,
-		mux:      http.NewServeMux(),
-		cacheFor: DefaultCacheFor,
+// Keyset is an interface that can be implemented by a type to provide a set of
+// public keys to serve as the provider's verification keyset.
+type Keyset interface {
+	// GetKeys returns the full set of valid public keys for this provider.
+	GetKeys(ctx context.Context) ([]jwt.PublicKey, error)
+}
+
+type keysetJWKSSource struct {
+	keyset Keyset
+}
+
+func (s *keysetJWKSSource) GetJWKS(ctx context.Context) ([]byte, error) {
+	pks, err := s.keyset.GetKeys(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting public handle: %w", err)
+	}
+
+	var jwks jose.JSONWebKeySet
+	for _, k := range pks {
+		if err := k.Valid(); err != nil {
+			return nil, fmt.Errorf("invalid key %s in keyset: %w", k.KeyID, err)
+		}
+		jwks.Keys = append(jwks.Keys, jose.JSONWebKey{
+			KeyID:     k.KeyID,
+			Algorithm: string(k.Alg),
+			Key:       k.Key,
+		})
+	}
+
+	publicJWKset, err := json.Marshal(jwks)
+	if err != nil {
+		return nil, fmt.Errorf("creating jwks from handle: %w", err)
+	}
+	return publicJWKset, nil
+}
+
+// JWKSSource can be used to return a JWKS to serve on the discovery endpoint.
+// No verification will be done on the JWKS.
+type JWKSSource interface {
+	GetJWKS(context.Context) ([]byte, error)
+}
+
+// NewOIDCConfigurationHandlerWithKeyset is the same as
+// NewConfigurationHandlerWithJWKSSource, but it takes a Keyset instead of a
+// JWKSSource.
+func NewOIDCConfigurationHandlerWithKeyset(metadata *oidc.ProviderMetadata, keyset Keyset) (*OIDCConfigurationHandler, error) {
+	jwksSource := &keysetJWKSSource{keyset: keyset}
+	return NewOIDCConfigurationHandlerWithJWKSSource(metadata, jwksSource)
+}
+
+// NewOIDCConfigurationHandlerWithJWKSSource configures and returns a
+// ConfigurationHandler for the given provider metadata and keyset.
+//
+// The handler should be configured to serve the following paths:
+// GET /.well-known/openid-configuration
+// GET /.well-known/jwks.json (unless overridden)
+func NewOIDCConfigurationHandlerWithJWKSSource(metadata *oidc.ProviderMetadata, jwksSource JWKSSource) (*OIDCConfigurationHandler, error) {
+	h := &OIDCConfigurationHandler{
+		md:         metadata,
+		jwksSource: jwksSource,
+		mux:        http.NewServeMux(),
+		cacheFor:   DefaultCacheFor,
+	}
+
+	jwksPath := `/.well-known/jwks.json`
+	if metadata.JWKSURI != "" {
+		// Note - if it's a different host, this will fail. If that is a desired
+		// use case, the metadata serving should be constructed manually.
+		u, err := url.Parse(metadata.JWKSURI)
+		if err != nil {
+			return nil, fmt.Errorf("parsing JWKSURI %s: %w", metadata.JWKSURI, err)
+		}
+		jwksPath = u.Path
+	} else {
+		metadata.JWKSURI = metadata.Issuer + jwksPath
 	}
 
 	if err := validateMetadata(h.md); err != nil {
@@ -78,16 +144,16 @@ func NewConfigurationHandler(metadata *oidc.ProviderMetadata, keyset jwt.PublicK
 	}
 
 	h.mux.HandleFunc("GET /.well-known/openid-configuration", h.serveConfig)
-	h.mux.HandleFunc("GET /.well-known/jwks.json", h.serveKeys)
+	h.mux.HandleFunc("GET "+jwksPath, h.serveKeys)
 
 	return h, nil
 }
 
-func (h *ConfigurationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *OIDCConfigurationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
-func (h *ConfigurationHandler) serveConfig(w http.ResponseWriter, req *http.Request) {
+func (h *OIDCConfigurationHandler) serveConfig(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if err := json.NewEncoder(w).Encode(h.md); err != nil {
@@ -96,26 +162,12 @@ func (h *ConfigurationHandler) serveConfig(w http.ResponseWriter, req *http.Requ
 	}
 }
 
-func (h *ConfigurationHandler) serveKeys(w http.ResponseWriter, req *http.Request) {
+func (h *OIDCConfigurationHandler) serveKeys(w http.ResponseWriter, req *http.Request) {
 	if err := h.getJWKS(req.Context()); err != nil {
 		slog.ErrorContext(req.Context(), "getting jwks", "err", err.Error())
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
 	}
 	jwks := h.currJWKS
-
-	if strings.Contains(req.UserAgent(), awsSTSUserAgent) {
-		// AWS STS rejects JWKS that contains a "key_ops" field with the value
-		// of "verify" (other values not tested). This seems like a mistake and
-		// are going to follow up with them, in the mean time make it happy by
-		// removing the fields.
-		j, err := stripKeyOps(jwks)
-		if err != nil {
-			slog.ErrorContext(req.Context(), "failed to write jwks", "err", err.Error())
-			http.Error(w, "Internal Error", http.StatusInternalServerError)
-			return
-		}
-		jwks = j
-	}
 
 	w.Header().Set("Content-Type", "application/jwk-set+json")
 	if _, err := w.Write(jwks); err != nil {
@@ -126,29 +178,17 @@ func (h *ConfigurationHandler) serveKeys(w http.ResponseWriter, req *http.Reques
 }
 
 // getJWKS reads the keyset from the handle, and stores it on this instance.
-func (h *ConfigurationHandler) getJWKS(ctx context.Context) error {
+func (h *OIDCConfigurationHandler) getJWKS(ctx context.Context) error {
 	h.currJWKSMu.Lock()
 	defer h.currJWKSMu.Unlock()
 
 	if h.currJWKS == nil || time.Now().After(h.lastKeysUpdate.Add(h.cacheFor)) {
-		pks, err := h.keyset.GetKeys(ctx)
+		jwks, err := h.jwksSource.GetJWKS(ctx)
 		if err != nil {
-			return fmt.Errorf("getting public handle: %w", err)
+			return fmt.Errorf("getting jwks: %w", err)
 		}
-		var jwks jose.JSONWebKeySet
-		for _, k := range pks {
-			jwks.Keys = append(jwks.Keys, jose.JSONWebKey{
-				KeyID:     k.KeyID,
-				Algorithm: string(k.Alg),
-				Key:       k.Key,
-			})
-		}
-		publicJWKset, err := json.Marshal(jwks)
-		if err != nil {
-			return fmt.Errorf("creating jwks from handle: %w", err)
-		}
+		h.currJWKS = jwks
 
-		h.currJWKS = publicJWKset
 		h.lastKeysUpdate = time.Now()
 	}
 
@@ -187,24 +227,4 @@ func validateMetadata(p *oidc.ProviderMetadata) error {
 		return fmt.Errorf("invalid provider metadata: %s", strings.Join(errs, ", "))
 	}
 	return nil
-}
-
-// stripKeyOps removes the key_ops field from the raw JWKS json.
-func stripKeyOps(in []byte) ([]byte, error) {
-	var jwks map[string]any
-	if err := json.Unmarshal(in, &jwks); err != nil {
-		return nil, fmt.Errorf("unmarshaling input jwks: %w", err)
-	}
-	keys, ok := jwks["keys"].([]any)
-	if !ok {
-		return nil, fmt.Errorf("jwks does not contain keys entry")
-	}
-	for _, k := range keys {
-		km, ok := k.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("key entry is not a map")
-		}
-		delete(km, "key_ops")
-	}
-	return json.Marshal(jwks)
 }
