@@ -3,7 +3,6 @@ package oauth2as_test
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/lstoll/oauth2ext/jwt"
 	"github.com/lstoll/oauth2ext/oauth2as"
+	"github.com/lstoll/oauth2ext/oauth2as/discovery"
 	"github.com/lstoll/oauth2ext/oauth2as/internal"
 	"github.com/lstoll/oauth2ext/oidc"
 	"golang.org/x/oauth2"
@@ -43,7 +43,7 @@ func TestE2E(t *testing.T) {
 			ctx := context.Background()
 
 			callbackChan := make(chan string, 1)
-			state := randomStateValue()
+			state := rand.Text()
 
 			cliSvr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				if errMsg := req.FormValue("error"); errMsg != "" {
@@ -126,7 +126,8 @@ func TestE2E(t *testing.T) {
 				}
 			})*/
 
-			oidcSvr := httptest.NewServer(nil)
+			oidcSvrMux := http.NewServeMux()
+			oidcSvr := httptest.NewServer(oidcSvrMux)
 			t.Cleanup(oidcSvr.Close)
 
 			opcfg := oauth2as.Config{
@@ -152,10 +153,24 @@ func TestE2E(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			oidcSvr.Config.Handler = op
+
+			oidcSvrMux.HandleFunc("/token", op.TokenHandler)
+			oidcSvrMux.HandleFunc("/userinfo", op.UserinfoHandler)
+
+			pmd := discovery.DefaultCoreMetadata(oidcSvr.URL)
+			pmd.AuthorizationEndpoint = oidcSvr.URL + "/authorization"
+			pmd.TokenEndpoint = oidcSvr.URL + "/token"
+			pmd.UserinfoEndpoint = oidcSvr.URL + "/userinfo"
+			pmd.IDTokenSigningAlgValuesSupported = []string{string(jwt.SigningAlgRS256), string(jwt.SigningAlgES256)}
+
+			ch, err := discovery.NewOIDCConfigurationHandlerWithKeyset(pmd, testSigner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oidcSvrMux.Handle("GET /.well-known/", ch) // can just do the whole well-known path here
 
 			// Add authorization endpoint handler
-			authorizationHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			oidcSvrMux.HandleFunc("/authorization", func(w http.ResponseWriter, req *http.Request) {
 				// Parse the authorization request
 				authReq, err := op.ParseAuthRequest(req)
 				if err != nil {
@@ -181,36 +196,6 @@ func TestE2E(t *testing.T) {
 				// Redirect to the callback with the authorization code
 				http.Redirect(w, req, redirectURI, http.StatusFound)
 			})
-
-			// Create a new mux that includes both the OIDC server and our authorization handler
-			mux := http.NewServeMux()
-			mux.HandleFunc("/authorization", authorizationHandler)
-			mux.Handle("/", op) // Handle all other requests with the OIDC server
-
-			oidcSvr.Config.Handler = mux
-
-			// privh, err := testKeysets()[oauth2as.SigningAlgRS256](ctx)
-			// if err != nil {
-			// 	t.Fatal(err)
-			// }
-			// pubh, err := privh.Public()
-			// if err != nil {
-			// 	t.Fatal(err)
-			// }
-
-			// discovery endpoint
-			// md := discovery.DefaultCoreMetadata(oidcSvr.URL)
-			// md.Issuer = oidcSvr.URL
-			// md.AuthorizationEndpoint = oidcSvr.URL + "/authorization"
-			// md.TokenEndpoint = oidcSvr.URL + "/token"
-			// md.UserinfoEndpoint = oidcSvr.URL + "/userinfo"
-
-			// discoh, err := discovery.NewConfigurationHandler(md, oidc.NewStaticPublicHandle(pubh))
-			// if err != nil {
-			// 	t.Fatalf("Failed to initialize discovery handler: %v", err)
-			// }
-			// mux.Handle("GET /.well-known/openid-configuration", discoh)
-			// mux.Handle("GET /.well-known/jwks.json", discoh)
 
 			provider, err := oidc.DiscoverProvider(ctx, oidcSvr.URL)
 			if err != nil {
@@ -315,17 +300,6 @@ func TestE2E(t *testing.T) {
 			}
 		})
 	}
-}
-
-func randomStateValue() string {
-	const numBytes = 16
-
-	b := make([]byte, numBytes)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-
-	return base64.RawStdEncoding.EncodeToString(b)
 }
 
 var (

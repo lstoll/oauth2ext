@@ -91,7 +91,7 @@ func (p *Provider) GetSupportedAlgs() []string {
 	return p.Metadata.IDTokenSigningAlgValuesSupported
 }
 
-func (p *Provider) GetIssuer() string {
+func (p *Provider) GetIssuerURL() string {
 	return p.Metadata.Issuer
 }
 

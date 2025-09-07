@@ -8,9 +8,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/lstoll/oauth2ext/oauth2as/discovery"
 	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
-	"github.com/lstoll/oauth2ext/oidc"
 )
 
 const (
@@ -76,9 +74,6 @@ type Config struct {
 type Server struct {
 	config Config
 
-	oidcProvider *oidc.Provider
-	mux          *http.ServeMux
-
 	logger *slog.Logger
 
 	now func() time.Time
@@ -90,9 +85,9 @@ func NewServer(c Config) (*Server, error) {
 		return nil, fmt.Errorf("issuer is required")
 	}
 
-	issURL, err := url.Parse(c.Issuer)
+	_, err := url.Parse(c.Issuer)
 	if err != nil {
-		return nil, fmt.Errorf("parsing issuer: %w", err)
+		return nil, fmt.Errorf("invalid issuer URL %s: %w", c.Issuer, err)
 	}
 
 	if c.Storage == nil {
@@ -133,7 +128,6 @@ func NewServer(c Config) (*Server, error) {
 
 	svr := &Server{
 		config: c,
-		mux:    http.NewServeMux(),
 		logger: slog.New(slog.DiscardHandler),
 		now:    time.Now,
 	}
@@ -149,45 +143,6 @@ func NewServer(c Config) (*Server, error) {
 		svr.logger = c.Logger
 	}
 
-	// Build discovery metadata
-	var mdAlgs []string
-	for _, k := range c.Signer.SupportedAlgorithms() {
-		mdAlgs = append(mdAlgs, string(k))
-	}
-
-	svr.oidcProvider = &oidc.Provider{
-		Metadata: &oidc.ProviderMetadata{
-			Issuer: c.Issuer,
-			ResponseTypesSupported: []string{
-				"code",
-			},
-			SubjectTypesSupported:            []string{"public"},
-			IDTokenSigningAlgValuesSupported: mdAlgs,
-			GrantTypesSupported:              []string{"authorization_code"},
-			CodeChallengeMethodsSupported:    []oidc.CodeChallengeMethod{oidc.CodeChallengeMethodS256},
-			JWKSURI:                          issURL.ResolveReference(&url.URL{Path: "/.well-known/jwks.json"}).String(),
-			AuthorizationEndpoint:            issURL.ResolveReference(&url.URL{Path: c.AuthorizationPath}).String(),
-			TokenEndpoint:                    issURL.ResolveReference(&url.URL{Path: c.TokenPath}).String(),
-		},
-		Keyset: c.Signer,
-	}
-	if c.UserinfoPath != "" {
-		svr.oidcProvider.Metadata.UserinfoEndpoint = issURL.ResolveReference(&url.URL{Path: c.UserinfoPath}).String()
-	}
-
-	discoh, err := discovery.NewOIDCConfigurationHandlerWithKeyset(svr.oidcProvider.Metadata, c.Signer)
-	if err != nil {
-		return nil, fmt.Errorf("creating configuration handler: %w", err)
-	}
-
-	svr.mux.Handle("GET /.well-known/openid-configuration", discoh)
-	svr.mux.Handle("GET /.well-known/jwks.json", discoh)
-
-	svr.mux.Handle("POST "+c.TokenPath, http.HandlerFunc(svr.Token))
-	if c.UserinfoPath != "" {
-		svr.mux.Handle("GET "+c.UserinfoPath, http.HandlerFunc(svr.Userinfo))
-	}
-
 	return svr, nil
 }
 
@@ -196,16 +151,6 @@ const (
 	DefaultTokenEndpoint         = "/token"
 	DefaultUserinfoEndpoint      = "/userinfo"
 )
-
-// ServeHTTP will handle requests on the following paths:
-// * TokenPath
-// * UserinfoPath, if configured
-// * /.well-known/openid-configuration
-// * /.well-known/jwks.json
-// TODO - oauth2 discovery endpoint
-func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	s.mux.ServeHTTP(w, req)
-}
 
 func (s *Server) validateTokenClient(ctx context.Context, req *oauth2.TokenRequest, wantClientID string) error {
 	// check to see if we're working with the same client

@@ -48,8 +48,8 @@ func TestDiscovery(t *testing.T) {
 		t.Fatalf("failed to discover provider: %v", err)
 	}
 
-	if p.GetIssuer() != ts.URL {
-		t.Errorf("expected issuer %s, got %s", ts.URL, p.GetIssuer())
+	if p.GetIssuerURL() != ts.URL {
+		t.Errorf("expected issuer %s, got %s", ts.URL, p.GetIssuerURL())
 	}
 
 	keyset := p.GetKeyset()
