@@ -74,6 +74,9 @@ func verifyToken(ctx context.Context, keyset PublicKeyset, rawJWT string, opts v
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("no key found for kid %q", sigHeader.KeyID)
 	}
+	if err := checkKeysValid(keys); err != nil {
+		return nil, fmt.Errorf("invalid keys: %w", err)
+	}
 
 	var payload []byte
 	var verifyErr error
@@ -139,4 +142,14 @@ func algsToJOSEAlgs[T ~string](algs []T) []jose.SignatureAlgorithm {
 		supportedAlgs[i] = jose.SignatureAlgorithm(alg)
 	}
 	return supportedAlgs
+}
+
+func checkKeysValid(keys []PublicKey) error {
+	var retErr error
+	for _, key := range keys {
+		if err := key.Valid(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("invalid key %s: %w", key.KeyID, err))
+		}
+	}
+	return retErr
 }

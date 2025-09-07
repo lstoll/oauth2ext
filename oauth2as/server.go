@@ -175,7 +175,7 @@ func NewServer(c Config) (*Server, error) {
 		svr.oidcProvider.Metadata.UserinfoEndpoint = issURL.ResolveReference(&url.URL{Path: c.UserinfoPath}).String()
 	}
 
-	discoh, err := discovery.NewConfigurationHandler(svr.oidcProvider.Metadata, c.Signer)
+	discoh, err := discovery.NewOIDCConfigurationHandlerWithKeyset(svr.oidcProvider.Metadata, c.Signer)
 	if err != nil {
 		return nil, fmt.Errorf("creating configuration handler: %w", err)
 	}

@@ -1,35 +1,95 @@
-package discovery
+package discovery_test
 
-// func TestDiscovery(t *testing.T) {
-// 	t.Parallel()
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
 
-// 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-// 	defer cancel()
+	"github.com/lstoll/oauth2ext/internal"
+	"github.com/lstoll/oauth2ext/jwt"
+	"github.com/lstoll/oauth2ext/oauth2as/discovery"
+	"github.com/lstoll/oauth2ext/oidc"
+	"golang.org/x/oauth2"
+)
 
-// 	m := http.NewServeMux()
-// 	ts := httptest.NewServer(m)
+func TestDiscovery(t *testing.T) {
+	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	t.Cleanup(cancel)
 
-// 	kh, err := NewKeysHandler(PublicHandle, 1*time.Nanosecond)
-// 	if err != nil {
-// 		t.Fatal(err)
-// 	}
-// 	m.Handle("/jwks.json", kh)
+	testSigner := internal.NewTestSigner(t)
 
-// 	pm := &ProviderMetadata{
-// 		Issuer:                ts.URL,
-// 		JWKSURI:               ts.URL + "/jwks.json",
-// 		AuthorizationEndpoint: "/auth",
-// 		TokenEndpoint:         "/token",
-// 	}
+	mockKeyset, err := jwt.NewStaticKeysetFromJWKS(testSigner.JWKS())
+	if err != nil {
+		t.Fatalf("failed to create mock keyset: %v", err)
+	}
 
-// 	ch, err := NewConfigurationHandler(pm, WithCoreDefaults())
-// 	if err != nil {
-// 		t.Fatalf("error creating handler: %v", err)
-// 	}
-// 	m.Handle(oidcwk, ch)
+	m := http.NewServeMux()
+	ts := httptest.NewTLSServer(m)
+	defer ts.Close()
 
-// 	_, err = NewClient(ctx, ts.URL)
-// 	if err != nil {
-// 		t.Fatalf("failed to create discovery client: %v", err)
-// 	}
-// }
+	pm := discovery.DefaultCoreMetadata(ts.URL)
+	pm.AuthorizationEndpoint = ts.URL + "/authorization"
+	pm.TokenEndpoint = ts.URL + "/token"
+	pm.IDTokenSigningAlgValuesSupported = []string{string(jwt.SigningAlgES256)}
+
+	ch, err := discovery.NewOIDCConfigurationHandlerWithKeyset(pm, mockKeyset)
+	if err != nil {
+		t.Fatalf("error creating handler: %v", err)
+	}
+
+	m.Handle("GET /.well-known/", ch)
+
+	discCtx := context.WithValue(ctx, oauth2.HTTPClient, ts.Client())
+	p, err := oidc.DiscoverProvider(discCtx, ts.URL)
+	if err != nil {
+		t.Fatalf("failed to discover provider: %v", err)
+	}
+
+	if p.GetIssuer() != ts.URL {
+		t.Errorf("expected issuer %s, got %s", ts.URL, p.GetIssuer())
+	}
+
+	keyset := p.GetKeyset()
+	if keyset == nil {
+		t.Fatal("provider keyset is nil")
+	}
+
+	allKeys, err := mockKeyset.GetKeys(ctx)
+	if err != nil {
+		t.Fatalf("failed to get all keys from mock keyset: %v", err)
+	}
+
+	if len(allKeys) == 0 {
+		t.Fatal("no keys found in mock keyset")
+	}
+
+	// Use the first key's KID for testing
+	testKID := allKeys[0].KeyID
+
+	keys, err := keyset.GetKeysByKID(ctx, testKID)
+	if err != nil {
+		t.Fatalf("failed to get keys by KID: %v", err)
+	}
+
+	if len(keys) == 0 {
+		t.Fatal("no keys found for test KID")
+	}
+
+	found := false
+	for _, key := range keys {
+		if key.KeyID == testKID {
+			found = true
+			if key.Alg != jwt.SigningAlgES256 {
+				t.Errorf("expected algorithm ES256, got %s", key.Alg)
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Fatal("test key not found in discovered keyset")
+	}
+}

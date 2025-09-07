@@ -4,10 +4,14 @@ import (
 	"context"
 
 	"github.com/lstoll/oauth2ext/jwt"
+	"github.com/lstoll/oauth2ext/oauth2as/discovery"
 )
 
 type AlgorithmSigner interface {
-	// PubliKeyset is used for verifying issued tokens, e.g in the Userinfo
+	// KeySet is used to determine the set of keys to serve on the discovery
+	// endpoint.
+	discovery.Keyset
+	// VerificationKeyset is used to verify issued tokens, e.g in the Userinfo
 	// endpoint.
 	jwt.PublicKeyset
 	// SignWithAlgorithm should sign the payload with the given algorithm and
