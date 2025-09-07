@@ -32,7 +32,6 @@ func TestRegisterWithProvider(t *testing.T) {
 				ClientIDIssuedAt:        1234567890,
 				RegistrationAccessToken: "reg_token_123",
 				RegistrationClientURI:   "https://provider.com/register/client123",
-				RedirectURIs:            []string{"https://example.com/callback"},
 			},
 			statusCode: http.StatusOK,
 			wantErr:    false,

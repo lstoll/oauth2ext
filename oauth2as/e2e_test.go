@@ -144,9 +144,8 @@ func TestE2E(t *testing.T) {
 						},
 					}, nil
 				},
-				Clients:      clientSource,
-				Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-				UserinfoPath: "/userinfo",
+				Clients: clientSource,
+				Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 			}
 
 			op, err := oauth2as.NewServer(opcfg)

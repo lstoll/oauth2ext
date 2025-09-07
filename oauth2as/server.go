@@ -62,13 +62,6 @@ type Config struct {
 	// Defaults to DefaultMaxRefreshTime. Any refesh token may be considered
 	// valid up until this time.
 	MaxRefreshTime time.Duration
-
-	// AuthorizationPath is the path to the authorization endpoint. The server
-	// does not handle requests to this, but it is published in the discovery
-	// metadata.
-	AuthorizationPath string
-	TokenPath         string
-	UserinfoPath      string
 }
 
 type Server struct {
@@ -132,25 +125,12 @@ func NewServer(c Config) (*Server, error) {
 		now:    time.Now,
 	}
 
-	if c.AuthorizationPath == "" {
-		c.AuthorizationPath = DefaultAuthorizationEndpoint
-	}
-	if c.TokenPath == "" {
-		c.TokenPath = DefaultTokenEndpoint
-	}
-
 	if c.Logger != nil {
 		svr.logger = c.Logger
 	}
 
 	return svr, nil
 }
-
-const (
-	DefaultAuthorizationEndpoint = "/authorization"
-	DefaultTokenEndpoint         = "/token"
-	DefaultUserinfoEndpoint      = "/userinfo"
-)
 
 func (s *Server) validateTokenClient(ctx context.Context, req *oauth2.TokenRequest, wantClientID string) error {
 	// check to see if we're working with the same client
