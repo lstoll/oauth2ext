@@ -10,24 +10,6 @@ import (
 	"golang.org/x/oauth2"
 )
 
-type mockProvider struct {
-	issuer        string
-	keyset        PublicKeyset
-	supportedAlgs []string
-}
-
-func (m *mockProvider) GetIssuer() string {
-	return m.issuer
-}
-
-func (m *mockProvider) GetKeyset() PublicKeyset {
-	return m.keyset
-}
-
-func (m *mockProvider) GetSupportedAlgs() []string {
-	return m.supportedAlgs
-}
-
 func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 	// Create valid ID token claims
 	now := time.Now()
@@ -74,10 +56,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}
@@ -111,10 +93,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "wrong-client-id",
 				}
@@ -131,10 +113,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID:       "test-client-id",
 					IgnoreClientID: true,
@@ -149,10 +131,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID:   "test-client-id",
 					WantAnyACR: []string{"urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport"},
@@ -167,10 +149,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID:   "test-client-id",
 					WantAnyACR: []string{"urn:oasis:names:tc:SAML:2.0:ac:classes:TwoFactorContract"},
@@ -186,10 +168,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 					WantAnyACR: []string{
@@ -209,10 +191,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}
@@ -229,10 +211,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}
@@ -249,10 +231,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}
@@ -267,10 +249,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        wrongKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        wrongKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}
@@ -285,10 +267,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        wrongKeyset, // This should be ignored
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        wrongKeyset, // This should be ignored
+						SupportedAlgs: []string{"ES256"},
 					},
 					OverrideKeyset: validKeyset, // This should be used
 					ClientID:       "test-client-id",
@@ -303,10 +285,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}
@@ -327,10 +309,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}
@@ -349,10 +331,10 @@ func TestIDTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}
@@ -435,10 +417,10 @@ func TestIDTokenVerifier_Verify(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}
@@ -454,10 +436,10 @@ func TestIDTokenVerifier_Verify(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}
@@ -474,10 +456,10 @@ func TestIDTokenVerifier_Verify(t *testing.T) {
 			},
 			setupVerifier: func() *IDTokenVerifier {
 				return &IDTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					ClientID: "test-client-id",
 				}

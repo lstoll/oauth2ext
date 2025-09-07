@@ -9,7 +9,7 @@ import (
 )
 
 type IDTokenVerifier struct {
-	Provider       Provider
+	Provider       Issuer
 	OverrideKeyset PublicKeyset
 
 	ClientID       string
@@ -28,7 +28,7 @@ func (i *IDTokenVerifier) Verify(ctx context.Context, token *oauth2.Token) (*IDC
 
 func (i *IDTokenVerifier) VerifyRaw(ctx context.Context, rawJWT string) (*IDClaims, error) {
 	vopts := verifyOpts{
-		Issuer:          i.Provider.GetIssuer(),
+		Issuer:          i.Provider.GetIssuerURL(),
 		SupportedAlgs:   algsToJOSEAlgs(i.Provider.GetSupportedAlgs()),
 		WantAnyAudience: jwt.Audience{i.ClientID},
 		SkipAudience:    i.IgnoreClientID,

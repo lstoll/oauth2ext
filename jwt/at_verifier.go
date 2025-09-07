@@ -9,7 +9,7 @@ import (
 )
 
 type AccessTokenVerifier struct {
-	Provider       Provider
+	Provider       Issuer
 	OverrideKeyset PublicKeyset
 
 	WantAnyAudience []string
@@ -22,7 +22,7 @@ func (a *AccessTokenVerifier) Verify(ctx context.Context, token *oauth2.Token) (
 
 func (a *AccessTokenVerifier) VerifyRaw(ctx context.Context, rawJWT string) (*AccessTokenClaims, error) {
 	vopts := verifyOpts{
-		Issuer:          a.Provider.GetIssuer(),
+		Issuer:          a.Provider.GetIssuerURL(),
 		WantType:        JWTTYPAccessToken,
 		SupportedAlgs:   algsToJOSEAlgs(a.Provider.GetSupportedAlgs()),
 		WantAnyAudience: jwt.Audience(a.WantAnyAudience),

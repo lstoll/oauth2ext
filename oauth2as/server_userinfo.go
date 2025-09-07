@@ -26,13 +26,18 @@ type UserinfoResponse struct {
 	Identity *jwt.IDClaims
 }
 
-// Userinfo can handle a request to the userinfo endpoint. If the request is not
+// UserinfoHandler can handle a request to the userinfo endpoint. If the request is not
 // valid, an error will be returned. Otherwise handler will be invoked with
 // information about the requestor passed in. This handler should write the
 // appropriate response data in JSON format to the passed writer.
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#UserInfoResponse
-func (s *Server) Userinfo(w http.ResponseWriter, req *http.Request) {
+func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+
 	authSp := strings.SplitN(req.Header.Get("authorization"), " ", 2)
 	if !strings.EqualFold(authSp[0], "bearer") || len(authSp) != 2 {
 		be := &oauth2.BearerError{} // no content, just request auth
@@ -41,14 +46,17 @@ func (s *Server) Userinfo(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// TODO - check the audience is the issuer, as we have hardcoded.
-
-	verifier := &jwt.AccessTokenVerifier{
-		Provider:       s.oidcProvider,
+	// TODO - scopes or audience check on the token?
+	atVerifier := &jwt.AccessTokenVerifier{
+		Provider: &jwt.StaticIssuer{
+			IssuerURL:     s.config.Issuer,
+			Keyset:        s.config.Signer,
+			SupportedAlgs: s.config.Signer.SupportedAlgorithms(),
+		},
 		IgnoreAudience: true,
 	}
 
-	atClaims, err := verifier.VerifyRaw(req.Context(), authSp[1])
+	atClaims, err := atVerifier.VerifyRaw(req.Context(), authSp[1])
 	if err != nil {
 		slog.ErrorContext(req.Context(), "invalid access token", "error", err)
 		be := &oauth2.BearerError{Code: oauth2.BearerErrorCodeInvalidRequest, Description: "invalid access token"}

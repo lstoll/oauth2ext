@@ -551,7 +551,7 @@ func TestUserinfo(t *testing.T) {
 				req.Header.Set("authorization", "Bearer "+at)
 			}
 
-			oidc.Userinfo(rec, req)
+			oidc.UserinfoHandler(rec, req)
 			if tc.WantErr && rec.Result().StatusCode == http.StatusOK {
 				t.Error("want error, but got none")
 			}

@@ -59,10 +59,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
@@ -108,10 +108,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"wrong-audience"},
 				}
@@ -128,10 +128,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 					IgnoreAudience:  true,
@@ -148,10 +148,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"another-audience", "third-audience"},
 				}
@@ -167,10 +167,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
@@ -187,10 +187,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
@@ -209,10 +209,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
@@ -226,10 +226,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        wrongKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        wrongKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
@@ -244,10 +244,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        wrongKeyset, // This should be ignored
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        wrongKeyset, // This should be ignored
+						SupportedAlgs: []string{"ES256"},
 					},
 					OverrideKeyset:  validKeyset, // This should be used
 					WantAnyAudience: []string{"test-audience"},
@@ -262,10 +262,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
@@ -286,10 +286,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
@@ -315,10 +315,10 @@ func TestAccessTokenVerifier_VerifyRaw(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
@@ -411,10 +411,10 @@ func TestAccessTokenVerifier_Verify(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
@@ -430,10 +430,10 @@ func TestAccessTokenVerifier_Verify(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
@@ -450,10 +450,10 @@ func TestAccessTokenVerifier_Verify(t *testing.T) {
 			},
 			setupVerifier: func() *AccessTokenVerifier {
 				return &AccessTokenVerifier{
-					Provider: &mockProvider{
-						issuer:        "https://test-issuer.com",
-						keyset:        validKeyset,
-						supportedAlgs: []string{"ES256"},
+					Provider: &StaticIssuer{
+						IssuerURL:     "https://test-issuer.com",
+						Keyset:        validKeyset,
+						SupportedAlgs: []string{"ES256"},
 					},
 					WantAnyAudience: []string{"test-audience"},
 				}
