@@ -3,7 +3,7 @@ package oauth2as
 import (
 	"context"
 
-	"github.com/lstoll/oauth2ext/jwt"
+	"lds.li/oauth2ext/jwt"
 )
 
 type AlgorithmSigner interface {

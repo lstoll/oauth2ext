@@ -10,8 +10,8 @@ import (
 
 	"net/http"
 
-	"github.com/lstoll/oauth2ext/oidc"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/oidc"
 )
 
 const (

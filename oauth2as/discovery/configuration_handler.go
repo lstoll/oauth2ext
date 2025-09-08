@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/lstoll/oauth2ext/jwt"
-	"github.com/lstoll/oauth2ext/oidc"
+	"lds.li/oauth2ext/jwt"
+	"lds.li/oauth2ext/oidc"
 )
 
 const DefaultCacheFor = 1 * time.Minute

@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
-	"github.com/lstoll/oauth2ext/internal"
+	"lds.li/oauth2ext/internal"
 )
 
 func TestVerifyToken(t *testing.T) {

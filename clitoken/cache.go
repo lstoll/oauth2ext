@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"runtime"
 
-	"github.com/lstoll/oauth2ext/oidc"
-	"github.com/lstoll/oauth2ext/tokencache"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/tokencache"
 )
 
 var (

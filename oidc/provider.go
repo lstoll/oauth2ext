@@ -10,9 +10,9 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	josejson "github.com/go-jose/go-jose/v4/json"
-	"github.com/lstoll/oauth2ext/internal"
-	"github.com/lstoll/oauth2ext/jwt"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/internal"
+	"lds.li/oauth2ext/jwt"
 )
 
 const DefaultProviderCacheDuration = 15 * time.Minute

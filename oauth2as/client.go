@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/url"
 
-	"github.com/lstoll/oauth2ext/jwt"
+	"lds.li/oauth2ext/jwt"
 )
 
 type clientOpts struct {

@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/lstoll/oauth2ext/internal/th"
+	"lds.li/oauth2ext/internal/th"
 )
 
 func TestClaimsJSONRoundtrip(t *testing.T) {

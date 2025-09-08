@@ -9,9 +9,9 @@ import (
 	"slices"
 	"time"
 
-	"github.com/lstoll/oauth2ext/jwt"
-	"github.com/lstoll/oauth2ext/oidc"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/jwt"
+	"lds.li/oauth2ext/oidc"
 )
 
 const loginStateExpiresAfter = 5 * time.Minute

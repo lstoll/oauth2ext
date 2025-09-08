@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/lstoll/oauth2ext/jwt"
-	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
+	"lds.li/oauth2ext/jwt"
+	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 )
 
 type UserinfoHandler func(ctx context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error)

@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
+	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 )
 
 const (

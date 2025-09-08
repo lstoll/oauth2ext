@@ -13,7 +13,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	josejson "github.com/go-jose/go-jose/v4/json"
-	"github.com/lstoll/oauth2ext/jwt"
+	"lds.li/oauth2ext/jwt"
 )
 
 type testSignerKey struct {

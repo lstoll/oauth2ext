@@ -1,6 +1,6 @@
 # oauth2as
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/lstoll/oauth2ext/oauth2as.svg)](https://pkg.go.dev/github.com/lstoll/oauth2ext/oauth2as)
+[![Go Reference](https://pkg.go.dev/badge/lds.li/oauth2ext/oauth2as.svg)](https://pkg.go.dev/lds.li/oauth2ext/oauth2as)
 
 Go library for implementing Oauth2/OIDC OPs (Servers). In active development
 

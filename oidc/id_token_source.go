@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lstoll/oauth2ext/internal"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/internal"
 )
 
 // NewIDTokenSource wraps a token source, re-writing the ID token as the access

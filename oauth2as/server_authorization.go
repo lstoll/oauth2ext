@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
-	"github.com/lstoll/oauth2ext/oauth2as/internal/token"
+	"lds.li/oauth2ext/oauth2as/internal/oauth2"
+	"lds.li/oauth2ext/oauth2as/internal/token"
 )
 
 type AuthRequest struct {

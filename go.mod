@@ -1,4 +1,4 @@
-module github.com/lstoll/oauth2ext
+module lds.li/oauth2ext
 
 go 1.24.0
 
