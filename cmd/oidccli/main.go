@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lstoll/oauth2ext/clitoken"
-	"github.com/lstoll/oauth2ext/jwt"
-	"github.com/lstoll/oauth2ext/oidc"
-	"github.com/lstoll/oauth2ext/oidcclientreg"
-	"github.com/lstoll/oauth2ext/tokencache"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/clitoken"
+	"lds.li/oauth2ext/jwt"
+	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/oidcclientreg"
+	"lds.li/oauth2ext/tokencache"
 )
 
 type subCommand struct {

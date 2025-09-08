@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/lstoll/oauth2ext/internal"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/internal"
 )
 
 func TestProviderDiscovery(t *testing.T) {

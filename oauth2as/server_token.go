@@ -14,10 +14,10 @@ import (
 
 	josejson "github.com/go-jose/go-jose/v4/json"
 	"github.com/google/uuid"
-	"github.com/lstoll/oauth2ext/jwt"
-	"github.com/lstoll/oauth2ext/oauth2as/internal/oauth2"
-	"github.com/lstoll/oauth2ext/oauth2as/internal/token"
-	"github.com/lstoll/oauth2ext/oidc"
+	"lds.li/oauth2ext/jwt"
+	"lds.li/oauth2ext/oauth2as/internal/oauth2"
+	"lds.li/oauth2ext/oauth2as/internal/token"
+	"lds.li/oauth2ext/oidc"
 )
 
 const (

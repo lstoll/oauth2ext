@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/lstoll/oauth2ext/oidc"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/oidc"
 )
 
 func TestRegisterWithProvider(t *testing.T) {

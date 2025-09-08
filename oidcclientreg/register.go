@@ -8,8 +8,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/lstoll/oauth2ext/internal"
-	"github.com/lstoll/oauth2ext/oidc"
+	"lds.li/oauth2ext/internal"
+	"lds.li/oauth2ext/oidc"
 )
 
 func RegisterWithProvider(ctx context.Context, provider *oidc.Provider, request *ClientRegistrationRequest) (*ClientRegistrationResponse, error) {

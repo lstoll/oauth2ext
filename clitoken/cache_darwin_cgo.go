@@ -11,10 +11,10 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/lstoll/oauth2ext/internal/keychain"
-	"github.com/lstoll/oauth2ext/oidc"
-	"github.com/lstoll/oauth2ext/tokencache"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/internal/keychain"
+	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/tokencache"
 )
 
 func init() {

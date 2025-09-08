@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lstoll/oauth2ext/internal"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/internal"
 )
 
 func TestIDTokenVerifier_VerifyRaw(t *testing.T) {

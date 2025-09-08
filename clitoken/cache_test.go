@@ -6,8 +6,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/lstoll/oauth2ext/tokencache"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/tokencache"
 )
 
 func TestKeychainCLICredentialCache(t *testing.T) {

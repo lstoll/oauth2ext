@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lstoll/oauth2ext/internal"
-	"github.com/lstoll/oauth2ext/jwt"
-	"github.com/lstoll/oauth2ext/oauth2as/discovery"
-	"github.com/lstoll/oauth2ext/oidc"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/internal"
+	"lds.li/oauth2ext/jwt"
+	"lds.li/oauth2ext/oauth2as/discovery"
+	"lds.li/oauth2ext/oidc"
 )
 
 func TestDiscovery(t *testing.T) {
