@@ -342,8 +342,6 @@ func info(ctx context.Context, provider *oidc.Provider, ts oauth2.TokenSource, _
 			return fmt.Errorf("marshalling access token claims: %w", err)
 		}
 
-		fmt.Printf("Access token: %s\n", tok.AccessToken)
-		fmt.Printf("Access token expires at: %s\n", claims.Expiry.Time().String())
 		fmt.Printf("Access token claims: \n%s\n", string(clJSON))
 	}
 	fmt.Printf("Refresh Token: %s\n", tok.RefreshToken)

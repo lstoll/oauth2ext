@@ -62,8 +62,14 @@ type SessionStore interface {
 type Handler struct {
 	// Provider is the OIDC provider we verify tokens against. Required.
 	Provider *oidc.Provider
-	// OAuth2Config are the options used for the oauth2 flow. Required.
+	// OAuth2Config are the options used for the oauth2 flow. Required unless a
+	// OAuth2ConfigSource is set.
 	OAuth2Config *oauth2.Config
+	// OAuth2ConfigSource is a function that can be used to dynamically generate
+	// the OAuth2Config. If set, it will be used instead of the OAuth2Config
+	// field. This can be used to dynamically replace the client secret or other
+	// options.
+	OAuth2ConfigSource func(context.Context) (oauth2.Config, error)
 	// AuthCodeOptions options that can be passed when creating the auth code
 	// URL. This can be used to request ACRs or other items.
 	AuthCodeOptions []oauth2.AuthCodeOption
@@ -152,7 +158,11 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 		}
 
 		// Not authenticated. Kick off an auth flow.
-		redirectURL := h.startAuthentication(r, session)
+		redirectURL, err := h.startAuthentication(r, session)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		if err := h.SessionStore.SaveOIDCSession(w, r, session); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -176,19 +186,25 @@ func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*
 		return nil, nil
 	}
 
+	o2cfg, err := h.getOAuth2Config(ctx)
+	if err != nil {
+		return nil, nil
+	}
+
 	// we always verify, as in the cookie store case the integrity of the data
 	// is not trusted.
-	jwt, err := h.getIDTokenVerifier().Verify(ctx, session.Token.Token)
+	jwt, err := h.getIDTokenVerifier(o2cfg.ClientID).Verify(ctx, session.Token.Token)
 	if err != nil {
 		// Attempt to refresh the token
 		if session.Token.RefreshToken == "" {
 			return nil, nil
 		}
-		token, err := h.OAuth2Config.TokenSource(ctx, session.Token.Token).Token()
+		token, err := o2cfg.TokenSource(ctx, session.Token.Token).Token()
 		if err != nil {
 			return nil, nil
 		}
-		jwt, err = h.getIDTokenVerifier().Verify(ctx, token)
+		session.Token = &oidc.TokenWithID{Token: token}
+		jwt, err = h.getIDTokenVerifier(o2cfg.ClientID).Verify(ctx, token)
 		if err != nil {
 			return nil, nil
 		}
@@ -247,14 +263,18 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 		opts = append(opts, oauth2.VerifierOption(foundLogin.PKCEChallenge))
 	}
 
-	token, err := h.OAuth2Config.Exchange(ctx, code, opts...)
+	o2cfg, err := h.getOAuth2Config(ctx)
+	if err != nil {
+		return "", err
+	}
+	token, err := o2cfg.Exchange(ctx, code, opts...)
 	if err != nil {
 		return "", err
 	}
 
 	// TODO(lstoll) do we want to verify the ID token here? was retrieved from a
 	// trusted source....
-	_, err = h.getIDTokenVerifier().Verify(ctx, token)
+	_, err = h.getIDTokenVerifier(o2cfg.ClientID).Verify(ctx, token)
 	if err != nil {
 		return "", fmt.Errorf("verifying id_token failed: %w", err)
 	}
@@ -276,7 +296,7 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 	return returnTo, nil
 }
 
-func (h *Handler) startAuthentication(r *http.Request, session *SessionData) string {
+func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (string, error) {
 	session.Token = nil
 
 	var (
@@ -301,14 +321,28 @@ func (h *Handler) startAuthentication(r *http.Request, session *SessionData) str
 		Expires:       int(time.Now().Add(loginStateExpiresAfter).Unix()),
 	})
 
-	return h.OAuth2Config.AuthCodeURL(state, opts...)
+	o2cfg, err := h.getOAuth2Config(r.Context())
+	if err != nil {
+		return "", err
+	}
+	return o2cfg.AuthCodeURL(state, opts...), nil
 }
 
-func (h *Handler) getIDTokenVerifier() *jwt.IDTokenVerifier {
+func (h *Handler) getIDTokenVerifier(clientID string) *jwt.IDTokenVerifier {
 	return &jwt.IDTokenVerifier{
 		Provider: h.Provider,
-		ClientID: h.OAuth2Config.ClientID,
+		ClientID: clientID,
 	}
+}
+
+func (h *Handler) getOAuth2Config(ctx context.Context) (oauth2.Config, error) {
+	if h.OAuth2ConfigSource != nil {
+		return h.OAuth2ConfigSource(ctx)
+	}
+	if h.OAuth2Config == nil {
+		return oauth2.Config{}, fmt.Errorf("no OAuth2Config or OAuth2ConfigSource provided")
+	}
+	return *h.OAuth2Config, nil
 }
 
 type contextData struct {
