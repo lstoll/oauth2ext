@@ -1,24 +1,23 @@
 package internal
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base32"
-	"encoding/json"
 	"fmt"
+	"log"
 	"testing"
 
-	"github.com/go-jose/go-jose/v4"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
 type TestSigner struct {
-	key *ecdsa.PrivateKey
-	kid string
+	handle *keyset.Handle
+	kid    string
 }
 
 func NewTestSigner(t testing.TB) *TestSigner {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	h, err := keyset.NewHandle(jwt.ES256Template())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,53 +27,27 @@ func NewTestSigner(t testing.TB) *TestSigner {
 		t.Fatal(err)
 	}
 
-	return &TestSigner{key: key, kid: base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randVal[:])}
+	return &TestSigner{handle: h, kid: base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randVal[:])}
 }
 
-func (t *TestSigner) Sign(claims any, typ string) (string, error) {
-	claimsBytes, err := json.Marshal(claims)
+func (t *TestSigner) Sign(raw *jwt.RawJWT) (string, error) {
+	signer, err := jwt.NewSigner(t.handle)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("creating signer: %w", err)
 	}
 
-	extraHeaders := map[jose.HeaderKey]any{
-		"kid": t.kid,
-	}
-	if typ != "" {
-		extraHeaders["typ"] = typ
-	}
-
-	signer, err := jose.NewSigner(jose.SigningKey{
-		Algorithm: jose.ES256,
-		Key:       t.key,
-	}, &jose.SignerOptions{
-		ExtraHeaders: extraHeaders,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	sig, err := signer.Sign(claimsBytes)
-	if err != nil {
-		return "", err
-	}
-
-	return sig.CompactSerialize()
+	return signer.SignAndEncode(raw)
 }
 
 func (t *TestSigner) JWKS() []byte {
-	jwks := jose.JSONWebKeySet{
-		Keys: []jose.JSONWebKey{
-			{
-				KeyID:     t.kid,
-				Key:       &t.key.PublicKey,
-				Algorithm: string(jose.ES256),
-			},
-		},
-	}
-	jwksb, err := json.Marshal(jwks)
+	pubh, err := t.handle.Public()
 	if err != nil {
-		panic(fmt.Sprintf("Failed to marshal JWKS: %v", err))
+		panic(fmt.Sprintf("creating public handle: %v", err))
 	}
-	return jwksb
+	publicJWKset, err := jwt.JWKSetFromPublicKeysetHandle(pubh)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return publicJWKset
 }

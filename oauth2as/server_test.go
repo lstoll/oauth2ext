@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"lds.li/oauth2ext/jwt"
+	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/oauth2as/internal"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 	"lds.li/oauth2ext/oauth2as/internal/token"
@@ -77,7 +77,7 @@ func TestCodeToken(t *testing.T) {
 						ID:           es256ClientID,
 						Secrets:      []string{es256ClientSecret},
 						RedirectURLs: []string{es256ClientRedirect},
-						Opts:         []ClientOpt{ClientOptSkipPKCE(), ClientOptSigningAlg(jwt.SigningAlgES256)},
+						Opts:         []ClientOpt{ClientOptSkipPKCE(), ClientOptSigningAlg("ES256")},
 					},
 				},
 			},
@@ -445,13 +445,25 @@ func TestUserinfo(t *testing.T) {
 		return nil
 	}
 
-	signAccessToken := func(cl jwt.AccessTokenClaims) string {
-		sat, err := testSigner(t).(*internal.TestSigner).SignClaimsWithAlgorithm("ES256", jwt.JWTTYPAccessToken, cl)
+	signAccessToken := func(cl *jwt.RawJWTOptions) string {
+		cl.TypeHeader = ptr("at+jwt")
+
+		s, err := testSigner(t).SignerForAlgorithm(context.Background(), "ES256")
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		return sat
+		rjwt, err := jwt.NewRawJWT(cl)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		compact, err := s.SignAndEncode(rjwt)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return compact
 	}
 
 	issuer := "http://iss"
@@ -470,10 +482,10 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Simple output, valid session",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(jwt.AccessTokenClaims{
-					Issuer:  issuer,
-					Subject: "sub",
-					Expiry:  jwt.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
+				return signAccessToken(&jwt.RawJWTOptions{
+					Issuer:    &issuer,
+					Subject:   ptr("sub"),
+					ExpiresAt: ptr(time.Now().Add(1 * time.Minute)),
 				})
 			},
 			Handler: echoHandler,
@@ -484,10 +496,10 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Token for other issuer",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(jwt.AccessTokenClaims{
-					Issuer:  "http://other",
-					Subject: "sub",
-					Expiry:  jwt.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
+				return signAccessToken(&jwt.RawJWTOptions{
+					Issuer:    ptr("http://other"),
+					Subject:   ptr("sub"),
+					ExpiresAt: ptr(time.Now().Add(1 * time.Minute)),
 				})
 			},
 			Handler: echoHandler,
@@ -496,10 +508,10 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Expired access token",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(jwt.AccessTokenClaims{
-					Issuer:  issuer,
-					Subject: "sub",
-					Expiry:  jwt.UnixTime(time.Now().Add(-1 * time.Minute).Unix()),
+				return signAccessToken(&jwt.RawJWTOptions{
+					Issuer:    &issuer,
+					Subject:   ptr("sub"),
+					ExpiresAt: ptr(time.Now().Add(-1 * time.Minute)),
 				})
 			},
 			Handler: echoHandler,
@@ -523,10 +535,10 @@ func TestUserinfo(t *testing.T) {
 				Signer:  testSigner(t),
 				UserinfoHandler: func(_ context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error) {
 					return &UserinfoResponse{
-						Identity: &jwt.IDClaims{
-							Issuer:  issuer,
-							Subject: uireq.Subject,
-							Expiry:  jwt.UnixTime(time.Now().Add(1 * time.Minute).Unix()),
+						Identity: map[string]any{
+							"iss": issuer,
+							"sub": uireq.Subject,
+							"exp": time.Now().Add(1 * time.Minute).Unix(),
 						},
 					}, nil
 				},

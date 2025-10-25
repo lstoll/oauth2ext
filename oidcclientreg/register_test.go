@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"golang.org/x/oauth2"
-	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/provider"
 )
 
 func TestRegisterWithProvider(t *testing.T) {
@@ -99,8 +99,8 @@ func TestRegisterWithProvider(t *testing.T) {
 			defer server.Close()
 
 			// Create provider with test server URL
-			provider := &oidc.Provider{
-				Metadata: &oidc.ProviderMetadata{
+			provider := &provider.Provider{
+				Metadata: &provider.OIDCProviderMetadata{
 					RegistrationEndpoint: server.URL,
 				},
 			}

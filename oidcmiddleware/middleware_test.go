@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/internal"
-	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oidc"
 )
 
@@ -29,7 +29,7 @@ type mockOIDCServer struct {
 	validClientID     string
 	validClientSecret string
 	validRedirectURL  string
-	claims            *jwt.IDClaims
+	claimOptions      *jwt.RawJWTOptions
 
 	signer *internal.TestSigner
 
@@ -76,6 +76,7 @@ func (s *mockOIDCServer) handleDiscovery(w http.ResponseWriter, r *http.Request)
 		IDTokenSigningAlgValuesSupported: []string{"RS256", "ES256"},
 	}
 
+	w.Header().Add("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(discovery); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -141,13 +142,19 @@ func (s *mockOIDCServer) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cl := *s.claims
-	cl.Issuer = s.baseURL
-	cl.Audience = jwt.StrOrSlice{clientID}
-	cl.Expiry = jwt.UnixTime(time.Now().Add(time.Minute).Unix())
-	cl.IssuedAt = jwt.UnixTime(time.Now().Unix())
+	clOpts := *s.claimOptions
+	clOpts.Issuer = &s.baseURL
+	clOpts.Audience = &clientID
+	clOpts.ExpiresAt = ptr(time.Now().Add(time.Minute))
+	clOpts.IssuedAt = ptr(time.Now())
 
-	rawJWT, err := s.signer.Sign(cl, "")
+	cl, err := jwt.NewRawJWT(&clOpts)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rawJWT, err := s.signer.Sign(cl)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -186,7 +193,12 @@ func TestMiddleware_HappyPath(t *testing.T) {
 			http.Error(w, "no ID token in context", http.StatusInternalServerError)
 			return
 		}
-		_, _ = w.Write(fmt.Appendf(nil, "sub: %s", idt.Subject))
+		sub, err := idt.Subject()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(fmt.Appendf(nil, "sub: %s", sub))
 	})
 
 	oidcServer, oidcHTTPServer := startMockOIDCServer(t)
@@ -197,7 +209,9 @@ func TestMiddleware_HappyPath(t *testing.T) {
 	oidcServer.validClientID = "valid-client-id"
 	oidcServer.validClientSecret = "valid-client-secret"
 	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
-	oidcServer.claims = &jwt.IDClaims{Subject: "valid-subject"}
+	oidcServer.claimOptions = &jwt.RawJWTOptions{
+		Subject: ptr("valid-subject"),
+	}
 
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
 	handler, err := NewFromDiscovery(ctx, nil, oidcServer.baseURL, oidcServer.validClientID, oidcServer.validClientSecret, oidcServer.validRedirectURL)
@@ -261,7 +275,7 @@ func TestMiddleware_HappyPath(t *testing.T) {
 
 func TestContext(t *testing.T) {
 	var ( // Capture in handler
-		gotIDClaims *jwt.IDClaims
+		gotIDClaims *jwt.VerifiedJWT
 	)
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		idclaims, ok := IDClaimsFromContext(r.Context())
@@ -281,7 +295,9 @@ func TestContext(t *testing.T) {
 	oidcServer.validClientID = "valid-client-id"
 	oidcServer.validClientSecret = "valid-client-secret"
 	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
-	oidcServer.claims = &jwt.IDClaims{Subject: "valid-subject"}
+	oidcServer.claimOptions = &jwt.RawJWTOptions{
+		Subject: ptr("valid-subject"),
+	}
 
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
 	handler, err := NewFromDiscovery(ctx, nil, oidcServer.baseURL, oidcServer.validClientID, oidcServer.validClientSecret, oidcServer.validRedirectURL)
@@ -311,8 +327,13 @@ func TestContext(t *testing.T) {
 		t.Fatal("no ID claims in context")
 	}
 
-	if gotIDClaims.Subject != "valid-subject" {
-		t.Errorf("want jwt sub valid-subject, got: %s", gotIDClaims.Subject)
+	gotSub, err := gotIDClaims.Subject()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if gotSub != "valid-subject" {
+		t.Errorf("want jwt sub valid-subject, got: %s", gotSub)
 	}
 }
 
@@ -329,4 +350,8 @@ func checkResponse(t *testing.T, resp *http.Response) (body []byte) {
 	}
 
 	return body
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }

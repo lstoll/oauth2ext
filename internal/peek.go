@@ -2,10 +2,9 @@ package internal
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
-
-	josejson "github.com/go-jose/go-jose/v4/json"
 )
 
 // ErrMalformedJWT is returned when the JWT does not have the expected format.
@@ -32,7 +31,7 @@ func InsecureExtractJWTPayload(jwt string, v any) error {
 		return err
 	}
 
-	if err := josejson.Unmarshal(decoded, v); err != nil {
+	if err := json.Unmarshal(decoded, v); err != nil {
 		return err
 	}
 	return nil

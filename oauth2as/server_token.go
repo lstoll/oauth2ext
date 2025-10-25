@@ -12,9 +12,8 @@ import (
 	"slices"
 	"time"
 
-	josejson "github.com/go-jose/go-jose/v4/json"
 	"github.com/google/uuid"
-	"lds.li/oauth2ext/jwt"
+	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oidc"
@@ -26,7 +25,7 @@ const (
 	tokenUsageAuthCode = "auth_code"
 	tokenUsageRefresh  = "refresh_token"
 
-	defaultSigningAlg jwt.SigningAlg = jwt.SigningAlgES256
+	defaultSigningAlg = "ES256"
 )
 
 type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, error)
@@ -78,7 +77,7 @@ type TokenResponse struct {
 	// - sub
 	// - exp
 	// - aud
-	IDClaims any
+	IDClaims *jwt.RawJWTOptions
 	// AccessTokenClaims is the claims that will be included in the access token.
 	// The claims will be serialized to JSON, and then returned in the token.
 	// The following claims will always be overridden:
@@ -90,7 +89,7 @@ type TokenResponse struct {
 	// - sub
 	// - exp
 	// - aud
-	AccessTokenClaims any
+	AccessTokenClaims *jwt.RawJWTOptions
 
 	// RefreshTokenValidUntil indicates how long the returned refresh token should
 	// be valid for, if one is issued. If zero, the default will be used.
@@ -365,7 +364,7 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 // buildTokenResponse creates the oauth token response for code and refresh.
 // refreshSession can be nil, if it is and we should issue a refresh token, a
 // new refresh session will be created.
-func (s *Server) buildTokenResponse(ctx context.Context, alg jwt.SigningAlg, grant *StoredGrant, tresp *TokenResponse) (_ *oauth2.TokenResponse, retErr error) {
+func (s *Server) buildTokenResponse(ctx context.Context, alg string, grant *StoredGrant, tresp *TokenResponse) (_ *oauth2.TokenResponse, retErr error) {
 	var (
 		refreshTok string
 		saveGrant  bool
@@ -430,27 +429,21 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg jwt.SigningAlg, gra
 	if err != nil {
 		return nil, fmt.Errorf("building id token claims: %w", err)
 	}
-	ac, err := s.buildAccessTokenClaims(grant, tresp)
+	ac, acExp, err := s.buildAccessTokenClaims(grant, tresp)
 	if err != nil {
 		return nil, fmt.Errorf("building access token claims: %w", err)
 	}
 
-	acExp := ac["exp"].(jwt.UnixTime).Time()
-
-	idPayload, err := josejson.Marshal(idc)
+	signer, err := s.config.Signer.SignerForAlgorithm(ctx, alg)
 	if err != nil {
-		return nil, fmt.Errorf("marshalling id token claims: %w", err)
-	}
-	atPayload, err := josejson.Marshal(ac)
-	if err != nil {
-		return nil, fmt.Errorf("marshalling access token claims: %w", err)
+		return nil, fmt.Errorf("getting signer for algorithm: %w", err)
 	}
 
-	idSigned, err := s.config.Signer.SignWithAlgorithm(ctx, string(alg), "", idPayload)
+	idSigned, err := signer.SignAndEncode(idc)
 	if err != nil {
 		return nil, fmt.Errorf("signing id token: %w", err)
 	}
-	atSigned, err := s.config.Signer.SignWithAlgorithm(ctx, string(alg), jwt.JWTTYPAccessToken, atPayload)
+	atSigned, err := signer.SignAndEncode(ac)
 	if err != nil {
 		return nil, fmt.Errorf("signing access token: %w", err)
 	}
@@ -466,87 +459,86 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg jwt.SigningAlg, gra
 	}, nil
 }
 
-func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (map[string]any, error) {
+func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (*jwt.RawJWT, error) {
 	idExp := tresp.IDTokenExpiry
 	if idExp.IsZero() {
 		idExp = s.now().Add(s.config.IDTokenValidity)
 	}
 
-	idc := make(map[string]any)
-	idcb, err := json.Marshal(tresp.IDClaims)
-	if err != nil {
-		return nil, fmt.Errorf("marshalling id token claims: %w", err)
-	}
-	if err := json.Unmarshal(idcb, &idc); err != nil {
-		return nil, fmt.Errorf("unmarshalling id token claims: %w", err)
-	}
+	rjwtopts := tresp.IDClaims
 
-	if idc == nil {
-		// handle case where no claims are set. they we just MVP a token
-		idc = make(map[string]any)
+	if rjwtopts == nil {
+		rjwtopts = &jwt.RawJWTOptions{}
+	}
+	if rjwtopts.CustomClaims == nil {
+		rjwtopts.CustomClaims = make(map[string]any)
 	}
 
 	// fixed values
-	idc["iss"] = s.config.Issuer
-	idc["iat"] = jwt.UnixTime(s.now().Unix())
-	idc["auth_time"] = jwt.UnixTime(grant.GrantedAt.Unix())
+	rjwtopts.Issuer = &s.config.Issuer
+	rjwtopts.Audience = &grant.ClientID
+	rjwtopts.IssuedAt = ptr(s.now())
+	rjwtopts.ExpiresAt = ptr(idExp)
+	rjwtopts.CustomClaims["auth_time"] = grant.GrantedAt.Unix()
 
 	// defaulted values
-	if _, subok := idc["sub"]; !subok {
-		idc["sub"] = grant.UserID
+	if rjwtopts.Subject == nil {
+		rjwtopts.Subject = &grant.UserID
 	}
-	if _, expok := idc["exp"]; !expok {
-		idc["exp"] = jwt.UnixTime(idExp.Unix())
-	}
-	if _, audok := idc["aud"]; !audok {
-		idc["aud"] = jwt.StrOrSlice{grant.ClientID}
+	if rjwtopts.Audience == nil && len(rjwtopts.Audiences) == 0 {
+		rjwtopts.Audience = &grant.ClientID
 	}
 
 	// TODO nonce
-	// idc.Nonce = grant.Request.Nonce
+	// rjwtopts.CustomClaims["nonce"] = grant.Request.Nonce
 
-	return idc, nil
+	rjwt, err := jwt.NewRawJWT(rjwtopts)
+	if err != nil {
+		return nil, fmt.Errorf("creating raw jwt: %w", err)
+	}
+
+	return rjwt, nil
 }
 
-func (s *Server) buildAccessTokenClaims(grant *StoredGrant, tresp *TokenResponse) (map[string]any, error) {
+func (s *Server) buildAccessTokenClaims(grant *StoredGrant, tresp *TokenResponse) (_ *jwt.RawJWT, expiresAt time.Time, _ error) {
 	atExp := tresp.AccessTokenExpiry
 	if atExp.IsZero() {
 		atExp = s.now().Add(s.config.AccessTokenValidity)
 	}
 
-	var ac map[string]any
-	acb, err := json.Marshal(tresp.AccessTokenClaims)
-	if err != nil {
-		return nil, fmt.Errorf("marshalling access token claims: %w", err)
-	}
-	if err := json.Unmarshal(acb, &ac); err != nil {
-		return nil, fmt.Errorf("unmarshalling access token claims: %w", err)
-	}
+	rjwtopts := tresp.AccessTokenClaims
 
-	if ac == nil {
-		// handle case where no claims are set. they we just MVP a token
-		ac = make(map[string]any)
+	if rjwtopts == nil {
+		rjwtopts = &jwt.RawJWTOptions{}
+	}
+	if rjwtopts.CustomClaims == nil {
+		rjwtopts.CustomClaims = make(map[string]any)
 	}
 
 	// fixed values
-	ac["iss"] = s.config.Issuer
-	ac["iat"] = jwt.UnixTime(s.now().Unix())
-	ac["client_id"] = grant.ClientID
-	ac["jti"] = uuid.Must(uuid.NewRandom()).String()
-	ac[claimGrantID] = grant.ID.String()
+	rjwtopts.TypeHeader = ptr("at+jwt")
+
+	rjwtopts.Issuer = &s.config.Issuer
+	rjwtopts.IssuedAt = ptr(s.now())
+	rjwtopts.ExpiresAt = ptr(atExp)
+	rjwtopts.JWTID = ptr(uuid.New().String())
+	rjwtopts.CustomClaims["client_id"] = grant.ClientID
+	rjwtopts.CustomClaims[claimGrantID] = grant.ID.String()
 
 	// defaulted values
-	if _, subok := ac["sub"]; !subok {
-		ac["sub"] = grant.UserID
+	if rjwtopts.Subject == nil {
+		rjwtopts.Subject = &grant.UserID
 	}
-	if _, expok := ac["exp"]; !expok {
-		ac["exp"] = jwt.UnixTime(atExp.Unix())
-	}
-	if _, audok := ac["aud"]; !audok {
-		ac["aud"] = jwt.StrOrSlice{grant.ClientID}
+	if rjwtopts.Audience == nil && len(rjwtopts.Audiences) == 0 {
+		rjwtopts.Audience = &grant.ClientID
 	}
 
-	return ac, nil
+	rjwt, err := jwt.NewRawJWT(rjwtopts)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("creating raw jwt: %w", err)
+	}
+
+	return rjwt, atExp, nil
 }
 
 func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {

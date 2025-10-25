@@ -3,11 +3,12 @@ package oauth2as
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 
-	"lds.li/oauth2ext/jwt"
+	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 )
 
@@ -22,8 +23,9 @@ type UserinfoRequest struct {
 
 // UserinfoResponse contains information to response to the userinfo response.
 type UserinfoResponse struct {
-	// Subject is the sub of the user this request is for.
-	Identity *jwt.IDClaims
+	// Identity is the identity of the user this request is for, to be JSON
+	// serialized.
+	Identity any
 }
 
 // UserinfoHandler can handle a request to the userinfo endpoint. If the request is not
@@ -47,16 +49,17 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// TODO - scopes or audience check on the token?
-	atVerifier := &jwt.AccessTokenVerifier{
-		Provider: &jwt.StaticIssuer{
-			IssuerURL:     s.config.Issuer,
-			Keyset:        s.config.Signer,
-			SupportedAlgs: s.config.Signer.SupportedAlgorithms(),
-		},
-		IgnoreAudience: true,
+
+	atJWT, err := s.verifyAccessToken(req.Context(), authSp[1])
+	if err != nil {
+		slog.ErrorContext(req.Context(), "invalid access token", "error", err)
+		be := &oauth2.BearerError{Code: oauth2.BearerErrorCodeInvalidRequest, Description: "invalid access token"}
+		herr := &oauth2.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), Cause: err}
+		_ = oauth2.WriteError(w, req, herr)
+		return
 	}
 
-	atClaims, err := atVerifier.VerifyRaw(req.Context(), authSp[1])
+	atSub, err := atJWT.Subject()
 	if err != nil {
 		slog.ErrorContext(req.Context(), "invalid access token", "error", err)
 		be := &oauth2.BearerError{Code: oauth2.BearerErrorCodeInvalidRequest, Description: "invalid access token"}
@@ -67,7 +70,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 
 	// If we make it to here, we have been presented a valid token for a valid session. Run the handler.
 	uireq := &UserinfoRequest{
-		Subject: atClaims.Subject,
+		Subject: atSub,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -91,4 +94,36 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		_ = oauth2.WriteError(w, req, err)
 		return
 	}
+}
+
+func (s *Server) verifyAccessToken(ctx context.Context, compact string) (*jwt.VerifiedJWT, error) {
+	jwks, err := s.config.Signer.JWKS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := jwt.JWKSetToPublicKeysetHandle(jwks)
+	if err != nil {
+		return nil, fmt.Errorf("creating handle from JWKS: %w", err)
+	}
+	verif, err := jwt.NewVerifier(handle)
+	if err != nil {
+		return nil, err
+	}
+	valid, err := jwt.NewValidator(&jwt.ValidatorOpts{
+		ExpectedIssuer:     &s.config.Issuer,
+		ExpectedTypeHeader: ptr("at+jwt"),
+		IgnoreAudiences:    true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating validator: %w", err)
+	}
+	vjwt, err := verif.VerifyAndDecode(compact, valid)
+	if err != nil {
+		return nil, fmt.Errorf("verifying and decoding access token: %w", err)
+	}
+	return vjwt, nil
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }

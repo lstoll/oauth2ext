@@ -9,11 +9,12 @@ import (
 	"net/http"
 
 	"lds.li/oauth2ext/internal"
-	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/provider"
 )
 
-func RegisterWithProvider(ctx context.Context, provider *oidc.Provider, request *ClientRegistrationRequest) (*ClientRegistrationResponse, error) {
-	if provider.Metadata.RegistrationEndpoint == "" {
+func RegisterWithProvider(ctx context.Context, provider *provider.Provider, request *ClientRegistrationRequest) (*ClientRegistrationResponse, error) {
+	regEndpoint, ok := provider.Metadata.GetRegistrationEndpoint()
+	if !ok {
 		return nil, fmt.Errorf("registration endpoint not found in provider metadata")
 	}
 
@@ -24,7 +25,7 @@ func RegisterWithProvider(ctx context.Context, provider *oidc.Provider, request 
 		return nil, fmt.Errorf("failed to marshal registration request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, provider.Metadata.RegistrationEndpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, regEndpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}

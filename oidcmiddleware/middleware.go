@@ -9,9 +9,10 @@ import (
 	"slices"
 	"time"
 
+	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
-	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/provider"
 )
 
 const loginStateExpiresAfter = 5 * time.Minute
@@ -61,7 +62,7 @@ type SessionStore interface {
 // Handler wraps another http.Handler, protecting it with OIDC authentication.
 type Handler struct {
 	// Provider is the OIDC provider we verify tokens against. Required.
-	Provider *oidc.Provider
+	Provider *provider.Provider
 	// OAuth2Config are the options used for the oauth2 flow. Required unless a
 	// OAuth2ConfigSource is set.
 	OAuth2Config *oauth2.Config
@@ -87,7 +88,7 @@ type Handler struct {
 // from the Issuer. If the sessStore is nil, Cookies will be used. The handler
 // can be customized after calling this.
 func NewFromDiscovery(ctx context.Context, sessStore SessionStore, issuer, clientID, clientSecret, redirectURL string) (*Handler, error) {
-	provider, err := oidc.DiscoverProvider(ctx, issuer)
+	provider, err := provider.DiscoverOIDCProvider(ctx, issuer)
 	if err != nil {
 		return nil, fmt.Errorf("discovering provider: %w", err)
 	}
@@ -179,7 +180,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 //
 // This function may modify the session if a token is refreshed, so it must be
 // saved afterward.
-func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*oauth2.Token, *jwt.IDClaims) {
+func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*oauth2.Token, *jwt.VerifiedJWT) {
 	ctx := r.Context()
 
 	if session.Token == nil {
@@ -191,9 +192,16 @@ func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*
 		return nil, nil
 	}
 
+	validator, err := h.Provider.NewIDTokenValidator(&provider.IDTokenValidatorOpts{
+		ClientID: &o2cfg.ClientID,
+	})
+	if err != nil {
+		return nil, nil
+	}
+
 	// we always verify, as in the cookie store case the integrity of the data
 	// is not trusted.
-	jwt, err := h.getIDTokenVerifier(o2cfg.ClientID).Verify(ctx, session.Token.Token)
+	jwt, err := h.Provider.VerifyAndDecodeIDToken(session.Token.Token, validator)
 	if err != nil {
 		// Attempt to refresh the token
 		if session.Token.RefreshToken == "" {
@@ -204,7 +212,7 @@ func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*
 			return nil, nil
 		}
 		session.Token = &oidc.TokenWithID{Token: token}
-		jwt, err = h.getIDTokenVerifier(o2cfg.ClientID).Verify(ctx, token)
+		jwt, err = h.Provider.VerifyAndDecodeIDToken(token, validator)
 		if err != nil {
 			return nil, nil
 		}
@@ -259,7 +267,7 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 	}
 
 	opts := h.AuthCodeOptions
-	if slices.Contains(h.Provider.Metadata.CodeChallengeMethodsSupported, "S256") {
+	if slices.Contains(h.Provider.Metadata.GetCodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
 		opts = append(opts, oauth2.VerifierOption(foundLogin.PKCEChallenge))
 	}
 
@@ -274,8 +282,13 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 
 	// TODO(lstoll) do we want to verify the ID token here? was retrieved from a
 	// trusted source....
-	_, err = h.getIDTokenVerifier(o2cfg.ClientID).Verify(ctx, token)
+	validator, err := h.Provider.NewIDTokenValidator(&provider.IDTokenValidatorOpts{
+		ClientID: &o2cfg.ClientID,
+	})
 	if err != nil {
+		return "", err
+	}
+	if _, err := h.Provider.VerifyAndDecodeIDToken(token, validator); err != nil {
 		return "", fmt.Errorf("verifying id_token failed: %w", err)
 	}
 
@@ -306,7 +319,7 @@ func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (st
 	)
 
 	opts := h.AuthCodeOptions
-	if slices.Contains(h.Provider.Metadata.CodeChallengeMethodsSupported, "S256") {
+	if slices.Contains(h.Provider.Metadata.GetCodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
 		pkceChallenge = oauth2.GenerateVerifier()
 		opts = append(opts, oauth2.S256ChallengeOption(pkceChallenge))
 	}
@@ -328,13 +341,6 @@ func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (st
 	return o2cfg.AuthCodeURL(state, opts...), nil
 }
 
-func (h *Handler) getIDTokenVerifier(clientID string) *jwt.IDTokenVerifier {
-	return &jwt.IDTokenVerifier{
-		Provider: h.Provider,
-		ClientID: clientID,
-	}
-}
-
 func (h *Handler) getOAuth2Config(ctx context.Context) (oauth2.Config, error) {
 	if h.OAuth2ConfigSource != nil {
 		return h.OAuth2ConfigSource(ctx)
@@ -347,12 +353,12 @@ func (h *Handler) getOAuth2Config(ctx context.Context) (oauth2.Config, error) {
 
 type contextData struct {
 	token    *oauth2.Token
-	idclaims *jwt.IDClaims
+	idclaims *jwt.VerifiedJWT
 }
 
 // IDClaimsFromContext returns the validated OIDC ID Claims from the given
 // request context.
-func IDClaimsFromContext(ctx context.Context) (*jwt.IDClaims, bool) {
+func IDClaimsFromContext(ctx context.Context) (*jwt.VerifiedJWT, bool) {
 	cd, ok := ctx.Value(tokenContextKey{}).(contextData)
 	if !ok {
 		return nil, false

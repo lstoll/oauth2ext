@@ -14,11 +14,11 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
-	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as"
 	"lds.li/oauth2ext/oauth2as/discovery"
 	"lds.li/oauth2ext/oauth2as/internal"
 	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/provider"
 )
 
 func TestE2E(t *testing.T) {
@@ -88,44 +88,6 @@ func TestE2E(t *testing.T) {
 
 			s := oauth2as.NewMemStorage()
 
-			/*mux.HandleFunc("/authorization", func(w http.ResponseWriter, req *http.Request) {
-				ar, err := oidcHandlers.StartAuthorization(w, req)
-				if err != nil {
-					t.Fatalf("error starting authorization flow: %v", err)
-				}
-
-				// just finish it straight away
-				if err := oidcHandlers.FinishAuthorization(w, req, ar.SessionID, &op.Authorization{Scopes: []string{"openid"}}); err != nil {
-					t.Fatalf("error finishing authorization: %v", err)
-				}
-			})
-
-			mux.HandleFunc("/token", func(w http.ResponseWriter, req *http.Request) {
-				err := oidcHandlers.Token(w, req, func(tr *op.TokenRequest) (*op.TokenResponse, error) {
-					return &op.TokenResponse{
-						IDToken:                tr.PrefillIDToken("test-sub", time.Now().Add(1*time.Minute)),
-						AccessToken:            tr.PrefillAccessToken("test-sub", time.Now().Add(1*time.Minute)),
-						IssueRefreshToken:      true,
-						RefreshTokenValidUntil: time.Now().Add(2 * time.Minute),
-					}, nil
-				})
-				if err != nil {
-					t.Errorf("error in token endpoint: %v", err)
-				}
-			})
-
-			mux.HandleFunc("/userinfo", func(w http.ResponseWriter, req *http.Request) {
-				err := oidcHandlers.Userinfo(w, req, func(w io.Writer, _ *op.UserinfoRequest) error {
-					fmt.Fprintf(w, `{
-						"sub": "test-sub"
-					}`)
-					return nil
-				})
-				if err != nil {
-					t.Errorf("error in userinfo endpoint: %v", err)
-				}
-			})*/
-
 			oidcSvrMux := http.NewServeMux()
 			oidcSvr := httptest.NewServer(oidcSvrMux)
 			t.Cleanup(oidcSvr.Close)
@@ -139,8 +101,8 @@ func TestE2E(t *testing.T) {
 				},
 				UserinfoHandler: func(_ context.Context, uireq *oauth2as.UserinfoRequest) (*oauth2as.UserinfoResponse, error) {
 					return &oauth2as.UserinfoResponse{
-						Identity: &jwt.IDClaims{
-							Subject: uireq.Subject,
+						Identity: map[string]any{
+							"sub": uireq.Subject,
 						},
 					}, nil
 				},
@@ -160,7 +122,7 @@ func TestE2E(t *testing.T) {
 			pmd.AuthorizationEndpoint = oidcSvr.URL + "/authorization"
 			pmd.TokenEndpoint = oidcSvr.URL + "/token"
 			pmd.UserinfoEndpoint = oidcSvr.URL + "/userinfo"
-			pmd.IDTokenSigningAlgValuesSupported = []string{string(jwt.SigningAlgRS256), string(jwt.SigningAlgES256)}
+			pmd.IDTokenSigningAlgValuesSupported = []string{string("RS256"), string("ES256")}
 
 			ch, err := discovery.NewOIDCConfigurationHandlerWithKeyset(pmd, testSigner)
 			if err != nil {
@@ -196,7 +158,7 @@ func TestE2E(t *testing.T) {
 				http.Redirect(w, req, redirectURI, http.StatusFound)
 			})
 
-			provider, err := oidc.DiscoverProvider(ctx, oidcSvr.URL)
+			provider, err := provider.DiscoverOIDCProvider(ctx, oidcSvr.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
