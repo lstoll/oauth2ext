@@ -3,16 +3,15 @@ package oauth2as
 import (
 	"context"
 
-	"lds.li/oauth2ext/jwt"
+	"github.com/tink-crypto/tink-go/v2/jwt"
 )
 
 type AlgorithmSigner interface {
-	// PublicKeyset is used to verify issued tokens, i.e in the Userinfo
-	// endpoint.
-	jwt.PublicKeyset
+	// JWKS returns the JSON Web Key Set for this signer.
+	JWKS(ctx context.Context) ([]byte, error)
 	// SignWithAlgorithm should sign the payload with the given algorithm and
 	// type header, and return the compact representation of the signed token.
-	SignWithAlgorithm(ctx context.Context, alg, typHdr string, payload []byte) (string, error)
+	SignerForAlgorithm(ctx context.Context, alg string) (jwt.Signer, error)
 	// SupportedAlgorithms returns the list of JWT algorithms supported by this
 	// signer.
 	SupportedAlgorithms() []string

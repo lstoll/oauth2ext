@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/provider"
 )
 
 const (
@@ -19,7 +20,7 @@ const (
 )
 
 type server struct {
-	provider *oidc.Provider
+	provider *provider.Provider
 	oa2Cfg   oauth2.Config
 	mux      *http.ServeMux
 	muxSetup sync.Once
@@ -132,15 +133,27 @@ func (s *server) callback(w http.ResponseWriter, req *http.Request) {
 
 	idt, hasIDToken := oidc.GetIDToken(token)
 	if hasIDToken {
-		idClaims, err := s.provider.IDTokenVerifier(s.oa2Cfg.ClientID).Verify(req.Context(), token)
+		validator, err := s.provider.NewIDTokenValidator(&provider.IDTokenValidatorOpts{
+			ClientID: &s.oa2Cfg.ClientID,
+		})
 		if err != nil {
-			slog.ErrorContext(req.Context(), "verifying ID token", "err", err)
-			http.Error(w, fmt.Sprintf("verifying token: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("error creating ID token validator: %v", err), http.StatusInternalServerError)
+			return
+		}
+		idToken, err := s.provider.VerifyAndDecodeIDToken(token, validator)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("error verifying ID token: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		payload, err := idToken.JSONPayload()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("error getting ID payload: %v", err), http.StatusInternalServerError)
 			return
 		}
 
 		allClaims := make(map[string]any)
-		if err := idClaims.UnmarshalClaims(&allClaims); err != nil {
+		if err := json.Unmarshal(payload, &allClaims); err != nil {
 			slog.ErrorContext(req.Context(), "unmarshaling payload to map", "err", err)
 			http.Error(w, fmt.Sprintf("unmarshaling payload to map: %v", err), http.StatusInternalServerError)
 			return

@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-jose/go-jose/v4"
-	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oidc"
 )
 
@@ -62,7 +60,7 @@ func DefaultCoreMetadata(issuer string) *oidc.ProviderMetadata {
 // public keys to serve as the provider's verification keyset.
 type Keyset interface {
 	// GetKeys returns the full set of valid public keys for this provider.
-	GetKeys(ctx context.Context) ([]jwt.PublicKey, error)
+	JWKS(ctx context.Context) ([]byte, error)
 }
 
 type keysetJWKSSource struct {
@@ -70,28 +68,7 @@ type keysetJWKSSource struct {
 }
 
 func (s *keysetJWKSSource) GetJWKS(ctx context.Context) ([]byte, error) {
-	pks, err := s.keyset.GetKeys(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting public handle: %w", err)
-	}
-
-	var jwks jose.JSONWebKeySet
-	for _, k := range pks {
-		if err := k.Valid(); err != nil {
-			return nil, fmt.Errorf("invalid key %s in keyset: %w", k.KeyID, err)
-		}
-		jwks.Keys = append(jwks.Keys, jose.JSONWebKey{
-			KeyID:     k.KeyID,
-			Algorithm: string(k.Alg),
-			Key:       k.Key,
-		})
-	}
-
-	publicJWKset, err := json.Marshal(jwks)
-	if err != nil {
-		return nil, fmt.Errorf("creating jwks from handle: %w", err)
-	}
-	return publicJWKset, nil
+	return s.keyset.JWKS(ctx)
 }
 
 // JWKSSource can be used to return a JWKS to serve on the discovery endpoint.

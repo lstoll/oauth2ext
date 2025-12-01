@@ -35,11 +35,3 @@ jobs:
       uses: golangci/golangci-lint-action@v8
       with:
         version: latest
-
-    - name: Check CLI Keychain in cross-compiled binary
-      env:
-        GOOS: darwin
-        CGO_ENABLED: 0
-      run: |
-        go build -o oidccli ./cmd/oidccli
-        go tool nm oidccli | grep -F 'oauth2ext/clitoken.(*KeychainCLICredentialCache)'

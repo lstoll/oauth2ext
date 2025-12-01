@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/provider"
 )
 
 const (
@@ -38,7 +39,7 @@ func main() {
 
 	flag.Parse()
 
-	provider, err := oidc.DiscoverProvider(ctx, cfg.Issuer)
+	provider, err := provider.DiscoverOIDCProvider(ctx, cfg.Issuer)
 	if err != nil {
 		log.Fatalf("discovering issuer: %v", err)
 	}

@@ -12,7 +12,6 @@ import (
 
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/internal"
-	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oidc"
 )
 
@@ -113,11 +112,19 @@ func (c *Cookiestore) GetOIDCSession(r *http.Request) (*SessionData, error) {
 	return sd, nil
 }
 
+type expiresClaim struct {
+	Expiry int `json:"exp,omitempty"`
+}
+
+func (c *expiresClaim) Time() time.Time {
+	return time.Unix(int64(c.Expiry), 0)
+}
+
 func (c *Cookiestore) SaveOIDCSession(w http.ResponseWriter, r *http.Request, d *SessionData) error {
 
 	// Save or delete the main token cookie
 	if d.Token != nil {
-		var cl jwt.IDClaims
+		var cl expiresClaim
 		idt, ok := oidc.GetIDToken(d.Token.Token)
 		if !ok {
 			return fmt.Errorf("token contains no ID token")
@@ -125,7 +132,7 @@ func (c *Cookiestore) SaveOIDCSession(w http.ResponseWriter, r *http.Request, d 
 		if err := internal.InsecureExtractJWTPayload(idt, &cl); err != nil {
 			return fmt.Errorf("extracting id token claims: %w", err)
 		}
-		if err := setCookieIfNotSet(w, r, c.newTokenCookie(idt, cl.Expiry.Time())); err != nil {
+		if err := setCookieIfNotSet(w, r, c.newTokenCookie(idt, cl.Time())); err != nil {
 			return fmt.Errorf("saving token cookie: %w", err)
 		}
 	} else {

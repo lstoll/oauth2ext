@@ -1,4 +1,4 @@
-package oidc
+package provider
 
 import (
 	"context"
@@ -14,12 +14,11 @@ import (
 func TestProviderDiscovery(t *testing.T) {
 	svr, _ := newMockDiscoveryServer(t)
 
-	if _, err := DiscoverProvider(context.WithValue(t.Context(), oauth2.HTTPClient, svr.Client()), svr.URL); err != nil {
+	if _, err := DiscoverOIDCProvider(context.WithValue(t.Context(), oauth2.HTTPClient, svr.Client()), svr.URL); err != nil {
 		t.Fatal(err)
 	}
 }
 func TestUserinfo(t *testing.T) {
-
 	type userinforClaims struct {
 		Subject string `json:"sub"`
 	}
@@ -39,7 +38,7 @@ func TestUserinfo(t *testing.T) {
 	t.Cleanup(svr.Close)
 
 	p := &Provider{
-		Metadata: &ProviderMetadata{
+		Metadata: &OIDCProviderMetadata{
 			UserinfoEndpoint: svr.URL,
 		},
 	}
@@ -64,7 +63,7 @@ func newMockDiscoveryServer(t *testing.T) (*httptest.Server, *internal.TestSigne
 
 	mux := http.NewServeMux()
 
-	pmd := &ProviderMetadata{
+	pmd := &OIDCProviderMetadata{
 		Issuer:                           svr.URL,
 		IDTokenSigningAlgValuesSupported: []string{"ES256"},
 		JWKSURI:                          svr.URL + "/.well-known/jwks.json",

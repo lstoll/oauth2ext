@@ -2,59 +2,42 @@ package internal
 
 import (
 	"context"
-	"crypto"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/rsa"
-	"encoding/base32"
+	"encoding/json"
 	"fmt"
+	"maps"
+	"sync"
 	"testing"
 
-	"github.com/go-jose/go-jose/v4"
-	josejson "github.com/go-jose/go-jose/v4/json"
-	"lds.li/oauth2ext/jwt"
+	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
 )
 
-type testSignerKey struct {
-	kid  string
-	alg  string
-	priv crypto.PrivateKey
-	pub  crypto.PublicKey
-}
-
 type TestSigner struct {
-	algs []string
-	keys []testSignerKey
+	handles   map[string]*keyset.Handle
+	handlesMu sync.Mutex
 }
 
 func NewTestSigner(t testing.TB, algs ...string) *TestSigner {
-	genKID := func() string {
-		var randVal [4]byte
-		if _, err := rand.Read(randVal[:]); err != nil {
-			t.Fatal(err)
-		}
-		return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randVal[:])
+	if len(algs) == 0 {
+		algs = []string{"ES256"}
 	}
-
 	ts := &TestSigner{
-		algs: algs,
+		handles: make(map[string]*keyset.Handle, len(algs)),
 	}
-
 	for _, alg := range algs {
 		switch alg {
 		case "ES256":
-			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			handle, err := keyset.NewHandle(jwt.ES256Template())
 			if err != nil {
 				t.Fatal(err)
 			}
-			ts.keys = append(ts.keys, testSignerKey{kid: genKID(), alg: alg, priv: key, pub: key.Public()})
+			ts.handles[alg] = handle
 		case "RS256":
-			key, err := rsa.GenerateKey(rand.Reader, 1024) // do not use 1024 outside of tests!
+			handle, err := keyset.NewHandle(jwt.RS256_2048_F4_Key_Template())
 			if err != nil {
 				t.Fatal(err)
 			}
-			ts.keys = append(ts.keys, testSignerKey{kid: genKID(), alg: alg, priv: key, pub: key.Public()})
+			ts.handles[alg] = handle
 		default:
 			t.Fatalf("unsupported algorithm: %s", alg)
 		}
@@ -63,68 +46,71 @@ func NewTestSigner(t testing.TB, algs ...string) *TestSigner {
 	return ts
 }
 
-func (t *TestSigner) SignWithAlgorithm(ctx context.Context, alg, typHdr string, payload []byte) (string, error) {
-	var key *testSignerKey
-	for _, k := range t.keys {
-		if k.alg == alg {
-			key = &k
-			break
-		}
-	}
-	if key == nil {
-		return "", fmt.Errorf("key not found for algorithm: %s", alg)
-	}
+func (t *TestSigner) SignerForAlgorithm(ctx context.Context, alg string) (jwt.Signer, error) {
+	t.handlesMu.Lock()
+	defer t.handlesMu.Unlock()
 
-	extraHeaders := map[jose.HeaderKey]any{
-		"kid": key.kid,
+	handle, ok := t.handles[alg]
+	if !ok {
+		return nil, fmt.Errorf("key not found for algorithm: %s", alg)
 	}
-	if typHdr != "" {
-		extraHeaders["typ"] = typHdr
-	}
-
-	signer, err := jose.NewSigner(jose.SigningKey{
-		Algorithm: jose.SignatureAlgorithm(key.alg),
-		Key:       key.priv,
-	}, &jose.SignerOptions{
-		ExtraHeaders: extraHeaders,
-	})
+	signer, err := jwt.NewSigner(handle)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	sig, err := signer.Sign(payload)
-	if err != nil {
-		return "", err
-	}
-
-	return sig.CompactSerialize()
-}
-
-func (t *TestSigner) SignClaimsWithAlgorithm(alg, typHdr string, claims any) (string, error) {
-	cb, err := josejson.Marshal(claims)
-	if err != nil {
-		return "", err
-	}
-
-	return t.SignWithAlgorithm(context.Background(), alg, typHdr, cb)
+	return signer, nil
 }
 
 func (t *TestSigner) SupportedAlgorithms() []string {
-	return t.algs
+	res := make([]string, 0, len(t.handles))
+	for k := range maps.Keys(t.handles) {
+		res = append(res, k)
+	}
+	return res
 }
-func (t *TestSigner) GetKeysByKID(ctx context.Context, kid string) ([]jwt.PublicKey, error) {
-	var res []jwt.PublicKey
-	for _, k := range t.keys {
-		if k.kid == kid {
-			res = append(res, jwt.PublicKey{KeyID: k.kid, Alg: jwt.SigningAlg(k.alg), Key: k.pub})
+
+// JWKS returns the JSON Web Key Set for this signer.
+func (t *TestSigner) JWKS(context.Context) ([]byte, error) {
+	t.handlesMu.Lock()
+	defer t.handlesMu.Unlock()
+
+	var docs [][]byte
+	for _, v := range t.handles {
+		pubh, err := v.Public()
+		if err != nil {
+			return nil, err
+		}
+		jwks, err := jwt.JWKSetFromPublicKeysetHandle(pubh)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, jwks)
+	}
+
+	return mergeJWKS(docs...)
+}
+
+func mergeJWKS(jwksDocs ...[]byte) ([]byte, error) {
+	var allKeys []any
+
+	for _, doc := range jwksDocs {
+		var jwks map[string]any
+		if err := json.Unmarshal(doc, &jwks); err != nil {
+			return nil, err
+		}
+
+		// Extract and merge the "keys" array
+		if keysVal, ok := jwks["keys"]; ok {
+			if keys, ok := keysVal.([]any); ok {
+				allKeys = append(allKeys, keys...)
+			}
 		}
 	}
-	return res, nil
-}
-func (t *TestSigner) GetKeys(ctx context.Context) ([]jwt.PublicKey, error) {
-	var res []jwt.PublicKey
-	for _, k := range t.keys {
-		res = append(res, jwt.PublicKey{KeyID: k.kid, Alg: jwt.SigningAlg(k.alg), Key: k.pub})
+
+	merged := map[string]any{
+		"keys": allKeys,
 	}
-	return res, nil
+
+	return json.Marshal(merged)
 }
