@@ -11,4 +11,4 @@ Module that provides extensions for to the [x/oauth2](https://pkg.go.dev/golang.
 
 Examples:
 * **cmd/oidc-example-rp** An example of a webapp that authenticates via OIDC
-* (**oidcli**)[https://github.com/lstoll/oidccli] A CLI tool that uses the [clitoken](https://pkg.go.dev/lds.li/oauth2ext/clitoken) package to retrieve ID/Access tokens, and return them or information about them.
+* [**oidcli**](https://github.com/lstoll/oidccli) A CLI tool that uses the [clitoken](https://pkg.go.dev/lds.li/oauth2ext/clitoken) package to retrieve ID/Access tokens, and return them or information about them.

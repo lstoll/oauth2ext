@@ -140,7 +140,7 @@ func (s *server) callback(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, fmt.Sprintf("error creating ID token validator: %v", err), http.StatusInternalServerError)
 			return
 		}
-		idToken, err := s.provider.VerifyAndDecodeIDToken(token, validator)
+		idToken, err := s.provider.VerifyAndDecodeIDToken(req.Context(), token, validator)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error verifying ID token: %v", err), http.StatusInternalServerError)
 			return

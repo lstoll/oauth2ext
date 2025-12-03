@@ -201,7 +201,7 @@ func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*
 
 	// we always verify, as in the cookie store case the integrity of the data
 	// is not trusted.
-	jwt, err := h.Provider.VerifyAndDecodeIDToken(session.Token.Token, validator)
+	jwt, err := h.Provider.VerifyAndDecodeIDToken(ctx, session.Token.Token, validator)
 	if err != nil {
 		// Attempt to refresh the token
 		if session.Token.RefreshToken == "" {
@@ -212,7 +212,7 @@ func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*
 			return nil, nil
 		}
 		session.Token = &oidc.TokenWithID{Token: token}
-		jwt, err = h.Provider.VerifyAndDecodeIDToken(token, validator)
+		jwt, err = h.Provider.VerifyAndDecodeIDToken(ctx, token, validator)
 		if err != nil {
 			return nil, nil
 		}
@@ -288,7 +288,7 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 	if err != nil {
 		return "", err
 	}
-	if _, err := h.Provider.VerifyAndDecodeIDToken(token, validator); err != nil {
+	if _, err := h.Provider.VerifyAndDecodeIDToken(ctx, token, validator); err != nil {
 		return "", fmt.Errorf("verifying id_token failed: %w", err)
 	}
 

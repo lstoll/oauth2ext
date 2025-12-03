@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -51,39 +52,18 @@ func (p *Provider) JWKSHandle(ctx context.Context) (*keyset.Handle, error) {
 	return p.cachedHandle, nil
 }
 
-func (p *Provider) VerifyAndDecode(compact string, validator *jwt.Validator) (*jwt.VerifiedJWT, error) {
-	handle, err := p.JWKSHandle(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	verif, err := jwt.NewVerifier(handle)
-	if err != nil {
-		return nil, fmt.Errorf("creating verifier: %w", err)
-	}
-	jwt, err := verif.VerifyAndDecode(compact, validator)
-	if err != nil {
-		return nil, err
-	}
-	// perform an additional check, we should only ever pass tokens from the
-	// issuer.
-	iss, err := jwt.Issuer()
-	if err != nil {
-		return nil, fmt.Errorf("getting issuer: %w", err)
-	}
-	if iss != p.Metadata.issuer() {
-		return nil, fmt.Errorf("invalid issuer: got %q, want %q", iss, p.Metadata.issuer())
-	}
-
-	return jwt, nil
-}
-
 type IDTokenValidatorOpts struct {
 	ClientID       *string
 	IgnoreClientID bool
+	// ACRValues is the list of ACR values that are allowed for the token. The
+	// token will pass if its ACR claim is present and in the list. If empty, no
+	// ACR check is performed.
+	ACRValues []string
 }
 
 type IDTokenValidator struct {
 	tink *jwt.Validator
+	opts *IDTokenValidatorOpts
 }
 
 func (p *Provider) NewIDTokenValidator(opts *IDTokenValidatorOpts) (*IDTokenValidator, error) {
@@ -99,18 +79,29 @@ func (p *Provider) NewIDTokenValidator(opts *IDTokenValidatorOpts) (*IDTokenVali
 	if err != nil {
 		return nil, fmt.Errorf("creating tink validator: %w", err)
 	}
-	return &IDTokenValidator{tink: tv}, nil
+	return &IDTokenValidator{tink: tv, opts: opts}, nil
 }
 
-func (p *Provider) VerifyAndDecodeIDToken(token *oauth2.Token, validator *IDTokenValidator) (*jwt.VerifiedJWT, error) {
+func (p *Provider) VerifyAndDecodeIDToken(ctx context.Context, token *oauth2.Token, validator *IDTokenValidator) (*jwt.VerifiedJWT, error) {
 	rawJWT, ok := token.Extra("id_token").(string)
 	if !ok {
 		return nil, fmt.Errorf("no id_token found in token")
 	}
-	// TODO - additional checks here.
-	j, err := p.VerifyAndDecode(rawJWT, validator.tink)
+	j, err := p.verifyAndDecodeContext(ctx, rawJWT, validator.tink)
 	if err != nil {
 		return nil, err
+	}
+	if len(validator.opts.ACRValues) > 0 {
+		if !j.HasStringClaim("acr") {
+			return nil, fmt.Errorf("ACRs requested, but no ACR claim found")
+		}
+		acr, err := j.StringClaim("acr")
+		if err != nil {
+			return nil, fmt.Errorf("getting ACR claim: %w", err)
+		}
+		if !slices.Contains(validator.opts.ACRValues, acr) {
+			return nil, fmt.Errorf("jwt ACR %s not in requested list %v", acr, validator.opts.ACRValues)
+		}
 	}
 	return j, nil
 }
@@ -138,7 +129,7 @@ func (p *Provider) NewAccessTokenValidator(opts *AccessTokenValidatorOpts) (*Acc
 	return &AccessTokenValidator{tink: tv}, nil
 }
 
-func (p *Provider) VerifyAndDecodeAccessToken(token *oauth2.Token, validator *AccessTokenValidator) (*jwt.VerifiedJWT, error) {
+func (p *Provider) VerifyAndDecodeAccessToken(ctx context.Context, token *oauth2.Token, validator *AccessTokenValidator) (*jwt.VerifiedJWT, error) {
 	j, err := p.VerifyAndDecode(token.AccessToken, validator.tink)
 	if err != nil {
 		return nil, err
@@ -181,6 +172,42 @@ func (p *Provider) Userinfo(ctx context.Context, tokenSource oauth2.TokenSource,
 	}
 
 	return nil
+}
+
+// VerifyAndDecode implements the tink [jwt.Verifier] interface. This provides
+// low-level verification of a JWT token against the provider's JWKS. Generally
+// the higher level [Provider.VerifyAndDecodeIDToken] and
+// [Provider.VerifyAndDecodeAccessToken] methods should be used. This will
+// always use a background context if network access to refresh the JWKS is
+// needed.
+func (p *Provider) VerifyAndDecode(compact string, validator *jwt.Validator) (*jwt.VerifiedJWT, error) {
+	return p.verifyAndDecodeContext(context.Background(), compact, validator)
+}
+
+func (p *Provider) verifyAndDecodeContext(ctx context.Context, compact string, validator *jwt.Validator) (*jwt.VerifiedJWT, error) {
+	handle, err := p.JWKSHandle(ctx)
+	if err != nil {
+		return nil, err
+	}
+	verif, err := jwt.NewVerifier(handle)
+	if err != nil {
+		return nil, fmt.Errorf("creating verifier: %w", err)
+	}
+	jwt, err := verif.VerifyAndDecode(compact, validator)
+	if err != nil {
+		return nil, err
+	}
+	// perform an additional check, we should only ever pass tokens from the
+	// issuer.
+	iss, err := jwt.Issuer()
+	if err != nil {
+		return nil, fmt.Errorf("getting issuer: %w", err)
+	}
+	if iss != p.Metadata.issuer() {
+		return nil, fmt.Errorf("invalid issuer: got %q, want %q", iss, p.Metadata.issuer())
+	}
+
+	return jwt, nil
 }
 
 func ptr[T any](v T) *T {
