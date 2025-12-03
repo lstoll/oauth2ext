@@ -13,7 +13,6 @@ import "C"
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,39 +28,33 @@ var preferredCDHashes = []CodeSignatureHash{
 }
 
 // GetBinaryIdentity returns a unique identifier for the current binary. This
-// can be used to key items for use by this app only, ignoring them silently if
-// the binary changes. This is useful in ad-hoc/temporary items, to avoid
-// prompting the user to unlock the keychain when reading a secret. By default
-// on ARM platforms all binaries must be codesigned, which may be an ad-hoc or
-// formal signature. If the binary is signed, this will return the code signing
-// hash. If the binary is unsigned, this will return the SHA-256 hash of the
-// executable file.
+// can be used to key items for use by this build of the app only, ignoring them
+// silently if the binary changes. This is useful in ad-hoc/temporary items, to
+// avoid prompting the user to unlock the keychain when reading a secret. By
+// default on ARM platforms all binaries must be codesigned, which may be an
+// ad-hoc or formal signature. If the binary is signed, this will return the
+// code signing hash. If the binary is unsigned or verification fails, this will
+// return the SHA-256 hash of the executable file.
 func GetBinaryIdentity() (string, error) {
 	// TODO - handle legit code-signed binaries, and use something consistent
 	// across versions of them.
 
 	// First, try the preferred method: getting the OS-level CDHash.
-	cdHashes, err := GetSelfCDHashes()
+	cdHashes, err := getSelfCDHashes()
 	if err == nil {
 		for _, hash := range preferredCDHashes {
 			if cdHash, ok := cdHashes[hash]; ok {
 				return cdHash, nil
 			}
 		}
-		return "", fmt.Errorf("no preferred CDHash found")
 	}
 
-	var kErr *Error
-	if errors.As(err, &kErr) && kErr.Code == C.errSecCSUnsigned {
-		return hashExecutableFile()
-	}
-
-	return "", fmt.Errorf("failed to get executable identity: %w", err)
+	// if that fails, fallback to the executable file hash
+	return hashExecutableFile()
 }
 
 // hashExecutableFile calculates the SHA-256 hash of the current executable file.
 func hashExecutableFile() (string, error) {
-	fmt.Println("Using identifier: SHA-256 Hash (fallback)")
 	execPath, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("os.Executable: %w", err)
@@ -91,9 +84,9 @@ const (
 	CodeSignatureHashSHA512          CodeSignatureHash = "sha512"
 )
 
-// GetSelfCDHashes retrieves a map of all Code Directory Hashes (CDHashes) for
+// getSelfCDHashes retrieves a map of all Code Directory Hashes (CDHashes) for
 // the running binary, keyed by their digest algorithm type.
-func GetSelfCDHashes() (map[CodeSignatureHash]string, error) {
+func getSelfCDHashes() (map[CodeSignatureHash]string, error) {
 	// Get a reference to the static code of the currently running process.
 	var myselfCode C.SecCodeRef
 	status := C.SecCodeCopySelf(C.kSecCSDefaultFlags, &myselfCode)
@@ -101,6 +94,15 @@ func GetSelfCDHashes() (map[CodeSignatureHash]string, error) {
 		return nil, fmt.Errorf("failed to get SecCodeRef for self (error code: %d)", status)
 	}
 	defer C.CFRelease(C.CFTypeRef(myselfCode))
+
+	// Validate the code signature first, to see if we're signed and it's valid.
+	// If not, we can fallback later.
+	status = C.SecCodeCheckValidity(myselfCode, C.kSecCSDefaultFlags, nilSecRequirementRef)
+	if status != C.errSecSuccess {
+		return nil, &Error{
+			Code: ErrorCode(status),
+		}
+	}
 
 	// Get the code signing information dictionary.
 	var signingInfo C.CFDictionaryRef

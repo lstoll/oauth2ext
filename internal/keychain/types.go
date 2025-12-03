@@ -13,8 +13,9 @@ import "C"
 import "unsafe"
 
 var (
-	nilCFStringRef C.CFStringRef
-	nilCFDataRef   C.CFDataRef
+	nilCFStringRef       C.CFStringRef
+	nilCFDataRef         C.CFDataRef
+	nilSecRequirementRef C.SecRequirementRef
 )
 
 // stringToCFString creates a new CFStringRef from a Go string.
