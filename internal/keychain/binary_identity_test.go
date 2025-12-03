@@ -2,10 +2,19 @@
 
 package keychain
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestGetSelfCDHashes(t *testing.T) {
-	hash, err := GetSelfCDHashes()
+	if runtime.GOARCH != "arm64" {
+		// would also be supported in signed bins, but test bins wouldn't be
+		// signed so.
+		t.Skip("GetSelfCDHashes is only supported on arm64")
+		return
+	}
+	hash, err := getSelfCDHashes()
 	if err != nil {
 		t.Fatalf("GetSelfCDHash failed: %v", err)
 	}
