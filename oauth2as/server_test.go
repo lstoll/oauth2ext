@@ -218,6 +218,12 @@ func TestCodeToken(t *testing.T) {
 			AuthCode:      newToken.Stored(),
 			GrantedAt:     time.Now(),
 			ExpiresAt:     time.Now().Add(1 * time.Minute),
+			Request: &AuthRequest{
+				ClientID:    es256ClientID,
+				RedirectURI: es256ClientRedirect,
+				State:       "",
+				Scopes:      []string{oidc.ScopeOfflineAccess},
+			},
 		}
 
 		if err := o.config.Storage.CreateGrant(context.Background(), grant); err != nil {
@@ -227,7 +233,7 @@ func TestCodeToken(t *testing.T) {
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeAuthorizationCode,
 			Code:         newToken.User(),
-			RedirectURI:  redirectURI,
+			RedirectURI:  es256ClientRedirect,
 			ClientID:     es256ClientID,
 			ClientSecret: es256ClientSecret,
 		}
@@ -621,6 +627,12 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		AuthCode:      newToken.Stored(),
 		GrantedAt:     time.Now(),
 		ExpiresAt:     time.Now().Add(1 * time.Minute),
+		Request: &AuthRequest{
+			ClientID:    "client-id",
+			RedirectURI: "https://redirect",
+			State:       "",
+			Scopes:      []string{oidc.ScopeOfflineAccess},
+		},
 	}
 
 	if err := smgr.CreateGrant(context.Background(), grant); err != nil {

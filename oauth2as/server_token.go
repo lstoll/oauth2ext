@@ -175,6 +175,14 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 	if grant == nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
 	}
+	if grant.Request == nil {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid grant"}
+	}
+
+	// Validate that the redirect_uri matches the one from the authorization request
+	if treq.RedirectURI != grant.Request.RedirectURI {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "redirect URI mismatch"}
+	}
 
 	// update to note the code was used.
 	oldAuthCode := grant.AuthCode
