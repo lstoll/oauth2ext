@@ -37,6 +37,10 @@ type Provider struct {
 
 var _ jwt.Verifier = (*Provider)(nil)
 
+func (p *Provider) GetIssuer() string {
+	return p.Metadata.issuer()
+}
+
 // Endpoint returns the OAuth2 endpoint configuration for this provider.
 func (p *Provider) Endpoint() oauth2.Endpoint {
 	return oauth2.Endpoint{
