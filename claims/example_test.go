@@ -66,8 +66,10 @@ func ExampleVerifier_VerifyAndDecode() {
 	// Output: subject
 }
 
+// newMockDiscoveryServer creates a mock OIDC discovery server for testing.
+// The caller is responsible for cleanup (e.g., using t.Cleanup or defer).
 func newMockDiscoveryServer() (*httptest.Server, *internal.TestSigner) {
-	testSigner := internal.NewTestSigner(nil)
+	testSigner := internal.NewTestSigner()
 
 	svr := httptest.NewTLSServer(nil)
 

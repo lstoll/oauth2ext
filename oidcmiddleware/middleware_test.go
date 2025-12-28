@@ -56,7 +56,7 @@ func newMockOIDCServer(t *testing.T) *mockOIDCServer {
 	mux.HandleFunc("GET /keys", s.handleKeys)
 	s.mux = mux
 
-	s.signer = internal.NewTestSigner(t)
+	s.signer = internal.NewTestSigner()
 
 	return s
 }

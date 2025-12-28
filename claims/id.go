@@ -33,7 +33,11 @@ func NewIDTokenValidator(opts *IDTokenValidatorOpts) *IDTokenValidator {
 }
 
 func (v *IDTokenValidator) CompactFromToken(token oauth2.Token) (string, error) {
-	return token.Extra("id_token").(string), nil
+	idToken, ok := token.Extra("id_token").(string)
+	if !ok || idToken == "" {
+		return "", fmt.Errorf("no id_token found in token extra")
+	}
+	return idToken, nil
 }
 
 func (v *IDTokenValidator) ValidatorOpts() *jwt.ValidatorOpts {
@@ -60,6 +64,6 @@ func (v *IDTokenValidator) Validate(jwt *jwt.VerifiedJWT) (*VerifiedID, error) {
 	return &VerifiedID{jwt: jwt}, nil
 }
 
-func NewIDTokenVerifier(provider Provider) (*Verifier[VerifiedID], error) {
-	return NewVerifier[VerifiedID](provider)
+func NewIDTokenVerifier(provider Provider) (*Verifier[*VerifiedID], error) {
+	return NewVerifier[*VerifiedID](provider)
 }

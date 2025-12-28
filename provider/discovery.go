@@ -98,6 +98,7 @@ func (p *Provider) refreshIfNeeded(ctx context.Context) error {
 		return fmt.Errorf("reading JWKS body: %w", err)
 	}
 
+	p.cachedJWKS = jwksb
 	handle, err := jwt.JWKSetToPublicKeysetHandle(jwksb)
 	if err != nil {
 		return fmt.Errorf("creating public keyset handle from JWKS: %w", err)
