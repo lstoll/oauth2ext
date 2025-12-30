@@ -6,11 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"sort"
 	"strings"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // DPoPResult contains the verified JWT and the JWK thumbprint.
@@ -53,45 +53,57 @@ func (d *DPoPDecoder) VerifyAndDecode(compact string, validator *jwt.Validator) 
 		return nil, fmt.Errorf("decoding header: %w", err)
 	}
 
-	// Parse header to extract jwk
-	var header map[string]any
-	if err := json.Unmarshal(headerJSON, &header); err != nil {
+	// Parse header using structpb for strict JSON handling
+	var header structpb.Struct
+	if err := header.UnmarshalJSON(headerJSON); err != nil {
 		return nil, fmt.Errorf("unmarshaling header: %w", err)
 	}
 
 	// Step 2: Extract jwk header (validator will check typ)
-	jwkRaw, ok := header["jwk"]
+	jwkVal, ok := header.Fields["jwk"]
 	if !ok {
 		return nil, fmt.Errorf("jwk header is missing")
+	}
+	if _, ok := jwkVal.Kind.(*structpb.Value_StructValue); !ok {
+		return nil, fmt.Errorf("jwk header is not a struct")
+	}
+	jwkStruct := jwkVal.GetStructValue()
+	if jwkStruct == nil {
+		return nil, fmt.Errorf("jwk header is not a struct")
 	}
 
 	// Step 3: Calculate JWK thumbprint using the exact jwk value from header
 	// We use the exact value to avoid re-marshaling issues
-	thumbprint, err := calculateJWKThumbprint(jwkRaw)
+	thumbprint, err := calculateJWKThumbprint(jwkStruct)
 	if err != nil {
 		return nil, fmt.Errorf("calculating JWK thumbprint: %w", err)
 	}
 
 	// Step 4: Convert JWK to JWK Set format for Tink
 	// Tink requires the "alg" field in the JWK, so we need to add it from the header
-	alg, ok := header["alg"].(string)
+	algVal, ok := header.Fields["alg"]
 	if !ok {
-		return nil, fmt.Errorf("missing or invalid alg in header")
+		return nil, fmt.Errorf("missing alg in header")
+	}
+	if _, ok := algVal.Kind.(*structpb.Value_StringValue); !ok {
+		return nil, fmt.Errorf("alg in header is not a string")
+	}
+	alg := algVal.GetStringValue()
+	if alg == "" {
+		return nil, fmt.Errorf("alg is empty")
 	}
 
-	// Convert jwk to map to add alg field
-	jwkMap, ok := jwkRaw.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("jwk is not a map")
+	// Create a copy of the JWK struct and add alg field
+	jwkForTink := &structpb.Struct{
+		Fields: make(map[string]*structpb.Value, len(jwkStruct.Fields)+1),
 	}
-
-	// Create a copy to avoid modifying the original
-	jwkForTink := make(map[string]any)
-	maps.Copy(jwkForTink, jwkMap)
-	jwkForTink["alg"] = alg
+	for k, v := range jwkStruct.Fields {
+		jwkForTink.Fields[k] = v
+	}
+	jwkForTink.Fields["alg"] = structpb.NewStringValue(alg)
 
 	// Marshal the JWK with alg for Tink
-	jwkWithAlgJSON, err := json.Marshal(jwkForTink)
+	jwkWithAlgJSON, err := jwkForTink.MarshalJSON()
 	if err != nil {
 		return nil, fmt.Errorf("marshaling jwk with alg: %w", err)
 	}
@@ -125,16 +137,10 @@ func (d *DPoPDecoder) VerifyAndDecode(compact string, validator *jwt.Validator) 
 // The thumbprint is the base64url encoding of the SHA-256 hash of the canonical JSON
 // representation of the JWK (with keys sorted and no whitespace).
 // It uses the exact values from the jwk parameter to avoid re-marshaling issues.
-func calculateJWKThumbprint(jwk any) (string, error) {
-	// Convert to map for canonicalization
-	jwkMap, ok := jwk.(map[string]any)
-	if !ok {
-		return "", fmt.Errorf("jwk is not a map")
-	}
-
+func calculateJWKThumbprint(jwk *structpb.Struct) (string, error) {
 	// Create a canonical representation by sorting keys and removing whitespace
 	// We use the exact values from the jwk to avoid re-marshaling issues
-	canonical, err := canonicalizeJWK(jwkMap)
+	canonical, err := canonicalizeJWK(jwk)
 	if err != nil {
 		return "", fmt.Errorf("canonicalizing JWK: %w", err)
 	}
@@ -150,34 +156,62 @@ func calculateJWKThumbprint(jwk any) (string, error) {
 
 // canonicalizeJWK creates a canonical JSON representation of a JWK according to RFC 7638.
 // Keys are sorted alphabetically, and the JSON has no whitespace.
-// It uses the exact values from the jwk map to avoid re-marshaling issues.
-func canonicalizeJWK(jwk map[string]any) ([]byte, error) {
+// It uses the exact values from the jwk struct to avoid re-marshaling issues.
+func canonicalizeJWK(jwk *structpb.Struct) ([]byte, error) {
 	// Extract kty (key type) - required for all key types
-	kty, ok := jwk["kty"].(string)
+	ktyVal, ok := jwk.Fields["kty"]
 	if !ok {
 		return nil, fmt.Errorf("missing required member: kty")
+	}
+	if _, ok := ktyVal.Kind.(*structpb.Value_StringValue); !ok {
+		return nil, fmt.Errorf("kty is not a string")
+	}
+	kty := ktyVal.GetStringValue()
+	if kty == "" {
+		return nil, fmt.Errorf("kty is empty")
 	}
 
 	// Determine required members based on key type (RFC 7638)
 	var requiredKeys []string
-	canonicalMap := make(map[string]any)
+	canonicalMap := make(map[string]string)
 
 	canonicalMap["kty"] = kty
 
 	switch kty {
 	case "EC":
 		// EC keys require: kty, crv, x, y
-		crv, ok := jwk["crv"].(string)
+		crvVal, ok := jwk.Fields["crv"]
 		if !ok {
 			return nil, fmt.Errorf("missing required member for EC key: crv")
 		}
-		x, ok := jwk["x"].(string)
+		if _, ok := crvVal.Kind.(*structpb.Value_StringValue); !ok {
+			return nil, fmt.Errorf("crv is not a string")
+		}
+		crv := crvVal.GetStringValue()
+		if crv == "" {
+			return nil, fmt.Errorf("crv is empty")
+		}
+		xVal, ok := jwk.Fields["x"]
 		if !ok {
 			return nil, fmt.Errorf("missing required member for EC key: x")
 		}
-		y, ok := jwk["y"].(string)
+		if _, ok := xVal.Kind.(*structpb.Value_StringValue); !ok {
+			return nil, fmt.Errorf("x is not a string")
+		}
+		x := xVal.GetStringValue()
+		if x == "" {
+			return nil, fmt.Errorf("x is empty")
+		}
+		yVal, ok := jwk.Fields["y"]
 		if !ok {
 			return nil, fmt.Errorf("missing required member for EC key: y")
+		}
+		if _, ok := yVal.Kind.(*structpb.Value_StringValue); !ok {
+			return nil, fmt.Errorf("y is not a string")
+		}
+		y := yVal.GetStringValue()
+		if y == "" {
+			return nil, fmt.Errorf("y is empty")
 		}
 		canonicalMap["crv"] = crv
 		canonicalMap["x"] = x
@@ -186,13 +220,27 @@ func canonicalizeJWK(jwk map[string]any) ([]byte, error) {
 
 	case "RSA":
 		// RSA keys require: kty, n, e
-		n, ok := jwk["n"].(string)
+		nVal, ok := jwk.Fields["n"]
 		if !ok {
 			return nil, fmt.Errorf("missing required member for RSA key: n")
 		}
-		e, ok := jwk["e"].(string)
+		if _, ok := nVal.Kind.(*structpb.Value_StringValue); !ok {
+			return nil, fmt.Errorf("n is not a string")
+		}
+		n := nVal.GetStringValue()
+		if n == "" {
+			return nil, fmt.Errorf("n is empty")
+		}
+		eVal, ok := jwk.Fields["e"]
 		if !ok {
 			return nil, fmt.Errorf("missing required member for RSA key: e")
+		}
+		if _, ok := eVal.Kind.(*structpb.Value_StringValue); !ok {
+			return nil, fmt.Errorf("e is not a string")
+		}
+		e := eVal.GetStringValue()
+		if e == "" {
+			return nil, fmt.Errorf("e is empty")
 		}
 		canonicalMap["e"] = e
 		canonicalMap["n"] = n
@@ -200,13 +248,27 @@ func canonicalizeJWK(jwk map[string]any) ([]byte, error) {
 
 	case "OKP":
 		// OKP (Octet Key Pair) keys require: kty, crv, x
-		crv, ok := jwk["crv"].(string)
+		crvVal, ok := jwk.Fields["crv"]
 		if !ok {
 			return nil, fmt.Errorf("missing required member for OKP key: crv")
 		}
-		x, ok := jwk["x"].(string)
+		if _, ok := crvVal.Kind.(*structpb.Value_StringValue); !ok {
+			return nil, fmt.Errorf("crv is not a string")
+		}
+		crv := crvVal.GetStringValue()
+		if crv == "" {
+			return nil, fmt.Errorf("crv is empty")
+		}
+		xVal, ok := jwk.Fields["x"]
 		if !ok {
 			return nil, fmt.Errorf("missing required member for OKP key: x")
+		}
+		if _, ok := xVal.Kind.(*structpb.Value_StringValue); !ok {
+			return nil, fmt.Errorf("x is not a string")
+		}
+		x := xVal.GetStringValue()
+		if x == "" {
+			return nil, fmt.Errorf("x is empty")
 		}
 		canonicalMap["crv"] = crv
 		canonicalMap["x"] = x
@@ -223,11 +285,7 @@ func canonicalizeJWK(jwk map[string]any) ([]byte, error) {
 	// Use the exact string values from the jwk to avoid any re-encoding issues
 	var parts []string
 	for _, k := range requiredKeys {
-		v := canonicalMap[k]
-		valStr, ok := v.(string)
-		if !ok {
-			return nil, fmt.Errorf("unexpected non-string value for key %s", k)
-		}
+		valStr := canonicalMap[k]
 		// JSON encode the value to handle any special characters
 		// This is safe because we're using the exact string value from the header
 		valJSON, err := json.Marshal(valStr)

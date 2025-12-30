@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // Example DPoP token from RFC 9449 Appendix A.1
@@ -88,8 +89,11 @@ func TestDPoPDecoder_RoundTrip(t *testing.T) {
 	}
 
 	// Encode with jwk header (typ will be extracted from RawJWT)
-	additionalHeaders := map[string]any{
-		"jwk": jwk,
+	// jwk is already a *structpb.Struct, so we create the header with it directly
+	additionalHeaders := &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			"jwk": structpb.NewStructValue(jwk),
+		},
 	}
 	token, err := encoder.encodeWithHeaders(rawJWT, additionalHeaders)
 	if err != nil {
@@ -205,11 +209,14 @@ func TestDPoPDecoder_RejectsMissingJWK(t *testing.T) {
 func TestDPoPDecoder_ThumbprintCalculation(t *testing.T) {
 	// Test that thumbprint calculation works correctly
 	// The JWK from the RFC example:
-	jwk := map[string]any{
+	jwk, err := structpb.NewStruct(map[string]any{
 		"kty": "EC",
 		"crv": "P-256",
 		"x":   "l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfVWAWBFs",
 		"y":   "9VE4jf_Ok_o64zbTTlcuNJajHmt6v9TDVrU0CdvGRDA",
+	})
+	if err != nil {
+		t.Fatalf("failed to create JWK struct: %v", err)
 	}
 
 	thumbprint, err := calculateJWKThumbprint(jwk)
@@ -242,12 +249,15 @@ func TestDPoPDecoder_ThumbprintCalculation(t *testing.T) {
 func TestDPoPDecoder_ThumbprintCalculation_RFC7638_Example(t *testing.T) {
 	// Test using the exact RSA JWK example from RFC 7638
 	// This verifies our implementation matches the RFC specification
-	jwk := map[string]any{
+	jwk, err := structpb.NewStruct(map[string]any{
 		"kty": "RSA",
 		"n":   "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
 		"e":   "AQAB",
 		"alg": "RS256",
 		"kid": "2011-04-29",
+	})
+	if err != nil {
+		t.Fatalf("failed to create JWK struct: %v", err)
 	}
 
 	thumbprint, err := calculateJWKThumbprint(jwk)

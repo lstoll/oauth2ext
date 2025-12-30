@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/tink-crypto/tink-go/v2/jwt/jwtrsassapkcs1"
 	"github.com/tink-crypto/tink-go/v2/key"
 	"github.com/tink-crypto/tink-go/v2/keyset"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 const tokenDelim = "."
@@ -36,7 +36,7 @@ func parseToken(s string) (header, claims, sig string, ok bool) {
 }
 
 // parseJWTHeader extracts and parses the JWT header from a compact JWT string.
-func parseJWTHeader(compact string) (map[string]any, error) {
+func parseJWTHeader(compact string) (*structpb.Struct, error) {
 	headerB64, _, _, ok := parseToken(compact)
 	if !ok {
 		return nil, fmt.Errorf("malformed JWT: expected format header.payload.signature")
@@ -47,23 +47,29 @@ func parseJWTHeader(compact string) (map[string]any, error) {
 		return nil, fmt.Errorf("decoding header: %w", err)
 	}
 
-	var header map[string]any
-	if err := json.Unmarshal(headerJSON, &header); err != nil {
+	var header structpb.Struct
+	if err := header.UnmarshalJSON(headerJSON); err != nil {
 		return nil, fmt.Errorf("unmarshaling header: %w", err)
 	}
 
-	return header, nil
+	return &header, nil
 }
 
 // createKeysetHandleFromPublicKey creates a tink keyset handle from a public key using Manager.
-// The header map should contain the "alg" field, but if it's missing, the algorithm will be
+// The header should contain the "alg" field, but if it's missing, the algorithm will be
 // determined from the key type (for use cases like JWK generation where alg isn't known yet).
-func createKeysetHandleFromPublicKey(pubKey any, header map[string]any) (*keyset.Handle, error) {
+func createKeysetHandleFromPublicKey(pubKey any, header *structpb.Struct) (*keyset.Handle, error) {
 	// Extract algorithm from header, or determine from key type if not present
 	var alg string
 	var ok bool
 	if header != nil {
-		alg, ok = header["alg"].(string)
+		algVal, exists := header.Fields["alg"]
+		if exists {
+			if _, isString := algVal.Kind.(*structpb.Value_StringValue); isString {
+				alg = algVal.GetStringValue()
+				ok = alg != ""
+			}
+		}
 	}
 	if !ok {
 		// Determine algorithm from key type

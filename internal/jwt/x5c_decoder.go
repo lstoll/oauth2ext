@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 var _ jwt.Verifier = (*X5CDecoder)(nil)
@@ -36,9 +37,16 @@ func (d *X5CDecoder) VerifyAndDecode(compact string, validator *jwt.Validator) (
 	}
 
 	// Step 2: Check for x5c header - fail immediately if not present
-	x5c, ok := header["x5c"].([]any)
-	if !ok || len(x5c) == 0 {
-		return nil, fmt.Errorf("x5c header is missing or empty")
+	x5cVal, ok := header.Fields["x5c"]
+	if !ok {
+		return nil, fmt.Errorf("x5c header is missing")
+	}
+	if _, ok := x5cVal.Kind.(*structpb.Value_ListValue); !ok {
+		return nil, fmt.Errorf("x5c header is not a list")
+	}
+	x5c := x5cVal.GetListValue().AsSlice()
+	if len(x5c) == 0 {
+		return nil, fmt.Errorf("x5c header is empty")
 	}
 
 	// Step 3: Parse and verify the certificate chain

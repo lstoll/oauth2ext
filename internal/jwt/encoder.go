@@ -10,13 +10,12 @@ import (
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"hash"
-	"maps"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/signature/subtle"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 var _ jwt.Signer = (*Encoder)(nil)
@@ -32,9 +31,9 @@ func (e *Encoder) SignAndEncode(raw *jwt.RawJWT) (string, error) {
 }
 
 // encodeWithHeaders encodes a JWT with additional custom headers.
-// The additionalHeaders map will be merged into the standard headers (alg, kid, x5c).
+// The additionalHeaders struct will be merged into the standard headers (alg, kid, x5c).
 // If a key exists in both, the additionalHeaders value takes precedence.
-func (e *Encoder) encodeWithHeaders(raw *jwt.RawJWT, additionalHeaders map[string]any) (string, error) {
+func (e *Encoder) encodeWithHeaders(raw *jwt.RawJWT, additionalHeaders *structpb.Struct) (string, error) {
 	// Get the payload JSON
 	payload, err := raw.JSONPayload()
 	if err != nil {
@@ -47,37 +46,42 @@ func (e *Encoder) encodeWithHeaders(raw *jwt.RawJWT, additionalHeaders map[strin
 		return "", fmt.Errorf("determining algorithm: %w", err)
 	}
 
-	// Build the header
-	header := map[string]any{
-		"alg": alg,
+	// Build the header using structpb
+	header := &structpb.Struct{
+		Fields: make(map[string]*structpb.Value),
 	}
+	header.Fields["alg"] = structpb.NewStringValue(alg)
 
 	// Extract type header from RawJWT if present
 	if raw.HasTypeHeader() {
 		typ, err := raw.TypeHeader()
 		if err == nil {
-			header["typ"] = typ
+			header.Fields["typ"] = structpb.NewStringValue(typ)
 		}
 	}
 
 	if e.KID != "" {
-		header["kid"] = e.KID
+		header.Fields["kid"] = structpb.NewStringValue(e.KID)
 	}
 
 	// Add x5c header if CertChain is provided
 	if len(e.CertChain) > 0 {
-		x5c := make([]string, len(e.CertChain))
+		x5cValues := make([]*structpb.Value, len(e.CertChain))
 		for i, cert := range e.CertChain {
-			x5c[i] = base64.StdEncoding.EncodeToString(cert.Raw)
+			x5cValues[i] = structpb.NewStringValue(base64.StdEncoding.EncodeToString(cert.Raw))
 		}
-		header["x5c"] = x5c
+		header.Fields["x5c"] = structpb.NewListValue(&structpb.ListValue{Values: x5cValues})
 	}
 
 	// Merge additional headers (they take precedence over everything, including type header from RawJWT)
-	maps.Copy(header, additionalHeaders)
+	if additionalHeaders != nil {
+		for k, v := range additionalHeaders.Fields {
+			header.Fields[k] = v
+		}
+	}
 
 	// Encode header and payload
-	headerJSON, err := json.Marshal(header)
+	headerJSON, err := header.MarshalJSON()
 	if err != nil {
 		return "", fmt.Errorf("encoding header: %w", err)
 	}
@@ -169,8 +173,8 @@ func (e *Encoder) getHasher(alg string) (hash.Hash, crypto.SignerOpts, error) {
 
 // publicKeyToJWK creates a JWK representation of a public key for use in DPoP tokens.
 // It uses Tink to convert the public key to a JWK set and extracts the first key.
-// It returns a map that can be used as the "jwk" header value.
-func publicKeyToJWK(pubKey crypto.PublicKey) (map[string]any, error) {
+// It returns a structpb.Struct that can be used as the "jwk" header value.
+func publicKeyToJWK(pubKey crypto.PublicKey) (*structpb.Struct, error) {
 	// Determine algorithm from key type
 	alg, err := determineAlgorithmFromKey(pubKey)
 	if err != nil {
@@ -178,8 +182,10 @@ func publicKeyToJWK(pubKey crypto.PublicKey) (map[string]any, error) {
 	}
 
 	// Create a header with the algorithm for keyset creation
-	header := map[string]any{
-		"alg": alg,
+	header := &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			"alg": structpb.NewStringValue(alg),
+		},
 	}
 
 	// Create keyset handle from public key using Tink
@@ -205,21 +211,48 @@ func publicKeyToJWK(pubKey crypto.PublicKey) (map[string]any, error) {
 		return nil, fmt.Errorf("converting to JWK set: %w", err)
 	}
 
-	// Parse JWK set and extract the first key
-	var jwkSet struct {
-		Keys []map[string]any `json:"keys"`
-	}
-	if err := json.Unmarshal(jwkSetJSON, &jwkSet); err != nil {
+	// Parse JWK set using structpb
+	var jwkSet structpb.Struct
+	if err := jwkSet.UnmarshalJSON(jwkSetJSON); err != nil {
 		return nil, fmt.Errorf("parsing JWK set: %w", err)
 	}
 
-	if len(jwkSet.Keys) == 0 {
+	// Extract the keys array
+	keysVal, ok := jwkSet.Fields["keys"]
+	if !ok {
+		return nil, fmt.Errorf("JWK set missing 'keys' field")
+	}
+	if _, ok := keysVal.Kind.(*structpb.Value_ListValue); !ok {
+		return nil, fmt.Errorf("JWK set 'keys' field is not a list")
+	}
+	keysList := keysVal.GetListValue()
+	if keysList == nil || len(keysList.Values) == 0 {
 		return nil, fmt.Errorf("JWK set is empty")
 	}
 
-	// Extract the first JWK (remove alg if present, as it's not part of the jwk header per RFC 9449)
-	jwk := jwkSet.Keys[0]
-	delete(jwk, "alg") // Remove alg as it's in the header, not the jwk
+	// Extract the first JWK
+	firstKeyVal := keysList.Values[0]
+	if _, ok := firstKeyVal.Kind.(*structpb.Value_StructValue); !ok {
+		return nil, fmt.Errorf("first JWK is not a struct")
+	}
+	jwk := firstKeyVal.GetStructValue()
+	if jwk == nil {
+		return nil, fmt.Errorf("first JWK is not a struct")
+	}
+
+	// Remove alg if present, as it's not part of the jwk header per RFC 9449
+	if _, hasAlg := jwk.Fields["alg"]; hasAlg {
+		// Create a copy without alg
+		jwkWithoutAlg := &structpb.Struct{
+			Fields: make(map[string]*structpb.Value, len(jwk.Fields)-1),
+		}
+		for k, v := range jwk.Fields {
+			if k != "alg" {
+				jwkWithoutAlg.Fields[k] = v
+			}
+		}
+		jwk = jwkWithoutAlg
+	}
 
 	return jwk, nil
 }
