@@ -4,6 +4,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -31,11 +35,11 @@ func TestDPoPVerifier_ExampleToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse JWT header: %v", err)
 	}
-	jwkRaw, ok := header["jwk"]
-	if !ok {
+	jwk := header.GetFields()["jwk"].GetStructValue().AsMap()
+	if len(jwk) == 0 {
 		t.Fatal("jwk header is missing")
 	}
-	expectedThumbprint, err := calculateJWKThumbprint(jwkRaw)
+	expectedThumbprint, err := calculateJWKThumbprint(jwk)
 	if err != nil {
 		t.Fatalf("failed to calculate thumbprint: %v", err)
 	}
@@ -579,4 +583,282 @@ func TestDPoPVerifier_AllowUnsetHTMHTU(t *testing.T) {
 			t.Errorf("expected htm mismatch error, got: %v", err)
 		}
 	})
+}
+
+// testLeafCertChain returns a leaf ECDSA key, leaf cert, and CA cert (leaf signed by CA).
+func testLeafCertChain(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate, *x509.Certificate) {
+	t.Helper()
+	caPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("CA key: %v", err)
+	}
+	caTpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTpl, caTpl, &caPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatalf("CreateCertificate CA: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("ParseCertificate CA: %v", err)
+	}
+
+	leafPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("leaf key: %v", err)
+	}
+	leafTpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "leaf"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTpl, caCert, &leafPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatalf("CreateCertificate leaf: %v", err)
+	}
+	leafCert, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatalf("ParseCertificate leaf: %v", err)
+	}
+
+	return leafPriv, leafCert, caCert
+}
+
+func x5cB64Chain(leaf, ca *x509.Certificate) []string {
+	return []string{
+		base64.StdEncoding.EncodeToString(leaf.Raw),
+		base64.StdEncoding.EncodeToString(ca.Raw),
+	}
+}
+
+func TestNewSignerWithCertificateChain_MismatchedLeaf(t *testing.T) {
+	_, leafCert, caCert := testLeafCertChain(t)
+	wrongPriv := generateTestKey(t)
+	_, err := NewSignerWithCertificateChain(wrongPriv, []*x509.Certificate{leafCert, caCert})
+	if err == nil {
+		t.Fatal("expected error when signer key does not match leaf certificate")
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDPoPVerifier_TrustedRoots_X5C(t *testing.T) {
+	leafPriv, leafCert, caCert := testLeafCertChain(t)
+
+	signer, err := NewSignerWithCertificateChain(leafPriv, []*x509.Certificate{leafCert, caCert})
+	if err != nil {
+		t.Fatalf("NewSignerWithCertificateChain: %v", err)
+	}
+
+	now := time.Now()
+	token, err := signer.SignAndEncode(&jwt.RawJWTOptions{
+		WithoutExpiration: true,
+		CustomClaims: map[string]any{
+			"htm": "POST",
+			"htu": "https://server.example.com/token",
+		},
+		IssuedAt: &now,
+	})
+	if err != nil {
+		t.Fatalf("SignAndEncode: %v", err)
+	}
+
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+
+	expectedTP, err := calculateJWKThumbprint(signer.jwk)
+	if err != nil {
+		t.Fatalf("thumbprint: %v", err)
+	}
+	val, err := NewValidator(&ValidatorOpts{ExpectedThumbprint: expectedTP})
+	if err != nil {
+		t.Fatalf("NewValidator: %v", err)
+	}
+
+	v := &Verifier{TrustedRoots: roots}
+	proof, err := v.VerifyAndDecode(token, val)
+	if err != nil {
+		t.Fatalf("VerifyAndDecode: %v", err)
+	}
+	if proof.Thumbprint != expectedTP {
+		t.Errorf("thumbprint: got %q want %q", proof.Thumbprint, expectedTP)
+	}
+	if proof.CertificateChain == nil {
+		t.Fatal("expected CertificateChain when using TrustedRoots")
+	}
+	if len(proof.CertificateChain) != 2 {
+		t.Fatalf("CertificateChain len: got %d want 2", len(proof.CertificateChain))
+	}
+	if !proof.CertificateChain[0].Equal(leafCert) {
+		t.Error("chain[0] does not match leaf")
+	}
+	if !proof.CertificateChain[1].Equal(caCert) {
+		t.Error("chain[1] does not match CA")
+	}
+}
+
+func TestDPoPVerifier_TrustedRoots_RequiresX5C(t *testing.T) {
+	_, _, caCert := testLeafCertChain(t)
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+
+	privKey := generateTestKey(t)
+	signer, err := NewSigner(privKey)
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+
+	now := time.Now()
+	token, err := signer.SignAndEncode(&jwt.RawJWTOptions{
+		WithoutExpiration: true,
+		IssuedAt:          &now,
+	})
+	if err != nil {
+		t.Fatalf("SignAndEncode: %v", err)
+	}
+
+	val, err := NewValidator(&ValidatorOpts{
+		ExpectedThumbprint: mustThumbprint(t, signer.jwk),
+		IgnoreThumbprint:   true,
+	})
+	if err != nil {
+		t.Fatalf("NewValidator: %v", err)
+	}
+
+	v := &Verifier{TrustedRoots: roots}
+	_, err = v.VerifyAndDecode(token, val)
+	if err == nil {
+		t.Fatal("expected error when TrustedRoots is set but x5c is absent")
+	}
+	if !strings.Contains(err.Error(), "x5c header is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDPoPVerifier_TrustedRoots_WrongRoot(t *testing.T) {
+	leafPriv, leafCert, caCert := testLeafCertChain(t)
+
+	otherPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("other CA key: %v", err)
+	}
+	otherTpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(99),
+		Subject:               pkix.Name{CommonName: "other-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	otherDER, err := x509.CreateCertificate(rand.Reader, otherTpl, otherTpl, &otherPriv.PublicKey, otherPriv)
+	if err != nil {
+		t.Fatalf("other CA cert: %v", err)
+	}
+	otherCA, err := x509.ParseCertificate(otherDER)
+	if err != nil {
+		t.Fatalf("parse other CA: %v", err)
+	}
+
+	signer, err := NewSignerWithCertificateChain(leafPriv, []*x509.Certificate{leafCert, caCert})
+	if err != nil {
+		t.Fatalf("NewSignerWithCertificateChain: %v", err)
+	}
+
+	now := time.Now()
+	token, err := signer.SignAndEncode(&jwt.RawJWTOptions{
+		WithoutExpiration: true,
+		IssuedAt:          &now,
+	})
+	if err != nil {
+		t.Fatalf("SignAndEncode: %v", err)
+	}
+
+	wrongRoots := x509.NewCertPool()
+	wrongRoots.AddCert(otherCA)
+
+	val, err := NewValidator(&ValidatorOpts{
+		ExpectedThumbprint: mustThumbprint(t, signer.jwk),
+		IgnoreThumbprint:   true,
+	})
+	if err != nil {
+		t.Fatalf("NewValidator: %v", err)
+	}
+
+	v := &Verifier{TrustedRoots: wrongRoots}
+	_, err = v.VerifyAndDecode(token, val)
+	if err == nil {
+		t.Fatal("expected chain verification failure")
+	}
+	if !strings.Contains(err.Error(), "certificate chain verification failed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDPoPVerifier_TrustedRoots_JWKMismatchesLeaf(t *testing.T) {
+	leafPriv, leafCert, caCert := testLeafCertChain(t)
+	otherPriv := generateTestKey(t)
+	otherJWK, err := publicKeyToJWK(otherPriv.Public())
+	if err != nil {
+		t.Fatalf("publicKeyToJWK: %v", err)
+	}
+
+	signer, err := NewSigner(leafPriv)
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+
+	now := time.Now()
+	rawJWT, err := jwt.NewRawJWT(&jwt.RawJWTOptions{
+		TypeHeader:        stringPtr("dpop+jwt"),
+		WithoutExpiration: true,
+		IssuedAt:          &now,
+	})
+	if err != nil {
+		t.Fatalf("NewRawJWT: %v", err)
+	}
+
+	token, err := signer.encodeWithHeaders(rawJWT, map[string]any{
+		"jwk": otherJWK,
+		"x5c": x5cB64Chain(leafCert, caCert),
+	})
+	if err != nil {
+		t.Fatalf("encodeWithHeaders: %v", err)
+	}
+
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+
+	val, err := NewValidator(&ValidatorOpts{IgnoreThumbprint: true})
+	if err != nil {
+		t.Fatalf("NewValidator: %v", err)
+	}
+
+	v := &Verifier{TrustedRoots: roots}
+	_, err = v.VerifyAndDecode(token, val)
+	if err == nil {
+		t.Fatal("expected jwk / x5c mismatch error")
+	}
+	if !strings.Contains(err.Error(), "jwk does not match x5c leaf") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func mustThumbprint(t *testing.T, jwk map[string]any) string {
+	t.Helper()
+	tp, err := calculateJWKThumbprint(jwk)
+	if err != nil {
+		t.Fatalf("thumbprint: %v", err)
+	}
+	return tp
 }

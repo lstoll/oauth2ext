@@ -2,3 +2,4 @@
 /bin/golangci-lint*
 /*.test
 go.work*
+go.work*

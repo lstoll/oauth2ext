@@ -306,13 +306,8 @@ func canonicalizeJWK(jwk map[string]any) ([]byte, error) {
 
 // calculateJWKThumbprint calculates the JWK thumbprint per RFC 7638.
 // Returns the base64url-encoded SHA-256 hash of the canonical JWK.
-func calculateJWKThumbprint(jwk any) (string, error) {
-	jwkMap, ok := jwk.(map[string]any)
-	if !ok {
-		return "", fmt.Errorf("jwk is not a map")
-	}
-
-	canonical, err := canonicalizeJWK(jwkMap)
+func calculateJWKThumbprint(jwk map[string]any) (string, error) {
+	canonical, err := canonicalizeJWK(jwk)
 	if err != nil {
 		return "", fmt.Errorf("canonicalizing JWK: %w", err)
 	}

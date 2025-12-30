@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,9 @@ import (
 type Signer struct {
 	signer crypto.Signer
 	jwk    map[string]any
+	// x5c, when non-empty, is the RFC 7515 x5c header (base64-encoded DER
+	// PKIX), leaf first, same order as passed to NewSignerWithCertificateChain.
+	x5c []string
 }
 
 // NewSigner creates a new Signer using the provided [crypto.Signer].
@@ -38,6 +42,49 @@ func NewSigner(signer crypto.Signer) (*Signer, error) {
 	}, nil
 }
 
+// NewSignerWithCertificateChain returns a Signer that includes an x5c JWT
+// header built from chain. The leaf certificate (chain[0]) must contain the
+// same public key as signer. Remaining entries are intermediates and/or the
+// root, in order from leaf toward trust.
+//
+// Note: This is an experimental, non-standard extension to the DPoP spec. It
+// presents privacy concerns as it potntially exposes information about the
+// user, and is intended for use in enterprise scenarios only.
+func NewSignerWithCertificateChain(signer crypto.Signer, chain []*x509.Certificate) (*Signer, error) {
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("certificate chain is empty")
+	}
+	if !leafCertMatchesSigner(chain[0], signer.Public()) {
+		return nil, fmt.Errorf("leaf certificate public key does not match signer")
+	}
+	jwk, err := publicKeyToJWK(signer.Public())
+	if err != nil {
+		return nil, fmt.Errorf("creating JWK: %w", err)
+	}
+	x5c := make([]string, len(chain))
+	for i, c := range chain {
+		x5c[i] = base64.StdEncoding.EncodeToString(c.Raw)
+	}
+	return &Signer{
+		signer: signer,
+		jwk:    jwk,
+		x5c:    x5c,
+	}, nil
+}
+
+func leafCertMatchesSigner(leaf *x509.Certificate, pub crypto.PublicKey) bool {
+	switch cp := leaf.PublicKey.(type) {
+	case *ecdsa.PublicKey:
+		sp, ok := pub.(*ecdsa.PublicKey)
+		return ok && cp.Equal(sp)
+	case *rsa.PublicKey:
+		sp, ok := pub.(*rsa.PublicKey)
+		return ok && cp.Equal(sp)
+	default:
+		return false
+	}
+}
+
 // SignAndEncode signs the JWT as a DPoP proof, and returns the compact JWT.
 func (e *Signer) SignAndEncode(raw *jwt.RawJWTOptions) (string, error) {
 	raw.TypeHeader = th.Ptr("dpop+jwt")
@@ -45,9 +92,11 @@ func (e *Signer) SignAndEncode(raw *jwt.RawJWTOptions) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("creating raw JWT: %w", err)
 	}
-	return e.encodeWithHeaders(rawJWT, map[string]any{
-		"jwk": e.jwk,
-	})
+	headers := map[string]any{"jwk": e.jwk}
+	if len(e.x5c) > 0 {
+		headers["x5c"] = e.x5c
+	}
+	return e.encodeWithHeaders(rawJWT, headers)
 }
 
 // encodeWithHeaders encodes a JWT with additional custom headers. If a key
