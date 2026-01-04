@@ -270,7 +270,7 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 	}
 
 	opts := h.AuthCodeOptions
-	if slices.Contains(h.Provider.Metadata.GetCodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
+	if slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
 		opts = append(opts, oauth2.VerifierOption(foundLogin.PKCEChallenge))
 	}
 
@@ -325,7 +325,7 @@ func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (st
 	)
 
 	opts := h.AuthCodeOptions
-	if slices.Contains(h.Provider.Metadata.GetCodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
+	if slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
 		pkceChallenge = oauth2.GenerateVerifier()
 		opts = append(opts, oauth2.S256ChallengeOption(pkceChallenge))
 	}

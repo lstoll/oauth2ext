@@ -13,10 +13,10 @@ import (
 )
 
 func RegisterWithProvider(ctx context.Context, provider *provider.Provider, request *ClientRegistrationRequest) (*ClientRegistrationResponse, error) {
-	regEndpoint, ok := provider.Metadata.GetRegistrationEndpoint()
-	if !ok {
-		return nil, fmt.Errorf("registration endpoint not found in provider metadata")
+	if !provider.RegistrationSupported() {
+		return nil, fmt.Errorf("registration not supported by provider")
 	}
+	regEndpoint := provider.RegistrationEndpoint()
 
 	httpClient := internal.HTTPClientFromContext(ctx, nil)
 

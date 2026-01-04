@@ -15,11 +15,6 @@ import (
 	"lds.li/oauth2ext/internal"
 )
 
-// jwtTYPAccessToken is the type header for OAuth2 JWT Access tokens.
-//
-// https://datatracker.ietf.org/doc/html/rfc9068#name-header
-const jwtTYPAccessToken = "at+jwt"
-
 const DefaultCacheDuration = 10 * time.Minute
 
 type Provider struct {
@@ -47,6 +42,32 @@ func (p *Provider) Endpoint() oauth2.Endpoint {
 		AuthURL:  p.Metadata.authorizationEndpoint(),
 		TokenURL: p.Metadata.tokenEndpoint(),
 	}
+}
+
+// CodeChallengeMethodsSupported returns the list of PKCE code challenge methods
+// supported by this provider. If PKCE is not supported, an empty slice is
+// returned.
+func (p *Provider) CodeChallengeMethodsSupported() []CodeChallengeMethod {
+	return p.Metadata.codeChallengeMethodsSupported()
+}
+
+// RegistrationSupported returns true if the provider supports client
+// registration.
+func (p *Provider) RegistrationSupported() bool {
+	return p.Metadata.registrationSupported()
+}
+
+// RegistrationEndpoint returns the registration endpoint for this provider. If
+// registration is not supported, an empty string is returned.
+func (p *Provider) RegistrationEndpoint() string {
+	return p.Metadata.registrationEndpoint()
+}
+
+// IDTokenSigningAlgValuesSupported returns the list of algorithms supported for
+// signing ID tokens. If ID tokens are not supported, an empty slice is
+// returned.
+func (p *Provider) IDTokenSigningAlgValuesSupported() []string {
+	return p.Metadata.idTokenSigningAlgValuesSupported()
 }
 
 // JWKS returns the raw JWKS for this provider.
@@ -130,8 +151,4 @@ func (p *Provider) VerifyAndDecodeContext(ctx context.Context, compact string, v
 	}
 
 	return jwt, nil
-}
-
-func ptr[T any](v T) *T {
-	return &v
 }
