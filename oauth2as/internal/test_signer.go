@@ -2,9 +2,7 @@ package internal
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"maps"
 	"sync"
 	"testing"
 
@@ -13,8 +11,9 @@ import (
 )
 
 type TestSigner struct {
-	handles   map[string]*keyset.Handle
-	handlesMu sync.Mutex
+	defaultAlg string
+	handles    map[string]*keyset.Handle
+	handlesMu  sync.Mutex
 }
 
 func NewTestSigner(t testing.TB, algs ...string) *TestSigner {
@@ -22,7 +21,8 @@ func NewTestSigner(t testing.TB, algs ...string) *TestSigner {
 		algs = []string{"ES256"}
 	}
 	ts := &TestSigner{
-		handles: make(map[string]*keyset.Handle, len(algs)),
+		defaultAlg: algs[0],
+		handles:    make(map[string]*keyset.Handle, len(algs)),
 	}
 	for _, alg := range algs {
 		switch alg {
@@ -46,71 +46,85 @@ func NewTestSigner(t testing.TB, algs ...string) *TestSigner {
 	return ts
 }
 
-func (t *TestSigner) SignerForAlgorithm(ctx context.Context, alg string) (jwt.Signer, error) {
+func (t *TestSigner) SignAndEncode(rawJWT *jwt.RawJWT) (string, error) {
+	return t.SignAndEncodeForAlgorithm(t.defaultAlg, rawJWT)
+}
+
+func (t *TestSigner) SignAndEncodeForAlgorithm(alg string, rawJWT *jwt.RawJWT) (string, error) {
 	t.handlesMu.Lock()
 	defer t.handlesMu.Unlock()
 
 	handle, ok := t.handles[alg]
 	if !ok {
-		return nil, fmt.Errorf("key not found for algorithm: %s", alg)
+		return "", fmt.Errorf("key not found for algorithm: %s", alg)
 	}
 	signer, err := jwt.NewSigner(handle)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	return signer, nil
+	return signer.SignAndEncode(rawJWT)
 }
 
-func (t *TestSigner) SupportedAlgorithms() []string {
-	res := make([]string, 0, len(t.handles))
-	for k := range maps.Keys(t.handles) {
-		res = append(res, k)
+func (t *TestSigner) VerifyAndDecode(compact string, validator *jwt.Validator) (*jwt.VerifiedJWT, error) {
+	merged, err := t.mergedPublicHandle()
+	if err != nil {
+		return nil, fmt.Errorf("merging handles: %w", err)
 	}
-	return res
+	verifier, err := jwt.NewVerifier(merged)
+	if err != nil {
+		return nil, fmt.Errorf("creating verifier: %w", err)
+	}
+	return verifier.VerifyAndDecode(compact, validator)
 }
 
-// JWKS returns the JSON Web Key Set for this signer.
-func (t *TestSigner) JWKS(context.Context) ([]byte, error) {
+func (t *TestSigner) JWKS(ctx context.Context) ([]byte, error) {
+	merged, err := t.mergedPublicHandle()
+	if err != nil {
+		return nil, fmt.Errorf("merging handles: %w", err)
+	}
+
+	return jwt.JWKSetFromPublicKeysetHandle(merged)
+}
+
+func (t *TestSigner) mergedPublicHandle() (*keyset.Handle, error) {
 	t.handlesMu.Lock()
 	defer t.handlesMu.Unlock()
 
-	var docs [][]byte
-	for _, v := range t.handles {
-		pubh, err := v.Public()
+	var handles []*keyset.Handle
+	for _, h := range t.handles {
+		pubh, err := h.Public()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("getting public handle: %w", err)
 		}
-		jwks, err := jwt.JWKSetFromPublicKeysetHandle(pubh)
-		if err != nil {
-			return nil, err
-		}
-		docs = append(docs, jwks)
+		handles = append(handles, pubh)
 	}
-
-	return mergeJWKS(docs...)
+	return mergeHandles(handles...)
 }
 
-func mergeJWKS(jwksDocs ...[]byte) ([]byte, error) {
-	var allKeys []any
-
-	for _, doc := range jwksDocs {
-		var jwks map[string]any
-		if err := json.Unmarshal(doc, &jwks); err != nil {
-			return nil, err
-		}
-
-		// Extract and merge the "keys" array
-		if keysVal, ok := jwks["keys"]; ok {
-			if keys, ok := keysVal.([]any); ok {
-				allKeys = append(allKeys, keys...)
+func mergeHandles(handles ...*keyset.Handle) (*keyset.Handle, error) {
+	mgr := keyset.NewManager()
+	var lastKid uint32
+	for _, handle := range handles {
+		for i := range handle.Len() {
+			e, err := handle.Entry(i)
+			if err != nil {
+				return nil, err
 			}
+			if _, err := mgr.AddKey(e.Key()); err != nil {
+				return nil, fmt.Errorf("adding key: %w", err)
+			}
+			lastKid = e.KeyID()
 		}
 	}
-
-	merged := map[string]any{
-		"keys": allKeys,
+	// we're required to have a primary, even though we only use it for signing.
+	// Just pick one.
+	if err := mgr.SetPrimary(lastKid); err != nil {
+		return nil, fmt.Errorf("setting primary: %w", err)
 	}
-
-	return json.Marshal(merged)
+	h, err := mgr.Handle()
+	if err != nil {
+		return nil, fmt.Errorf("getting handle: %w", err)
+	}
+	return h, nil
 }

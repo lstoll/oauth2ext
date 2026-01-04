@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 )
 
@@ -33,7 +34,14 @@ type Config struct {
 	// Storage is the storage backend to use for the server.
 	Storage Storage
 	Clients ClientSource
-	Signer  AlgorithmSigner
+	// Signer is used for signing tokens issued by this server. This may
+	// optionally implement the [AlgorithmSigner] interface, to allow clients to
+	// specify the algorithm they want to use for signing. If not provided, the
+	// default jwt.Signer methods are used.
+	Signer jwt.Signer
+	// Verifier is used for verifying tokens issued by this server, for the
+	// userinfo endpoint and other places tokens issued by this server are used.
+	Verifier jwt.Verifier
 
 	Logger *slog.Logger
 
@@ -90,7 +98,10 @@ func NewServer(c Config) (*Server, error) {
 		return nil, fmt.Errorf("clients is required")
 	}
 	if c.Signer == nil {
-		return nil, fmt.Errorf("keyset is required")
+		return nil, fmt.Errorf("signer is required")
+	}
+	if c.Verifier == nil {
+		return nil, fmt.Errorf("verifier is required")
 	}
 
 	// TODO - relax this with defaults if we can make them work.

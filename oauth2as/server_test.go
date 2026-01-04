@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tink-crypto/tink-go/v2/jwt"
+	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/oauth2as/internal"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 	"lds.li/oauth2ext/oauth2as/internal/token"
@@ -49,12 +50,15 @@ func TestCodeToken(t *testing.T) {
 	newOIDC := func() *Server {
 		s := NewMemStorage()
 
+		signer, verifier := testSignerVerifier(t)
+
 		return &Server{
 			config: Config{
 				Issuer: issuer,
 
-				Storage: s,
-				Signer:  testSigner(t),
+				Storage:  s,
+				Signer:   signer,
+				Verifier: verifier,
 
 				TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
@@ -291,13 +295,16 @@ func TestRefreshToken(t *testing.T) {
 	newOIDC := func() *Server {
 		s := NewMemStorage()
 
+		signer, verifier := testSignerVerifier(t)
+
 		return &Server{
 
 			config: Config{
 				Issuer: issuer,
 
-				Storage: s,
-				Signer:  testSigner(t),
+				Storage:  s,
+				Signer:   signer,
+				Verifier: verifier,
 
 				TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
@@ -452,19 +459,16 @@ func TestUserinfo(t *testing.T) {
 	}
 
 	signAccessToken := func(cl *jwt.RawJWTOptions) string {
-		cl.TypeHeader = ptr("at+jwt")
+		cl.TypeHeader = th.Ptr("at+jwt")
 
-		s, err := testSigner(t).SignerForAlgorithm(context.Background(), "ES256")
-		if err != nil {
-			t.Fatal(err)
-		}
+		signer, _ := testSignerVerifier(t)
 
 		rjwt, err := jwt.NewRawJWT(cl)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		compact, err := s.SignAndEncode(rjwt)
+		compact, err := signer.SignAndEncode(rjwt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -490,8 +494,8 @@ func TestUserinfo(t *testing.T) {
 			Setup: func(t *testing.T) (accessToken string) {
 				return signAccessToken(&jwt.RawJWTOptions{
 					Issuer:    &issuer,
-					Subject:   ptr("sub"),
-					ExpiresAt: ptr(time.Now().Add(1 * time.Minute)),
+					Subject:   th.Ptr("sub"),
+					ExpiresAt: th.Ptr(time.Now().Add(1 * time.Minute)),
 				})
 			},
 			Handler: echoHandler,
@@ -503,9 +507,9 @@ func TestUserinfo(t *testing.T) {
 			Name: "Token for other issuer",
 			Setup: func(t *testing.T) (accessToken string) {
 				return signAccessToken(&jwt.RawJWTOptions{
-					Issuer:    ptr("http://other"),
-					Subject:   ptr("sub"),
-					ExpiresAt: ptr(time.Now().Add(1 * time.Minute)),
+					Issuer:    th.Ptr("http://other"),
+					Subject:   th.Ptr("sub"),
+					ExpiresAt: th.Ptr(time.Now().Add(1 * time.Minute)),
 				})
 			},
 			Handler: echoHandler,
@@ -516,8 +520,8 @@ func TestUserinfo(t *testing.T) {
 			Setup: func(t *testing.T) (accessToken string) {
 				return signAccessToken(&jwt.RawJWTOptions{
 					Issuer:    &issuer,
-					Subject:   ptr("sub"),
-					ExpiresAt: ptr(time.Now().Add(-1 * time.Minute)),
+					Subject:   th.Ptr("sub"),
+					ExpiresAt: th.Ptr(time.Now().Add(-1 * time.Minute)),
 				})
 			},
 			Handler: echoHandler,
@@ -535,10 +539,13 @@ func TestUserinfo(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			s := NewMemStorage()
 
+			signer, verifier := testSignerVerifier(t)
+
 			config := Config{
-				Issuer:  issuer,
-				Storage: s,
-				Signer:  testSigner(t),
+				Issuer:   issuer,
+				Storage:  s,
+				Signer:   signer,
+				Verifier: verifier,
 				UserinfoHandler: func(_ context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error) {
 					return &UserinfoResponse{
 						Identity: map[string]any{
@@ -585,11 +592,11 @@ var (
 	signerOnce sync.Once
 )
 
-func testSigner(t *testing.T) AlgorithmSigner {
+func testSignerVerifier(t *testing.T) (AlgorithmSigner, jwt.Verifier) {
 	signerOnce.Do(func() {
 		signer = internal.NewTestSigner(t, "RS256", "ES256")
 	})
-	return signer
+	return signer, signer
 }
 
 func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {

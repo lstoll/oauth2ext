@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/oauth2as"
 	"lds.li/oauth2ext/oauth2as/discovery"
@@ -92,10 +93,13 @@ func TestE2E(t *testing.T) {
 			oidcSvr := httptest.NewServer(oidcSvrMux)
 			t.Cleanup(oidcSvr.Close)
 
+			signer, jwtVerifier := getTestSigner(t)
+
 			opcfg := oauth2as.Config{
-				Issuer:  oidcSvr.URL,
-				Storage: s,
-				Signer:  getTestSigner(t),
+				Issuer:   oidcSvr.URL,
+				Storage:  s,
+				Signer:   signer,
+				Verifier: jwtVerifier,
 				TokenHandler: func(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
 					return &oauth2as.TokenResponse{}, nil
 				},
@@ -268,11 +272,11 @@ var (
 	testSignerOnce sync.Once
 )
 
-func getTestSigner(t *testing.T) oauth2as.AlgorithmSigner {
+func getTestSigner(t *testing.T) (oauth2as.AlgorithmSigner, jwt.Verifier) {
 	testSignerOnce.Do(func() {
 		testSigner = internal.NewTestSigner(t, "RS256", "ES256")
 	})
-	return testSigner
+	return testSigner, testSigner
 }
 
 type staticClient struct {

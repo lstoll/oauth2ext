@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tink-crypto/tink-go/v2/jwt"
+	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oidc"
@@ -24,8 +25,6 @@ const (
 
 	tokenUsageAuthCode = "auth_code"
 	tokenUsageRefresh  = "refresh_token"
-
-	defaultSigningAlg = "ES256"
 )
 
 type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, error)
@@ -220,9 +219,9 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
 	}
 
-	alg := defaultSigningAlg
+	var alg *string
 	if copts.signingAlg != "" {
-		alg = copts.signingAlg
+		alg = &copts.signingAlg
 	}
 
 	// Verify the code verifier against the session data
@@ -313,9 +312,9 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 		opt(copts)
 	}
 
-	alg := defaultSigningAlg
+	var alg *string
 	if copts.signingAlg != "" {
-		alg = copts.signingAlg
+		alg = &copts.signingAlg
 	}
 
 	// storage should do this, but double check.
@@ -372,7 +371,7 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 // buildTokenResponse creates the oauth token response for code and refresh.
 // refreshSession can be nil, if it is and we should issue a refresh token, a
 // new refresh session will be created.
-func (s *Server) buildTokenResponse(ctx context.Context, alg string, grant *StoredGrant, tresp *TokenResponse) (_ *oauth2.TokenResponse, retErr error) {
+func (s *Server) buildTokenResponse(ctx context.Context, alg *string, grant *StoredGrant, tresp *TokenResponse) (_ *oauth2.TokenResponse, retErr error) {
 	var (
 		refreshTok string
 		saveGrant  bool
@@ -442,18 +441,32 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg string, grant *Stor
 		return nil, fmt.Errorf("building access token claims: %w", err)
 	}
 
-	signer, err := s.config.Signer.SignerForAlgorithm(ctx, alg)
-	if err != nil {
-		return nil, fmt.Errorf("getting signer for algorithm: %w", err)
-	}
-
-	idSigned, err := signer.SignAndEncode(idc)
-	if err != nil {
-		return nil, fmt.Errorf("signing id token: %w", err)
-	}
-	atSigned, err := signer.SignAndEncode(ac)
-	if err != nil {
-		return nil, fmt.Errorf("signing access token: %w", err)
+	var (
+		idSigned string
+		atSigned string
+	)
+	if alg != nil {
+		algSigner, ok := s.config.Signer.(AlgorithmSigner)
+		if !ok {
+			return nil, fmt.Errorf("explicit algorithm requested, but signer does not implement AlgorithmSigner")
+		}
+		idSigned, err = algSigner.SignAndEncodeForAlgorithm(*alg, idc)
+		if err != nil {
+			return nil, fmt.Errorf("signing id token with algorithm %s: %w", *alg, err)
+		}
+		atSigned, err = algSigner.SignAndEncodeForAlgorithm(*alg, ac)
+		if err != nil {
+			return nil, fmt.Errorf("signing access token with algorithm %s: %w", *alg, err)
+		}
+	} else {
+		idSigned, err = s.config.Signer.SignAndEncode(idc)
+		if err != nil {
+			return nil, fmt.Errorf("signing id token: %w", err)
+		}
+		atSigned, err = s.config.Signer.SignAndEncode(ac)
+		if err != nil {
+			return nil, fmt.Errorf("signing access token: %w", err)
+		}
 	}
 
 	return &oauth2.TokenResponse{
@@ -485,8 +498,8 @@ func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (*jwt.R
 	// fixed values
 	rjwtopts.Issuer = &s.config.Issuer
 	rjwtopts.Audience = &grant.ClientID
-	rjwtopts.IssuedAt = ptr(s.now())
-	rjwtopts.ExpiresAt = ptr(idExp)
+	rjwtopts.IssuedAt = th.Ptr(s.now())
+	rjwtopts.ExpiresAt = th.Ptr(idExp)
 	rjwtopts.CustomClaims["auth_time"] = grant.GrantedAt.Unix()
 
 	// defaulted values
@@ -524,12 +537,12 @@ func (s *Server) buildAccessTokenClaims(grant *StoredGrant, tresp *TokenResponse
 	}
 
 	// fixed values
-	rjwtopts.TypeHeader = ptr("at+jwt")
+	rjwtopts.TypeHeader = th.Ptr("at+jwt")
 
 	rjwtopts.Issuer = &s.config.Issuer
-	rjwtopts.IssuedAt = ptr(s.now())
-	rjwtopts.ExpiresAt = ptr(atExp)
-	rjwtopts.JWTID = ptr(uuid.New().String())
+	rjwtopts.IssuedAt = th.Ptr(s.now())
+	rjwtopts.ExpiresAt = th.Ptr(atExp)
+	rjwtopts.JWTID = th.Ptr(uuid.New().String())
 	rjwtopts.CustomClaims["client_id"] = grant.ClientID
 	rjwtopts.CustomClaims[claimGrantID] = grant.ID.String()
 
