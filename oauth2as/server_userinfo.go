@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
+	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 )
 
@@ -50,7 +51,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 
 	// TODO - scopes or audience check on the token?
 
-	atJWT, err := s.verifyAccessToken(req.Context(), authSp[1])
+	atJWT, err := s.verifyAccessToken(authSp[1])
 	if err != nil {
 		slog.ErrorContext(req.Context(), "invalid access token", "error", err)
 		be := &oauth2.BearerError{Code: oauth2.BearerErrorCodeInvalidRequest, Description: "invalid access token"}
@@ -96,34 +97,18 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (s *Server) verifyAccessToken(ctx context.Context, compact string) (*jwt.VerifiedJWT, error) {
-	jwks, err := s.config.Signer.JWKS(ctx)
-	if err != nil {
-		return nil, err
-	}
-	handle, err := jwt.JWKSetToPublicKeysetHandle(jwks)
-	if err != nil {
-		return nil, fmt.Errorf("creating handle from JWKS: %w", err)
-	}
-	verif, err := jwt.NewVerifier(handle)
-	if err != nil {
-		return nil, err
-	}
+func (s *Server) verifyAccessToken(compact string) (*jwt.VerifiedJWT, error) {
 	valid, err := jwt.NewValidator(&jwt.ValidatorOpts{
 		ExpectedIssuer:     &s.config.Issuer,
-		ExpectedTypeHeader: ptr("at+jwt"),
+		ExpectedTypeHeader: th.Ptr("at+jwt"),
 		IgnoreAudiences:    true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating validator: %w", err)
 	}
-	vjwt, err := verif.VerifyAndDecode(compact, valid)
+	vjwt, err := s.config.Verifier.VerifyAndDecode(compact, valid)
 	if err != nil {
 		return nil, fmt.Errorf("verifying and decoding access token: %w", err)
 	}
 	return vjwt, nil
-}
-
-func ptr[T any](v T) *T {
-	return &v
 }
