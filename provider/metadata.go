@@ -9,9 +9,10 @@ type Metadata interface {
 	userinfoEndpoint() string
 	jwksuri() string
 
-	GetRegistrationEndpoint() (string, bool)
-	GetCodeChallengeMethodsSupported() []CodeChallengeMethod
-	GetIDTokenSigningAlgValuesSupported() []string
+	registrationSupported() bool
+	registrationEndpoint() string
+	codeChallengeMethodsSupported() []CodeChallengeMethod
+	idTokenSigningAlgValuesSupported() []string
 
 	isMetadata()
 }
@@ -233,14 +234,18 @@ func (m *OIDCProviderMetadata) jwksuri() string {
 
 func (m *OIDCProviderMetadata) isMetadata() {}
 
-func (m *OIDCProviderMetadata) GetRegistrationEndpoint() (string, bool) {
-	return m.RegistrationEndpoint, m.RegistrationEndpoint != ""
-}
-
-func (m *OIDCProviderMetadata) GetCodeChallengeMethodsSupported() []CodeChallengeMethod {
+func (m *OIDCProviderMetadata) codeChallengeMethodsSupported() []CodeChallengeMethod {
 	return m.CodeChallengeMethodsSupported
 }
 
-func (m *OIDCProviderMetadata) GetIDTokenSigningAlgValuesSupported() []string {
+func (m *OIDCProviderMetadata) idTokenSigningAlgValuesSupported() []string {
 	return m.IDTokenSigningAlgValuesSupported
+}
+
+func (m *OIDCProviderMetadata) registrationSupported() bool {
+	return m.RegistrationEndpoint != ""
+}
+
+func (m *OIDCProviderMetadata) registrationEndpoint() string {
+	return m.RegistrationEndpoint
 }

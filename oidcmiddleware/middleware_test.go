@@ -37,7 +37,7 @@ type mockOIDCServer struct {
 }
 
 func startMockOIDCServer(t *testing.T) (server *mockOIDCServer, httpServer *httptest.Server) {
-	server = newMockOIDCServer(t)
+	server = newMockOIDCServer()
 	httpServer = httptest.NewTLSServer(server)
 	t.Cleanup(httpServer.Close)
 
@@ -46,7 +46,7 @@ func startMockOIDCServer(t *testing.T) (server *mockOIDCServer, httpServer *http
 	return server, httpServer
 }
 
-func newMockOIDCServer(t *testing.T) *mockOIDCServer {
+func newMockOIDCServer() *mockOIDCServer {
 	s := &mockOIDCServer{}
 
 	mux := http.NewServeMux()
@@ -56,7 +56,7 @@ func newMockOIDCServer(t *testing.T) *mockOIDCServer {
 	mux.HandleFunc("GET /keys", s.handleKeys)
 	s.mux = mux
 
-	s.signer = internal.NewTestSigner(t)
+	s.signer = internal.NewTestSigner()
 
 	return s
 }

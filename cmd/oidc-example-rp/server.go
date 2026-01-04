@@ -11,6 +11,7 @@ import (
 	"net/http"
 
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/claims"
 	"lds.li/oauth2ext/oidc"
 	"lds.li/oauth2ext/provider"
 )
@@ -133,20 +134,23 @@ func (s *server) callback(w http.ResponseWriter, req *http.Request) {
 
 	idt, hasIDToken := oidc.GetIDToken(token)
 	if hasIDToken {
-		validator, err := s.provider.NewIDTokenValidator(&provider.IDTokenValidatorOpts{
-			ClientID: &s.oa2Cfg.ClientID,
-		})
+		verifier, err := claims.NewIDTokenVerifier(s.provider)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("error creating ID token validator: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("error creating verifier: %v", err), http.StatusInternalServerError)
 			return
 		}
-		idToken, err := s.provider.VerifyAndDecodeIDToken(req.Context(), token, validator)
+
+		validator := claims.NewIDTokenValidator(&claims.IDTokenValidatorOpts{
+			ClientID: &s.oa2Cfg.ClientID,
+		})
+
+		verifiedID, err := verifier.VerifyAndDecodeToken(req.Context(), *token, validator)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error verifying ID token: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		payload, err := idToken.JSONPayload()
+		payload, err := verifiedID.JSONPayload()
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error getting ID payload: %v", err), http.StatusInternalServerError)
 			return

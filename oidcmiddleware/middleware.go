@@ -11,6 +11,7 @@ import (
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/claims"
 	"lds.li/oauth2ext/oidc"
 	"lds.li/oauth2ext/provider"
 )
@@ -192,16 +193,18 @@ func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*
 		return nil, nil
 	}
 
-	validator, err := h.Provider.NewIDTokenValidator(&provider.IDTokenValidatorOpts{
-		ClientID: &o2cfg.ClientID,
-	})
+	verifier, err := claims.NewIDTokenVerifier(h.Provider)
 	if err != nil {
 		return nil, nil
 	}
 
+	validator := claims.NewIDTokenValidator(&claims.IDTokenValidatorOpts{
+		ClientID: &o2cfg.ClientID,
+	})
+
 	// we always verify, as in the cookie store case the integrity of the data
 	// is not trusted.
-	jwt, err := h.Provider.VerifyAndDecodeIDToken(ctx, session.Token.Token, validator)
+	verifiedID, err := verifier.VerifyAndDecodeToken(ctx, *session.Token.Token, validator)
 	if err != nil {
 		// Attempt to refresh the token
 		if session.Token.RefreshToken == "" {
@@ -212,7 +215,7 @@ func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*
 			return nil, nil
 		}
 		session.Token = &oidc.TokenWithID{Token: token}
-		jwt, err = h.Provider.VerifyAndDecodeIDToken(ctx, token, validator)
+		verifiedID, err = verifier.VerifyAndDecodeToken(ctx, *token, validator)
 		if err != nil {
 			return nil, nil
 		}
@@ -224,7 +227,7 @@ func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*
 	// we would have done the job of refreshing if needed.
 	retTok := *session.Token.Token
 	retTok.RefreshToken = ""
-	return &retTok, jwt
+	return &retTok, verifiedID.JWT()
 }
 
 // authenticateCallback returns (returnTo, nil) if the user is authenticated,
@@ -267,7 +270,7 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 	}
 
 	opts := h.AuthCodeOptions
-	if slices.Contains(h.Provider.Metadata.GetCodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
+	if slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
 		opts = append(opts, oauth2.VerifierOption(foundLogin.PKCEChallenge))
 	}
 
@@ -282,13 +285,16 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 
 	// TODO(lstoll) do we want to verify the ID token here? was retrieved from a
 	// trusted source....
-	validator, err := h.Provider.NewIDTokenValidator(&provider.IDTokenValidatorOpts{
-		ClientID: &o2cfg.ClientID,
-	})
+	verifier, err := claims.NewIDTokenVerifier(h.Provider)
 	if err != nil {
 		return "", err
 	}
-	if _, err := h.Provider.VerifyAndDecodeIDToken(ctx, token, validator); err != nil {
+
+	validator := claims.NewIDTokenValidator(&claims.IDTokenValidatorOpts{
+		ClientID: &o2cfg.ClientID,
+	})
+
+	if _, err := verifier.VerifyAndDecodeToken(ctx, *token, validator); err != nil {
 		return "", fmt.Errorf("verifying id_token failed: %w", err)
 	}
 
@@ -319,7 +325,7 @@ func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (st
 	)
 
 	opts := h.AuthCodeOptions
-	if slices.Contains(h.Provider.Metadata.GetCodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
+	if slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
 		pkceChallenge = oauth2.GenerateVerifier()
 		opts = append(opts, oauth2.S256ChallengeOption(pkceChallenge))
 	}

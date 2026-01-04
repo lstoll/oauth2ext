@@ -5,7 +5,6 @@ import (
 	"encoding/base32"
 	"fmt"
 	"log"
-	"testing"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
@@ -16,15 +15,15 @@ type TestSigner struct {
 	kid    string
 }
 
-func NewTestSigner(t testing.TB) *TestSigner {
+func NewTestSigner() *TestSigner {
 	h, err := keyset.NewHandle(jwt.ES256Template())
 	if err != nil {
-		t.Fatal(err)
+		panic(fmt.Sprintf("creating handle: %v", err))
 	}
 
 	var randVal [4]byte
 	if _, err := rand.Read(randVal[:]); err != nil {
-		t.Fatal(err)
+		panic(fmt.Sprintf("reading random value: %v", err))
 	}
 
 	return &TestSigner{handle: h, kid: base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randVal[:])}
