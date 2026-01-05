@@ -384,8 +384,20 @@ func (i *VerifiedID) HasAMR() bool {
 // AMR returns Authentication Methods References. This is an array of strings that are identifiers
 // for authentication methods used in the authentication. For example, values might include "pwd"
 // for password, "otp" for one-time password, etc.
-func (i *VerifiedID) AMR() ([]any, error) {
-	return i.jwt.ArrayClaim(idClaimAMR)
+func (i *VerifiedID) AMR() ([]string, error) {
+	arr, err := i.jwt.ArrayClaim(idClaimAMR)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, len(arr))
+	for i, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("element %d is not a string", i)
+		}
+		result[i] = s
+	}
+	return result, nil
 }
 
 // HasAuthTime checks whether the auth_time claim is present.
@@ -695,7 +707,13 @@ type RawIDOptions struct {
 	CustomClaims map[string]any
 }
 
-func (r *RawIDOptions) JWTOptions() *jwt.RawJWTOptions {
+func (r *RawIDOptions) JWTOptions() (*jwt.RawJWTOptions, error) {
+	// Check that CustomClaims doesn't contain any reserved claims
+	for name := range r.CustomClaims {
+		if isReservedIDClaim(name) {
+			return nil, fmt.Errorf("claim %q is reserved and must be set via struct fields, not CustomClaims", name)
+		}
+	}
 	convertStringSlice := func(s []string) []any {
 		if s == nil {
 			return nil
@@ -799,5 +817,5 @@ func (r *RawIDOptions) JWTOptions() *jwt.RawJWTOptions {
 		o.CustomClaims[idClaimSID] = *r.SID
 	}
 
-	return o
+	return o, nil
 }

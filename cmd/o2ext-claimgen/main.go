@@ -72,14 +72,14 @@ func main() {
 		"formatComment": func(s string, indent string) string {
 			return formatDescription(s, indent)
 		},
-		"hasCheck":        getHasCheck,
-		"returnType":      getReturnType,
-		"returnStmt":      getReturnStatement,
-		"fieldType":       getFieldType,
-		"assignStmt":      getAssignStatement,
-		"hasArrayClaim":   hasArrayClaim,
-		"reservedVarName": func(t string) string { return fmt.Sprintf("reserved%sClaims", t) },
-		"helperName":      func(t string) string { return fmt.Sprintf("isReserved%sClaim", t) },
+		"hasCheck":            getHasCheck,
+		"returnType":          getReturnType,
+		"returnStmt":          getReturnStatement,
+		"fieldType":           getFieldType,
+		"assignStmt":          getAssignStatement,
+		"hasStringArrayClaim": hasStringArrayClaim,
+		"reservedVarName":     func(t string) string { return fmt.Sprintf("reserved%sClaims", t) },
+		"helperName":          func(t string) string { return fmt.Sprintf("isReserved%sClaim", t) },
 	})
 
 	tmpl, err = tmpl.Parse(claimsTemplate)
@@ -113,9 +113,9 @@ func main() {
 	}
 }
 
-func hasArrayClaim(claims []Claim) bool {
+func hasStringArrayClaim(claims []Claim) bool {
 	for _, c := range claims {
-		if c.Type == "array" {
+		if c.Type == "stringarray" {
 			return true
 		}
 	}
@@ -130,7 +130,7 @@ func getHasCheck(claimType, constName string) string {
 		return fmt.Sprintf("i.jwt.HasBooleanClaim(%s)", constName)
 	case "time":
 		return fmt.Sprintf("i.jwt.HasNumberClaim(%s)", constName)
-	case "array":
+	case "array", "stringarray":
 		return fmt.Sprintf("i.jwt.HasArrayClaim(%s)", constName)
 	case "object":
 		return fmt.Sprintf("i.jwt.HasObjectClaim(%s)", constName)
@@ -149,6 +149,8 @@ func getReturnType(claimType string) string {
 		return "time.Time"
 	case "array":
 		return "[]any"
+	case "stringarray":
+		return "[]string"
 	case "object":
 		return "map[string]any"
 	default:
@@ -170,6 +172,20 @@ func getReturnStatement(claimType, constName string) string {
 	return time.Unix(int64(ts), 0).UTC(), nil`, constName)
 	case "array":
 		return fmt.Sprintf("return i.jwt.ArrayClaim(%s)", constName)
+	case "stringarray":
+		return fmt.Sprintf(`arr, err := i.jwt.ArrayClaim(%s)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, len(arr))
+	for i, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("element %%d is not a string", i)
+		}
+		result[i] = s
+	}
+	return result, nil`, constName)
 	case "object":
 		return fmt.Sprintf("return i.jwt.ObjectClaim(%s)", constName)
 	default:
@@ -186,6 +202,8 @@ func getFieldType(claimType string) string {
 	case "time":
 		return "*time.Time"
 	case "array":
+		return "[]any"
+	case "stringarray":
 		return "[]string"
 	case "object":
 		return "map[string]any"
@@ -201,6 +219,8 @@ func getAssignStatement(claimType, methodName, constName string) string {
 	case "time":
 		return fmt.Sprintf("o.CustomClaims[%s] = r.%s.Unix()", constName, methodName)
 	case "array":
+		return fmt.Sprintf("o.CustomClaims[%s] = r.%s", constName, methodName)
+	case "stringarray":
 		// Convert []string to []any for the custom claims map
 		return fmt.Sprintf("o.CustomClaims[%s] = convertStringSlice(r.%s)", constName, methodName)
 	case "object":
@@ -489,8 +509,15 @@ type Raw{{$type}}Options struct {
 	CustomClaims map[string]any
 }
 
-func (r *Raw{{$type}}Options) JWTOptions() *jwt.RawJWTOptions {
-{{- if hasArrayClaim .Config.Claims}}
+func (r *Raw{{$type}}Options) JWTOptions() (*jwt.RawJWTOptions, error) {
+	// Check that CustomClaims doesn't contain any reserved claims
+	for name := range r.CustomClaims {
+		if {{helperName $type}}(name) {
+			return nil, fmt.Errorf("claim %q is reserved and must be set via struct fields, not CustomClaims", name)
+		}
+	}
+
+{{- if hasStringArrayClaim .Config.Claims}}
 	convertStringSlice := func(s []string) []any {
 		if s == nil {
 			return nil
@@ -523,6 +550,6 @@ func (r *Raw{{$type}}Options) JWTOptions() *jwt.RawJWTOptions {
 	}
 {{- end}}
 
-	return o
+	return o, nil
 }
 `

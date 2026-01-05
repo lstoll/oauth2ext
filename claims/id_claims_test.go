@@ -2,6 +2,7 @@ package claims
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"strings"
 	"testing"
@@ -24,10 +25,17 @@ func TestIDClaims(t *testing.T) {
 		AMR:       []string{"amr1", "amr2"},
 	}
 
-	_, err := jwt.NewRawJWT(rawOpts.JWTOptions())
+	rOps, err := rawOpts.JWTOptions()
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	_, err = jwt.NewRawJWT(rOps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fmt.Println(rOps)
 }
 
 func TestIDTokenValidator(t *testing.T) {
