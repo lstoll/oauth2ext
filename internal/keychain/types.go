@@ -15,7 +15,11 @@ import "unsafe"
 var (
 	nilCFStringRef       C.CFStringRef
 	nilCFDataRef         C.CFDataRef
+	nilCFDictionaryRef   C.CFDictionaryRef
 	nilSecRequirementRef C.SecRequirementRef
+	nilSecIdentityRef    C.SecIdentityRef
+	nilSecKeyRef         C.SecKeyRef
+	nilCFTypeRef         C.CFTypeRef
 )
 
 // stringToCFString creates a new CFStringRef from a Go string.
@@ -237,4 +241,55 @@ func goSliceFromCFArray(array C.CFArrayRef) []C.CFTypeRef {
 	}
 
 	return goSlice
+}
+
+// cfDictLookup looks up a value in a CFDictionary by comparing string keys.
+// This is needed because CFTypeRef map keys are pointer-compared, but Security framework
+// dictionaries may contain keys with the same string value but different pointer addresses.
+func cfDictLookup(attrs map[C.CFTypeRef]C.CFTypeRef, key C.CFStringRef) (C.CFTypeRef, bool) {
+	keyStr := stringFromCFString(key)
+	for k, v := range attrs {
+		if unsafe.Pointer(k) != nil && C.CFGetTypeID(k) == C.CFStringGetTypeID() { //nolint:govet // C memory to C memory
+			if stringFromCFString(C.CFStringRef(k)) == keyStr {
+				return v, true
+			}
+		}
+	}
+	var zero C.CFTypeRef
+	return zero, false
+}
+
+// getStringAttr extracts a string attribute from a CFDictionary.
+// Returns the string value and true if the key exists and is a string, otherwise empty string and false.
+func getStringAttr(attrs map[C.CFTypeRef]C.CFTypeRef, key C.CFStringRef) (string, bool) {
+	if val, ok := cfDictLookup(attrs, key); ok && unsafe.Pointer(val) != nil { //nolint:govet // C memory to C memory
+		if C.CFGetTypeID(val) == C.CFStringGetTypeID() {
+			return stringFromCFString(C.CFStringRef(val)), true
+		}
+	}
+	return "", false
+}
+
+// getDataAttr extracts a data attribute from a CFDictionary.
+// Returns the byte slice and true if the key exists and is data, otherwise nil and false.
+func getDataAttr(attrs map[C.CFTypeRef]C.CFTypeRef, key C.CFStringRef) ([]byte, bool) {
+	if val, ok := cfDictLookup(attrs, key); ok && unsafe.Pointer(val) != nil { //nolint:govet // C memory to C memory
+		if C.CFGetTypeID(val) == C.CFDataGetTypeID() {
+			return bytesFromCFData(C.CFDataRef(val)), true
+		}
+	}
+	return nil, false
+}
+
+// getIntAttr extracts an integer attribute from a CFDictionary.
+// Returns the integer value and true if the key exists and is a number, otherwise 0 and false.
+func getIntAttr(attrs map[C.CFTypeRef]C.CFTypeRef, key C.CFStringRef) (int, bool) {
+	if val, ok := cfDictLookup(attrs, key); ok && unsafe.Pointer(val) != nil { //nolint:govet // C memory to C memory
+		if C.CFGetTypeID(val) == C.CFNumberGetTypeID() {
+			var num C.int
+			C.CFNumberGetValue(C.CFNumberRef(val), C.kCFNumberIntType, unsafe.Pointer(&num))
+			return int(num), true
+		}
+	}
+	return 0, false
 }

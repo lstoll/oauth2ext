@@ -16,9 +16,7 @@ type ErrorCode int
 const (
 	KeychainErrorCodeSuccess       ErrorCode = C.errSecSuccess
 	KeychainErrorCodeDuplicateItem ErrorCode = C.errSecDuplicateItem
-	KeychainErrorCodeUnknown       ErrorCode = 1 // TODO - what's a good
-
-	KeychainErrorCodeItemNotFound ErrorCode = C.errSecItemNotFound
+	KeychainErrorCodeItemNotFound  ErrorCode = C.errSecItemNotFound
 )
 
 type Error struct {
