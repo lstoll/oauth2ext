@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test -v -run TestTransport)",
+      "Bash(go test:*)"
+    ]
+  }
+}
