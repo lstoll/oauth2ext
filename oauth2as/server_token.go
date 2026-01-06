@@ -48,6 +48,13 @@ type TokenRequest struct {
 
 	// IsRefresh indicates if this is a refresh token request.
 	IsRefresh bool
+
+	// DPoPBound indicates whether this grant is bound to a DPoP key. If true,
+	// all token requests for this grant must include a valid DPoP proof.
+	DPoPBound bool
+	// DPoPThumbprint is the JWK thumbprint from the current request's DPoP
+	// proof. This will be empty if no DPoP proof was provided in the request.
+	DPoPThumbprint string
 }
 
 // TokenResponse is returned by the token endpoint handler, indicating what it
@@ -136,10 +143,10 @@ func (s *Server) TokenHandler(w http.ResponseWriter, req *http.Request) {
 	switch treq.GrantType {
 	case oauth2.GrantTypeAuthorizationCode:
 		// this is for the initial issuance. we exchange the code for a token.
-		resp, err = s.codeToken(req.Context(), treq)
+		resp, err = s.codeToken(req.Context(), req, treq)
 	case oauth2.GrantTypeRefreshToken:
 		// this is for subsequent refreshes. we exchange the refresh token for a new token.
-		resp, err = s.refreshToken(req.Context(), treq)
+		resp, err = s.refreshToken(req.Context(), req, treq)
 	default:
 		err = &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid grant type", Cause: fmt.Errorf("grant type %s not handled", treq.GrantType)}
 	}
@@ -156,9 +163,15 @@ func (s *Server) TokenHandler(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oauth2.TokenResponse, error) {
+func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.TokenRequest) (*oauth2.TokenResponse, error) {
 	if treq.Code == "" {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "code is required"}
+	}
+
+	// Verify DPoP proof if present
+	dpopThumbprint, err := s.verifyDPoPProof(req)
+	if err != nil {
+		return nil, err
 	}
 
 	// Create token from user token to get the stored value
@@ -183,9 +196,15 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "redirect URI mismatch"}
 	}
 
-	// update to note the code was used.
+	// update to note the code was used, and store DPoP thumbprint in metadata if provided
 	oldAuthCode := grant.AuthCode
 	grant.AuthCode = nil
+	if dpopThumbprint != "" {
+		if grant.Metadata == nil {
+			grant.Metadata = make(map[string]string)
+		}
+		grant.Metadata[MetadataDPoPThumbprint] = dpopThumbprint
+	}
 	// TODO - update the expiry to match the extended time.
 	if err := s.config.Storage.UpdateGrant(ctx, grant); err != nil {
 		return nil, fmt.Errorf("failed to update grant: %w", err)
@@ -251,6 +270,12 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 	}
 
 	// we have a validated request. Call out to the handler to get the details.
+	// Check if this grant is DPoP-bound by looking for thumbprint in metadata
+	isDPoPBound := false
+	if grant.Metadata != nil && grant.Metadata[MetadataDPoPThumbprint] != "" {
+		isDPoPBound = true
+	}
+
 	tr := &TokenRequest{
 		GrantID:           grant.ID,
 		UserID:            grant.UserID,
@@ -259,6 +284,8 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 		Metadata:          grant.Metadata,
 		EncryptedMetadata: encryptedMetadata,
 		IsRefresh:         false,
+		DPoPBound:         isDPoPBound,
+		DPoPThumbprint:    dpopThumbprint,
 	}
 
 	// TODO - this should be optional
@@ -274,9 +301,15 @@ func (s *Server) codeToken(ctx context.Context, treq *oauth2.TokenRequest) (*oau
 	return s.buildTokenResponse(ctx, alg, grant, tresp)
 }
 
-func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
+func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
 	if treq.RefreshToken == "" {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "refresh token is required"}
+	}
+
+	// Verify DPoP proof if present
+	dpopThumbprint, err := s.verifyDPoPProof(req)
+	if err != nil {
+		return nil, err
 	}
 
 	// Create token from user token to get the stored value
@@ -291,6 +324,26 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 	}
 	if grant == nil {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+	}
+
+	// Enforce DPoP binding if the grant was initiated with DPoP
+	storedThumbprint := ""
+	if grant.Metadata != nil {
+		storedThumbprint = grant.Metadata[MetadataDPoPThumbprint]
+	}
+	if storedThumbprint != "" {
+		if dpopThumbprint == "" {
+			return nil, &oauth2.TokenError{
+				ErrorCode:   oauth2.TokenErrorCodeInvalidGrant,
+				Description: "DPoP proof required for this grant",
+			}
+		}
+		if dpopThumbprint != storedThumbprint {
+			return nil, &oauth2.TokenError{
+				ErrorCode:   oauth2.TokenErrorCodeInvalidGrant,
+				Description: "DPoP proof key mismatch",
+			}
+		}
 	}
 
 	// immediately create a new RT, and save it. We want to invalidate the old
@@ -347,6 +400,12 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 
 	// tresp, err := o.handler.RefreshToken(tr)
 	// TODO - need to re-do this too.
+	// Check if this grant is DPoP-bound by looking for thumbprint in metadata
+	isDPoPBound := false
+	if grant.Metadata != nil && grant.Metadata[MetadataDPoPThumbprint] != "" {
+		isDPoPBound = true
+	}
+
 	tr := &TokenRequest{
 		GrantID:           grant.ID,
 		UserID:            grant.UserID,
@@ -355,6 +414,8 @@ func (s *Server) refreshToken(ctx context.Context, treq *oauth2.TokenRequest) (_
 		Metadata:          grant.Metadata,
 		EncryptedMetadata: encryptedMetadata,
 		IsRefresh:         true,
+		DPoPBound:         isDPoPBound,
+		DPoPThumbprint:    dpopThumbprint,
 	}
 	tresp, err := s.config.TokenHandler(ctx, tr)
 	if err != nil {
@@ -568,4 +629,35 @@ func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
 	hashedVerifier := h.Sum(nil)
 	computedChallenge := base64.RawURLEncoding.EncodeToString(hashedVerifier)
 	return computedChallenge == storedCodeChallenge
+}
+
+// verifyDPoPProof extracts and verifies the DPoP header from a request.
+// Returns the thumbprint if a valid DPoP proof is provided, empty string if no
+// DPoP header is present, or an error if the proof is invalid.
+func (s *Server) verifyDPoPProof(req *http.Request) (thumbprint string, err error) {
+	dpopHeader := req.Header.Get("DPoP")
+	if dpopHeader == "" {
+		// No DPoP header present - this is fine, DPoP is optional
+		return "", nil
+	}
+
+	// DPoP header present but no verifier configured
+	if s.config.DPoPVerifier == nil {
+		return "", &oauth2.TokenError{
+			ErrorCode:   oauth2.TokenErrorCodeInvalidRequest,
+			Description: "DPoP proof provided but DPoP is not supported",
+		}
+	}
+
+	// Verify the DPoP proof (verifier will validate HTM/HTU from request)
+	thumbprint, err = s.config.DPoPVerifier.VerifyAndDecode(req)
+	if err != nil {
+		return "", &oauth2.TokenError{
+			ErrorCode:   oauth2.TokenErrorCodeInvalidRequest,
+			Description: "invalid DPoP proof",
+			Cause:       err,
+		}
+	}
+
+	return thumbprint, nil
 }

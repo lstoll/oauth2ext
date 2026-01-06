@@ -7,6 +7,11 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	// MetadataDPoPThumbprint is the metadata key for storing the DPoP JWK thumbprint
+	MetadataDPoPThumbprint = "dpop_thumbprint"
+)
+
 type StoredGrant struct {
 	// ID is the unique identifier for this grant.
 	ID uuid.UUID
@@ -28,7 +33,9 @@ type StoredGrant struct {
 	// ExpiresAt is the time at which the grant will expire.
 	ExpiresAt time.Time
 
-	// Metadata is arbitrary metadata that can be stored with the grant.
+	// Metadata is arbitrary metadata that can be stored with the grant. This can
+	// include application-specific data as well as protocol metadata like DPoP
+	// thumbprints (see MetadataDPoPThumbprint constant).
 	Metadata map[string]string
 	// EncryptedMetadata stores the encrypted metadata associated with this
 	// grant.
