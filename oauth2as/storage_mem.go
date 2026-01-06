@@ -210,5 +210,19 @@ func copyStoredGrant(grant *StoredGrant) *StoredGrant {
 		copy(copied.Request.ACRValues, grant.Request.ACRValues)
 	}
 
+	// Copy metadata maps
+	if grant.Metadata != nil {
+		copied.Metadata = make(map[string]string, len(grant.Metadata))
+		for k, v := range grant.Metadata {
+			copied.Metadata[k] = v
+		}
+	}
+
+	// Copy encrypted metadata
+	if len(grant.EncryptedMetadata) > 0 {
+		copied.EncryptedMetadata = make([]byte, len(grant.EncryptedMetadata))
+		copy(copied.EncryptedMetadata, grant.EncryptedMetadata)
+	}
+
 	return copied
 }

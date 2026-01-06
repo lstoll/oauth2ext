@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(go test -v -run TestTransport)",
-      "Bash(go test:*)"
+      "Bash(go test:*)",
+      "Bash(tree:*)",
+      "Bash(ls:*)"
     ]
   }
 }

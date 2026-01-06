@@ -9,8 +9,16 @@ import (
 	"time"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
+	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 )
+
+// DPoPVerifier is the interface for verifying DPoP proofs.
+type DPoPVerifier interface {
+	// VerifyAndDecode verifies a DPoP proof from the request and returns the JWK thumbprint.
+	// The req parameter is used to extract the DPoP header and validate HTM/HTU claims.
+	VerifyAndDecode(req *http.Request) (thumbprint string, err error)
+}
 
 const (
 	// DefaultAuthValidityTime is used if the AuthValidityTime is not
@@ -42,6 +50,10 @@ type Config struct {
 	// Verifier is used for verifying tokens issued by this server, for the
 	// userinfo endpoint and other places tokens issued by this server are used.
 	Verifier jwt.Verifier
+
+	// DPoPVerifier is used for verifying DPoP proofs on token requests. This is
+	// optional - if not provided, DPoP proofs will not be verified or enforced.
+	DPoPVerifier *dpop.DPoPVerifier
 
 	Logger *slog.Logger
 
