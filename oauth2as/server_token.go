@@ -3,7 +3,6 @@ package oauth2as
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,7 +13,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/internal/th"
@@ -25,9 +23,11 @@ import (
 
 const (
 	claimGrantID = "grid"
+)
 
-	tokenUsageAuthCode = "auth_code"
-	tokenUsageRefresh  = "refresh_token"
+var (
+	tokenUsageAuthCode = token.Usage{Name: "auth_code", Prefix: "c"}
+	tokenUsageRefresh  = token.Usage{Name: "refresh_token", Prefix: "r"}
 )
 
 type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, error)
@@ -36,7 +36,7 @@ type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, er
 // endpoint. This is passed to the handler, to generate an appropriate response.
 type TokenRequest struct {
 	// GrantID is the ID of the grant that was used to obtain the token.
-	GrantID uuid.UUID
+	GrantID string
 	// UserID is the user ID that was granted access.
 	UserID string
 	// ClientID is the client ID that was used to obtain the token.
@@ -44,10 +44,10 @@ type TokenRequest struct {
 	// GrantedScopes are the scopes that were granted.
 	GrantedScopes []string
 	// Metadata is the metadata that was associated with the grant.
-	Metadata map[string]string
-	// EncryptedMetadata is the decrypted metadata that was associated with the
+	Metadata []byte
+	// DecryptedMetadata is the decrypted metadata that was associated with the
 	// grant.
-	EncryptedMetadata map[string]string
+	DecryptedMetadata []byte
 
 	// IsRefresh indicates if this is a refresh token request.
 	IsRefresh bool
@@ -60,15 +60,7 @@ type TokenRequest struct {
 // TokenResponse is returned by the token endpoint handler, indicating what it
 // should actually return to the user.
 type TokenResponse struct {
-	/* // OverrideRefreshTokenIssuance can be used to override issuing a refresh
-	// token if the client requested it, if true.
-	OverrideRefreshTokenIssuance bool
-
-	// OverrideRefreshTokenExpiry can be used to override the expiration of the
-	// refresh token. If not set, the default will be used.
-	OverrideRefreshTokenExpiry time.Time */
-
-	// may be zero, if so defaulted
+	// If zero, default expiry times will be used
 	IDTokenExpiry     time.Time
 	AccessTokenExpiry time.Time
 
@@ -103,10 +95,10 @@ type TokenResponse struct {
 
 	// Metadata is the metadata that was associated with the grant. If nil, the
 	// existing metadata will be re-used.
-	Metadata map[string]string
+	Metadata []byte
 	// EncryptedMetadata is the encrypted metadata that was associated with the
 	// grant. If nil, the existing encrypted metadata will be re-used.
-	EncryptedMetadata map[string]string
+	EncryptedMetadata []byte
 }
 
 // TokenHandler is used to handle the access token endpoint for code flow
@@ -142,10 +134,8 @@ func (s *Server) TokenHandler(w http.ResponseWriter, req *http.Request) {
 	var resp *oauth2.TokenResponse
 	switch treq.GrantType {
 	case oauth2.GrantTypeAuthorizationCode:
-		// this is for the initial issuance. we exchange the code for a token.
 		resp, err = s.codeToken(req.Context(), req, treq)
 	case oauth2.GrantTypeRefreshToken:
-		// this is for subsequent refreshes. we exchange the refresh token for a new token.
 		resp, err = s.refreshToken(req.Context(), req, treq)
 	default:
 		err = &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid grant type", Cause: fmt.Errorf("grant type %s not handled", treq.GrantType)}
@@ -175,56 +165,41 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 		return nil, err
 	}
 
-	// Create token from user token to get the stored value
-	authToken, err := token.FromUserToken(treq.Code, tokenUsageAuthCode)
+	loadedGrant, err := s.getGrantFromAuthCode(ctx, treq.Code)
 	if err != nil {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
-	}
-
-	grant, err := s.config.Storage.GetGrantByAuthCode(ctx, authToken.Stored())
-	if err != nil {
+		if errors.Is(err, errGrantTokenInvalid) {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
+		} else if errors.Is(err, errGrantExpired) {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
+		} else if errors.Is(err, errGrantNotFound) {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
+		}
 		return nil, fmt.Errorf("failed to get grant by auth code: %w", err)
 	}
-	if grant == nil {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
+
+	pt, _ := token.ParseUserToken(treq.Code, tokenUsageAuthCode) // already parsed in getGrantFromAuthCode, so this is safe
+	if err := s.config.Storage.ExpireAuthCode(ctx, pt.Payload().GetUserId(), pt.Payload().GetGrantId(), pt.ID()); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
+		}
+		return nil, fmt.Errorf("failed to expire auth code: %w", err)
 	}
-	if grant.Request == nil {
+
+	if loadedGrant.grant.Request == nil {
+
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid grant"}
 	}
 
 	// Validate that the redirect_uri matches the one from the authorization request
-	if treq.RedirectURI != grant.Request.RedirectURI {
+	if treq.RedirectURI != loadedGrant.grant.Request.RedirectURI {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "redirect URI mismatch"}
 	}
 
-	// update to note the code was used, and store DPoP thumbprint in metadata if provided
-	oldAuthCode := grant.AuthCode
-	grant.AuthCode = nil
-	if dpopThumbprint != "" {
-		if grant.Metadata == nil {
-			grant.Metadata = make(map[string]string)
-		}
-		grant.Metadata[MetadataDPoPThumbprint] = dpopThumbprint
-	}
-	// TODO - update the expiry to match the extended time.
-	if err := s.config.Storage.UpdateGrant(ctx, grant); err != nil {
-		return nil, fmt.Errorf("failed to update grant: %w", err)
-	}
-
-	// storage should do this, but double check
-	if s.now().After(grant.ExpiresAt) {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "code expired"}
-	}
-	if subtle.ConstantTimeCompare(oldAuthCode, authToken.Stored()) == 0 {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
-	}
-
-	// we have a validated code.
-	if err := s.validateTokenClient(ctx, treq, grant.ClientID); err != nil {
+	if err := s.validateTokenClient(ctx, treq, loadedGrant.grant.ClientID); err != nil {
 		return nil, err
 	}
 
-	optsForClient, err := s.config.Clients.ClientOpts(ctx, grant.ClientID)
+	optsForClient, err := s.config.Clients.ClientOpts(ctx, loadedGrant.grant.ClientID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch client opts: %w", err)
 	}
@@ -233,8 +208,7 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 		opt(copts)
 	}
 
-	// If the client is public and we require pkce, reject it if there's no
-	// verifier.
+	// Reject if PKCE is required but no code verifier was provided
 	if !copts.skipPKCE && treq.CodeVerifier == "" {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
 	}
@@ -246,56 +220,56 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 
 	// Verify the code verifier against the session data
 	if treq.CodeVerifier != "" {
-		if !verifyCodeChallenge(treq.CodeVerifier, grant.Request.CodeChallenge) {
+		if !verifyCodeChallenge(treq.CodeVerifier, loadedGrant.grant.Request.CodeChallenge) {
 			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE verification failed"}
 		}
 	}
 
-	// Unpack encrypted metadata if present
-	var encryptedMetadata map[string]string
-	if grant.EncryptedMetadata != nil {
-		// Create token from the auth code to decrypt metadata
-		authToken, err := token.FromUserToken(treq.Code, tokenUsageAuthCode)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create token from auth code: %w", err)
-		}
-
-		decrypted, err := authToken.Decrypt(grant.EncryptedMetadata, grant.ID.String())
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt metadata: %w", err)
-		}
-
-		if err := json.Unmarshal(decrypted, &encryptedMetadata); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal decrypted metadata: %w", err)
-		}
+	// Update the grant with DPoP thumbprint if present
+	if dpopThumbprint != "" {
+		loadedGrant.additionalState.DPoPThumbprint = &dpopThumbprint
 	}
 
-	// we have a validated request. Call out to the handler to get the details.
+	// TODO: Update grant expiry when DPoP binding is added
+	if err := s.config.Storage.UpdateGrant(ctx, loadedGrant.grantID, loadedGrant.grant); err != nil {
+		if errors.Is(err, ErrConcurrentUpdate) {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+		}
+		return nil, fmt.Errorf("failed to update grant: %w", err)
+	}
+
 	// Check if this grant is DPoP-bound by looking for thumbprint in metadata
-	isDPoPBound := grant.Metadata != nil && grant.Metadata[MetadataDPoPThumbprint] != ""
+	var isDPoPBound bool
+	if loadedGrant.additionalState.DPoPThumbprint != nil && *loadedGrant.additionalState.DPoPThumbprint != "" {
+		isDPoPBound = true
+	}
 
 	tr := &TokenRequest{
-		GrantID:           grant.ID,
-		UserID:            grant.UserID,
-		ClientID:          grant.ClientID,
-		GrantedScopes:     grant.GrantedScopes,
-		Metadata:          grant.Metadata,
-		EncryptedMetadata: encryptedMetadata,
+		GrantID:           loadedGrant.grantID,
+		UserID:            loadedGrant.grant.UserID,
+		ClientID:          loadedGrant.grant.ClientID,
+		GrantedScopes:     loadedGrant.grant.GrantedScopes,
+		Metadata:          loadedGrant.grant.Metadata,
+		DecryptedMetadata: loadedGrant.decryptedMetadata,
 		IsRefresh:         false,
 		DPoPBound:         isDPoPBound,
 	}
 
-	// TODO - this should be optional
+	// TODO: Make TokenHandler callback optional for code exchange
 	tresp, err := s.config.TokenHandler(ctx, tr)
 	if err != nil {
 		var uaerr unauthorizedErr
-		if errors.As(err, &uaerr); uaerr != nil && uaerr.Unauthorized() {
+		if errors.As(err, &uaerr) && uaerr.Unauthorized() {
 			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: uaerr.Error()}
 		}
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	return s.buildTokenResponse(ctx, alg, grant, tresp, isDPoPBound)
+	trresp, _, err := s.buildTokenResponse(ctx, alg, loadedGrant, tresp, isDPoPBound)
+	if err != nil && errors.Is(err, ErrConcurrentUpdate) {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+	}
+	return trresp, err
 }
 
 func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
@@ -303,25 +277,68 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "refresh token is required"}
 	}
 
-	// Create token from user token to get the stored value
-	refreshToken, err := token.FromUserToken(treq.RefreshToken, tokenUsageRefresh)
+	loadedGrant, err := s.getGrantFromRefreshToken(ctx, treq.RefreshToken)
 	if err != nil {
+		if errors.Is(err, errGrantTokenInvalid) {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+		} else if errors.Is(err, errGrantExpired) {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+		} else if errors.Is(err, errGrantNotFound) {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+		}
+		return nil, fmt.Errorf("failed to get grant by refresh token: %w", err)
+	}
+
+	pt, _ := token.ParseUserToken(treq.RefreshToken, tokenUsageRefresh)
+
+	// Check if token is valid for use
+	if s.now().After(loadedGrant.refreshToken.ValidUntil) {
+		if loadedGrant.refreshToken.ReplacedByTokenID != "" {
+			// Token is expired AND replaced. This means it was used, rotated,
+			// and the grace period has passed. This is a likely replay/theft.
+			if err := s.config.Storage.ExpireGrant(ctx, loadedGrant.grantID); err != nil {
+				return nil, fmt.Errorf("failed to revoke grant on refresh token reuse: %w", err)
+			}
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+		}
+		// Token is expired but not replaced. Just a normal expiration.
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 	}
 
-	grant, err := s.config.Storage.GetGrantByRefreshToken(ctx, refreshToken.Stored())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get grant by auth code: %w", err)
-	}
-	if grant == nil {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+	// Handle grace period for rotated tokens
+	if loadedGrant.refreshToken.ReplacedByTokenID != "" {
+		// Strict Option 2: Revoke the new one, and issue a third.
+		// Token reused within grace period: revoke the replacement token and issue a new one
+		if err := s.config.Storage.ExpireRefreshToken(ctx, pt.Payload().GetUserId(), pt.Payload().GetGrantId(), loadedGrant.refreshToken.ReplacedByTokenID); err != nil {
+			if !errors.Is(err, ErrNotFound) {
+				return nil, fmt.Errorf("failed to revoke replaced token during reuse: %w", err)
+			}
+		}
+	} else {
+		if s.config.RefreshTokenRotationGracePeriod > 0 {
+			loadedGrant.refreshToken.ValidUntil = s.now().Add(s.config.RefreshTokenRotationGracePeriod)
+			if err := s.config.Storage.UpdateRefreshToken(ctx, pt.Payload().GetUserId(), pt.Payload().GetGrantId(), pt.ID(), loadedGrant.refreshToken); err != nil {
+				if errors.Is(err, ErrConcurrentUpdate) {
+					return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+				}
+				return nil, fmt.Errorf("failed to update refresh token with grace expiry: %w", err)
+			}
+		} else {
+			if err := s.config.Storage.ExpireRefreshToken(ctx, pt.Payload().GetUserId(), pt.Payload().GetGrantId(), pt.ID()); err != nil {
+				if errors.Is(err, ErrNotFound) {
+					return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+				}
+				return nil, fmt.Errorf("failed to expire refresh token: %w", err)
+			}
+		}
 	}
 
 	// Enforce DPoP binding if the grant was initiated with DPoP
-	storedThumbprint := ""
-	if grant.Metadata != nil {
-		storedThumbprint = grant.Metadata[MetadataDPoPThumbprint]
+	var storedThumbprint string
+	if loadedGrant.additionalState.DPoPThumbprint != nil {
+		storedThumbprint = *loadedGrant.additionalState.DPoPThumbprint
 	}
+
 	if storedThumbprint != "" {
 		thumbprint, err := s.verifyDPoPProof(s.config.Issuer, req, &storedThumbprint)
 		if err != nil {
@@ -332,17 +349,7 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		}
 	}
 
-	// immediately create a new RT, and save it. We want to invalidate the old
-	// one immediately.
-	oldRefreshToken := grant.RefreshToken
-	grant.RefreshToken = nil
-	// TODO - expiry update here?
-
-	if err := s.config.Storage.UpdateGrant(ctx, grant); err != nil {
-		return nil, fmt.Errorf("failed to update grant: %w", err)
-	}
-
-	optsForClient, err := s.config.Clients.ClientOpts(ctx, grant.ClientID)
+	optsForClient, err := s.config.Clients.ClientOpts(ctx, loadedGrant.grant.ClientID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch client opts: %w", err)
 	}
@@ -356,133 +363,121 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		alg = &copts.signingAlg
 	}
 
-	// storage should do this, but double check.
-	if s.now().After(grant.ExpiresAt) {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
-	}
-	if subtle.ConstantTimeCompare(refreshToken.Stored(), oldRefreshToken) == 0 {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
-	}
-
-	// Unpack encrypted metadata if present
-	var encryptedMetadata map[string]string
-	if grant.EncryptedMetadata != nil {
-		// Create token from the old refresh token to decrypt metadata
-		// We need to use the stored refresh token hash to reconstruct the token
-		oldRefreshToken, err := token.FromUserToken(treq.RefreshToken, tokenUsageRefresh)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create token from refresh token: %w", err)
-		}
-
-		decrypted, err := oldRefreshToken.Decrypt(grant.EncryptedMetadata, grant.ID.String())
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt metadata: %w", err)
-		}
-
-		if err := json.Unmarshal(decrypted, &encryptedMetadata); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal decrypted metadata: %w", err)
-		}
-	}
-
-	// tresp, err := o.handler.RefreshToken(tr)
-	// TODO - need to re-do this too.
-
 	// Check if this grant is DPoP-bound by looking for thumbprint in metadata
-	isDPoPBound := grant.Metadata != nil && grant.Metadata[MetadataDPoPThumbprint] != ""
+	isDPoPBound := storedThumbprint != ""
 
 	tr := &TokenRequest{
-		GrantID:           grant.ID,
-		UserID:            grant.UserID,
-		ClientID:          grant.ClientID,
-		GrantedScopes:     grant.GrantedScopes,
-		Metadata:          grant.Metadata,
-		EncryptedMetadata: encryptedMetadata,
+		GrantID:           loadedGrant.grantID,
+		UserID:            loadedGrant.grant.UserID,
+		ClientID:          loadedGrant.grant.ClientID,
+		GrantedScopes:     loadedGrant.grant.GrantedScopes,
+		Metadata:          loadedGrant.grant.Metadata,
+		DecryptedMetadata: loadedGrant.decryptedMetadata,
 		IsRefresh:         true,
 		DPoPBound:         isDPoPBound,
 	}
 	tresp, err := s.config.TokenHandler(ctx, tr)
 	if err != nil {
 		var uaerr unauthorizedErr
-		if errors.As(err, &uaerr); uaerr != nil && uaerr.Unauthorized() {
+		if errors.As(err, &uaerr) && uaerr.Unauthorized() {
 			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: uaerr.Error()}
 		}
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	return s.buildTokenResponse(ctx, alg, grant, tresp, isDPoPBound)
+	rtUntil := tresp.RefreshTokenValidUntil
+	if rtUntil.IsZero() {
+		rtUntil = s.now().Add(s.config.MaxRefreshTime)
+	}
+
+	loadedGrant.grant.ExpiresAt = rtUntil
+
+	trresp, newRTID, err := s.buildTokenResponse(ctx, alg, loadedGrant, tresp, isDPoPBound)
+	if errors.Is(err, ErrConcurrentUpdate) {
+		// expire the grant, there's likely another issuance in flight.
+		if err := s.config.Storage.ExpireGrant(ctx, loadedGrant.grantID); err != nil {
+			slog.WarnContext(ctx, "failed to expire grant", "error", err)
+		}
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to build refresh token response: %w", err)
+	}
+
+	// If we are rotating with grace, update the old token to point to the new one
+	if s.config.RefreshTokenRotationGracePeriod > 0 && newRTID != "" {
+		pt, _ := token.ParseUserToken(treq.RefreshToken, tokenUsageRefresh)
+		loadedGrant.refreshToken.ReplacedByTokenID = newRTID
+		err := s.config.Storage.UpdateRefreshToken(ctx, loadedGrant.grant.UserID, loadedGrant.grantID, pt.ID(), loadedGrant.refreshToken)
+		if errors.Is(err, ErrConcurrentUpdate) {
+			// if we get here, hard fail the token regardless of grace period -
+			// we've had a duplicate update, and risk forking the token history.
+			// This is an edge enough case that it's not worth trying to
+			// recover.
+			if err := s.config.Storage.ExpireGrant(ctx, loadedGrant.grantID); err != nil {
+				slog.WarnContext(ctx, "failed to expire grant", "error", err)
+			}
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+		} else if err != nil {
+			return nil, fmt.Errorf("failed to update old refresh token: %w", err)
+		}
+	}
+
+	return trresp, nil
 }
 
 // buildTokenResponse creates the oauth token response for code and refresh.
-// refreshSession can be nil, if it is and we should issue a refresh token, a
-// new refresh session will be created.
-func (s *Server) buildTokenResponse(ctx context.Context, alg *string, grant *StoredGrant, tresp *TokenResponse, isDPoPBound bool) (_ *oauth2.TokenResponse, retErr error) {
-	var (
-		refreshTok string
-		saveGrant  bool
-	)
-	defer func() {
-		if saveGrant {
-			if err := s.config.Storage.UpdateGrant(ctx, grant); err != nil {
-				retErr = errors.Join(retErr, fmt.Errorf("error updating grant: %v", err))
-			}
-		}
-	}()
-
-	if slices.Contains(grant.GrantedScopes, oidc.ScopeOfflineAccess) {
-		newToken := token.New(tokenUsageRefresh)
-		refreshTok = newToken.User()
-		grant.RefreshToken = newToken.Stored()
-		saveGrant = true
-	}
-
-	// Update metadata if provided
+// It works with both auth code grants and refresh token grants via the grantLoader interface.
+func (s *Server) buildTokenResponse(ctx context.Context, alg *string, loadedGrant grantLoader, tresp *TokenResponse, isDPoPBound bool) (_ *oauth2.TokenResponse, refreshTokenID string, _ error) {
+	// Update metadata from the handler response
 	if tresp.Metadata != nil {
-		grant.Metadata = tresp.Metadata
-		saveGrant = true
+		loadedGrant.Grant().Metadata = tresp.Metadata
 	}
-
-	// Update encrypted metadata if provided
 	if tresp.EncryptedMetadata != nil {
-		// Create a new token for encrypting the metadata
-		// For refresh tokens, we need to use the new refresh token
-		var encryptToken token.Token
+		loadedGrant.SetDecryptedMetadata(tresp.EncryptedMetadata)
+	}
+
+	var refreshToken string
+	var rtID string
+	if slices.Contains(loadedGrant.Grant().GrantedScopes, oidc.ScopeOfflineAccess) {
+		rtUntil := tresp.RefreshTokenValidUntil
+		if rtUntil.IsZero() {
+			rtUntil = s.now().Add(s.config.MaxRefreshTime)
+		}
+
+		// Cap the refresh token expiry at the grant's absolute expiration
+		if rtUntil.After(loadedGrant.Grant().ExpiresAt) {
+			rtUntil = loadedGrant.Grant().ExpiresAt
+		}
+
 		var err error
-		if refreshTok != "" {
-			// We have a new refresh token, use it to encrypt
-			encryptToken, err = token.FromUserToken(refreshTok, tokenUsageRefresh)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create token from refresh token: %w", err)
-			}
-		} else {
-			// No refresh token, create a new one for encryption
-			encryptToken = token.New(tokenUsageRefresh)
+		// Build a refresh token grant for creating the refresh token
+		rtGrant := &loadedRefreshTokenGrant{
+			grant:             loadedGrant.Grant(),
+			grantID:           loadedGrant.GrantID(),
+			decryptedMetadata: loadedGrant.DecryptedMetadata(),
+			additionalState:   *loadedGrant.AdditionalState(),
 		}
-
-		// Marshal the encrypted metadata
-		emdjson, err := json.Marshal(tresp.EncryptedMetadata)
+		_, refreshToken, rtID, err = s.putGrantWithRefreshToken(ctx, rtGrant, rtUntil)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal encrypted metadata: %w", err)
+			return nil, "", fmt.Errorf("error putting grant with refresh token: %v", err)
 		}
-
-		// Encrypt the metadata
-		encryptedMetadata, err := encryptToken.Encrypt(string(emdjson), grant.ID.String())
-		if err != nil {
-			return nil, fmt.Errorf("failed to encrypt metadata: %w", err)
+	} else {
+		// Update grant metadata even when no refresh token is issued
+		// TODO: Verify if metadata updates without refresh tokens are necessary
+		if err := s.config.Storage.UpdateGrant(ctx, loadedGrant.GrantID(), loadedGrant.Grant()); err != nil {
+			return nil, "", fmt.Errorf("error updating grant: %v", err)
 		}
-
-		grant.EncryptedMetadata = encryptedMetadata
-		saveGrant = true
 	}
 
-	// TODO - only try and issue an ID token if the openid scope was granted.
+	// TODO: Conditionally issue ID tokens only when openid scope is granted
 
-	idc, err := s.buildIDClaims(grant, tresp)
+	idc, err := s.buildIDClaims(loadedGrant.Grant(), tresp)
 	if err != nil {
-		return nil, fmt.Errorf("building id token claims: %w", err)
+		return nil, "", fmt.Errorf("building id token claims: %w", err)
 	}
-	ac, acExp, err := s.buildAccessTokenClaims(grant, tresp)
+	ac, acExp, err := s.buildAccessTokenClaims(loadedGrant.GrantID(), loadedGrant.Grant(), tresp)
 	if err != nil {
-		return nil, fmt.Errorf("building access token claims: %w", err)
+		return nil, "", fmt.Errorf("building access token claims: %w", err)
 	}
 
 	var (
@@ -492,24 +487,24 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg *string, grant *Sto
 	if alg != nil {
 		algSigner, ok := s.config.Signer.(AlgorithmSigner)
 		if !ok {
-			return nil, fmt.Errorf("explicit algorithm requested, but signer does not implement AlgorithmSigner")
+			return nil, "", fmt.Errorf("explicit algorithm requested, but signer does not implement AlgorithmSigner")
 		}
 		idSigned, err = algSigner.SignAndEncodeForAlgorithm(*alg, idc)
 		if err != nil {
-			return nil, fmt.Errorf("signing id token with algorithm %s: %w", *alg, err)
+			return nil, "", fmt.Errorf("signing id token with algorithm %s: %w", *alg, err)
 		}
 		atSigned, err = algSigner.SignAndEncodeForAlgorithm(*alg, ac)
 		if err != nil {
-			return nil, fmt.Errorf("signing access token with algorithm %s: %w", *alg, err)
+			return nil, "", fmt.Errorf("signing access token with algorithm %s: %w", *alg, err)
 		}
 	} else {
 		idSigned, err = s.config.Signer.SignAndEncode(idc)
 		if err != nil {
-			return nil, fmt.Errorf("signing id token: %w", err)
+			return nil, "", fmt.Errorf("signing id token: %w", err)
 		}
 		atSigned, err = s.config.Signer.SignAndEncode(ac)
 		if err != nil {
-			return nil, fmt.Errorf("signing access token: %w", err)
+			return nil, "", fmt.Errorf("signing access token: %w", err)
 		}
 	}
 
@@ -520,13 +515,13 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg *string, grant *Sto
 
 	return &oauth2.TokenResponse{
 		AccessToken:  atSigned,
-		RefreshToken: refreshTok,
+		RefreshToken: refreshToken,
 		TokenType:    tokenType,
 		ExpiresIn:    acExp.Sub(s.now()),
-		ExtraParams: map[string]interface{}{
+		ExtraParams: map[string]any{
 			"id_token": string(idSigned),
 		},
-	}, nil
+	}, rtID, nil
 }
 
 func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (*jwt.RawJWT, error) {
@@ -559,7 +554,7 @@ func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (*jwt.R
 		rjwtopts.Audience = &grant.ClientID
 	}
 
-	// TODO nonce
+	// TODO: Add nonce claim to ID token if provided in authorization request
 	// rjwtopts.CustomClaims["nonce"] = grant.Request.Nonce
 
 	rjwt, err := jwt.NewRawJWT(rjwtopts)
@@ -570,7 +565,7 @@ func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (*jwt.R
 	return rjwt, nil
 }
 
-func (s *Server) buildAccessTokenClaims(grant *StoredGrant, tresp *TokenResponse) (_ *jwt.RawJWT, expiresAt time.Time, _ error) {
+func (s *Server) buildAccessTokenClaims(grantID string, grant *StoredGrant, tresp *TokenResponse) (_ *jwt.RawJWT, expiresAt time.Time, _ error) {
 	atExp := tresp.AccessTokenExpiry
 	if atExp.IsZero() {
 		atExp = s.now().Add(s.config.AccessTokenValidity)
@@ -591,12 +586,18 @@ func (s *Server) buildAccessTokenClaims(grant *StoredGrant, tresp *TokenResponse
 	rjwtopts.Issuer = &s.config.Issuer
 	rjwtopts.IssuedAt = th.Ptr(s.now())
 	rjwtopts.ExpiresAt = th.Ptr(atExp)
-	rjwtopts.JWTID = th.Ptr(uuid.New().String())
+	rjwtopts.JWTID = th.Ptr(newUUIDv4())
 	rjwtopts.CustomClaims["client_id"] = grant.ClientID
-	rjwtopts.CustomClaims[claimGrantID] = grant.ID.String()
+	rjwtopts.CustomClaims[claimGrantID] = grantID
 
-	if dpopThumbprint, ok := grant.Metadata[MetadataDPoPThumbprint]; ok {
-		rjwtopts.CustomClaims["jkt"] = dpopThumbprint
+	var addState storedAdditionalState
+	if len(grant.AdditionalState) > 0 {
+		if err := json.Unmarshal(grant.AdditionalState, &addState); err != nil {
+			return nil, time.Time{}, fmt.Errorf("failed to unmarshal additional state: %w", err)
+		}
+	}
+	if addState.DPoPThumbprint != nil {
+		rjwtopts.CustomClaims["jkt"] = *addState.DPoPThumbprint
 	}
 
 	// defaulted values
@@ -631,6 +632,9 @@ func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
 func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbprint *string) (thumbprint string, err error) {
 	dpopHeader := req.Header.Get("DPoP")
 	if dpopHeader == "" {
+		if expectedThumbprint != nil {
+			return "", fmt.Errorf("DPoP header required")
+		}
 		return "", nil
 	}
 
@@ -645,11 +649,9 @@ func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbpri
 	}
 
 	opts := &dpop.ValidatorOpts{
-		ExpectedHTM: th.Ptr(req.Method),
-		ExpectedHTU: th.Ptr(fmt.Sprintf("%s://%s%s", issURL.Scheme, issURL.Host, req.URL.Path)),
-		// we are starting off lax here, will only check it if the client
-		// provided it
-		AllowUnsetHTMHTU: true,
+		ExpectedHTM:      th.Ptr(req.Method),
+		ExpectedHTU:      th.Ptr(fmt.Sprintf("%s://%s%s", issURL.Scheme, issURL.Host, req.URL.Path)),
+		AllowUnsetHTMHTU: true, // Allow requests without HTM/HTU if the client doesn't require them
 	}
 	if expectedThumbprint == nil {
 		opts.IgnoreThumbprint = true

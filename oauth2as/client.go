@@ -27,7 +27,7 @@ func ClientOptSigningAlg(alg string) ClientOpt {
 	}
 }
 
-// ClientSource is used for validating client informantion for the general flow
+// ClientSource is used for validating client information for the general flow
 type ClientSource interface {
 	// IsValidClientID should return true if the passed client ID is valid
 	IsValidClientID(_ context.Context, clientID string) (ok bool, err error)

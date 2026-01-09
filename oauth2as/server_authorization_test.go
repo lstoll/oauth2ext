@@ -74,7 +74,7 @@ func TestParseAuthRequest(t *testing.T) {
 				ClientID:      "test-client",
 				RedirectURI:   "https://client.example.com/callback",
 				State:         "test-state",
-				Scopes:        []string{""},
+				Scopes:        []string{},
 				CodeChallenge: "abc123",
 			},
 		},
@@ -122,7 +122,7 @@ func TestParseAuthRequest(t *testing.T) {
 				ClientID:    "public-client",
 				RedirectURI: "https://public.example.com/callback",
 				State:       "test-state",
-				Scopes:      []string{""},
+				Scopes:      []string{},
 			},
 		},
 	}
