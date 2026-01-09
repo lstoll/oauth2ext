@@ -72,7 +72,11 @@ func (c *Config) TokenSource(ctx context.Context) (oauth2.TokenSource, error) {
 	if validErr != nil {
 		return nil, fmt.Errorf("invalid config: %w", validErr)
 	}
-	return &cachingTokenSource{ctx: ctx, cfg: c, o2cfg: c.OAuth2Config}, nil
+	cs := &cachingTokenSource{ctx: ctx, cfg: c}
+	if c.OAuth2Config != nil {
+		cs.o2cfg = c.OAuth2Config
+	}
+	return cs, nil
 }
 
 // Token checks the cache for a token, and if it exists and is valid returns it.
