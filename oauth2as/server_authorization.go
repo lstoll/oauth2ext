@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
@@ -138,11 +139,11 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		GrantedScopes: grant.GrantedScopes,
 		AuthCode: &TokenWithExpiry{
 			Token:     authCode.Stored(),
-			ExpiresAt: s.now().Add(s.config.CodeValidityTime),
+			ExpiresAt: s.now().Add(time.Minute), // Code always valid for 1 minute
 		},
 		Request:   grant.Request,
 		GrantedAt: s.now(),
-		ExpiresAt: s.now().Add(s.config.CodeValidityTime),
+		ExpiresAt: s.now().Add(s.config.MaxRefreshTime), // Grant has absolute lifetime
 		Metadata:  grant.Metadata,
 	}
 	if grant.EncryptedMetadata != nil {

@@ -221,7 +221,7 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 	}
 
 	// storage should do this, but double check
-	if s.now().After(grant.ExpiresAt) {
+	if oldAuthCode == nil || s.now().After(oldAuthCode.ExpiresAt) {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "code expired"}
 	}
 	if oldAuthCode == nil || subtle.ConstantTimeCompare(oldAuthCode.Token, authToken.Stored()) == 0 {
@@ -348,7 +348,6 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	// one immediately.
 	oldRefreshToken := grant.RefreshToken
 	grant.RefreshToken = nil
-	// TODO - expiry update here?
 
 	if err := s.config.Storage.UpdateGrant(ctx, grant); err != nil {
 		return nil, fmt.Errorf("failed to update grant: %w", err)
@@ -370,6 +369,9 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 
 	// storage should do this, but double check.
 	if s.now().After(grant.ExpiresAt) {
+		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "grant expired"}
+	}
+	if oldRefreshToken == nil || s.now().After(oldRefreshToken.ExpiresAt) {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
 	}
 	if oldRefreshToken == nil || subtle.ConstantTimeCompare(refreshToken.Stored(), oldRefreshToken.Token) == 0 {
@@ -417,13 +419,6 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	rtUntil := tresp.RefreshTokenValidUntil
-	if rtUntil.IsZero() {
-		rtUntil = s.now().Add(s.config.MaxRefreshTime)
-	}
-
-	grant.ExpiresAt = rtUntil
-
 	return s.buildTokenResponse(ctx, alg, grant, tresp)
 }
 
@@ -449,13 +444,17 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg *string, grant *Sto
 			rtUntil = s.now().Add(s.config.MaxRefreshTime)
 		}
 
+		// Cap the refresh token expiry at the grant's absolute expiration
+		if rtUntil.After(grant.ExpiresAt) {
+			rtUntil = grant.ExpiresAt
+		}
+
 		newToken := token.New(tokenUsageRefresh)
 		refreshTok = newToken.User()
 		grant.RefreshToken = &TokenWithExpiry{
 			Token:     newToken.Stored(),
 			ExpiresAt: rtUntil,
 		}
-		grant.ExpiresAt = rtUntil
 		saveGrant = true
 	}
 
