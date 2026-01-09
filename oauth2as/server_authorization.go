@@ -2,7 +2,6 @@ package oauth2as
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -15,23 +14,23 @@ import (
 
 type AuthRequest struct {
 	// ClientID is the client ID that is requesting authentication.
-	ClientID string
+	ClientID string `json:"clientID,omitzero"`
 	// RedirectURI the client specified. This is an OPTIONAL field, if not
 	// passed will be set to the zero value. If provided, it will have been
 	// validated.
-	RedirectURI string
+	RedirectURI string `json:"redirectURI,omitzero"`
 	// State is the state value that was passed in the request.
-	State string
+	State string `json:"state,omitzero"`
 	// Scopes is the list of scopes that the client is requesting.
-	Scopes []string
+	Scopes []string `json:"scopes,omitzero"`
 	// CodeChallenge is the PKCE code challenge. If it is provided, it will be
 	// S256 format. If not provided, it will be an empty string.
-	CodeChallenge string
+	CodeChallenge string `json:"codeChallenge,omitzero"`
 	// ACRValues is the list of ACR values that the client is requesting.
-	ACRValues []string
+	ACRValues []string `json:"acrValues,omitzero"`
 
 	// Raw is the raw URL values that were passed in the request.
-	Raw url.Values
+	Raw url.Values `json:"raw,omitzero"`
 }
 
 func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
@@ -113,11 +112,11 @@ type AuthGrant struct {
 	// Metadata is arbitraty metadata that can be stored with the grant. Can be
 	// used for auditing or tracking other information that is associated with
 	// the grant. This is not sensitive, and can be accessed at any time.
-	Metadata map[string]string
+	Metadata []byte
 	// EncryptedMetadata is the encrypted metadata that can be stored with the
 	// grant. This is only available to token callbacks. Can be used to store
 	// sensitive, grant-specific information like upstream auth tokens.
-	EncryptedMetadata map[string]string
+	EncryptedMetadata []byte
 }
 
 func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI string, _ error) {
@@ -137,18 +136,17 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		UserID:        grant.UserID,
 		ClientID:      grant.Request.ClientID,
 		GrantedScopes: grant.GrantedScopes,
-		AuthCode:      authCode.Stored(),
-		Request:       grant.Request,
-		GrantedAt:     s.now(),
-		ExpiresAt:     s.now().Add(s.config.CodeValidityTime),
-		Metadata:      grant.Metadata,
+		AuthCode: &TokenWithExpiry{
+			Token:     authCode.Stored(),
+			ExpiresAt: s.now().Add(s.config.CodeValidityTime),
+		},
+		Request:   grant.Request,
+		GrantedAt: s.now(),
+		ExpiresAt: s.now().Add(s.config.CodeValidityTime),
+		Metadata:  grant.Metadata,
 	}
 	if grant.EncryptedMetadata != nil {
-		emdjson, err := json.Marshal(grant.EncryptedMetadata)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal metadata: %w", err)
-		}
-		encryptedMetadata, err := authCode.Encrypt(string(emdjson), grantID.String())
+		encryptedMetadata, err := authCode.Encrypt(grant.EncryptedMetadata, []byte(grantID.String()))
 		if err != nil {
 			return "", fmt.Errorf("failed to encrypt metadata: %w", err)
 		}

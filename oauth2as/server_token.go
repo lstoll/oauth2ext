@@ -43,10 +43,10 @@ type TokenRequest struct {
 	// GrantedScopes are the scopes that were granted.
 	GrantedScopes []string
 	// Metadata is the metadata that was associated with the grant.
-	Metadata map[string]string
+	Metadata []byte
 	// EncryptedMetadata is the decrypted metadata that was associated with the
 	// grant.
-	EncryptedMetadata map[string]string
+	EncryptedMetadata []byte
 
 	// IsRefresh indicates if this is a refresh token request.
 	IsRefresh bool
@@ -102,10 +102,10 @@ type TokenResponse struct {
 
 	// Metadata is the metadata that was associated with the grant. If nil, the
 	// existing metadata will be re-used.
-	Metadata map[string]string
+	Metadata []byte
 	// EncryptedMetadata is the encrypted metadata that was associated with the
 	// grant. If nil, the existing encrypted metadata will be re-used.
-	EncryptedMetadata map[string]string
+	EncryptedMetadata []byte
 }
 
 // TokenHandler is used to handle the access token endpoint for code flow
@@ -199,11 +199,21 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 	// update to note the code was used, and store DPoP thumbprint in metadata if provided
 	oldAuthCode := grant.AuthCode
 	grant.AuthCode = nil
-	if dpopThumbprint != "" {
-		if grant.Metadata == nil {
-			grant.Metadata = make(map[string]string)
+
+	var addState storedAdditionalState
+	if len(grant.AdditionalState) > 0 {
+		if err := json.Unmarshal(grant.AdditionalState, &addState); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal additional state: %w", err)
 		}
-		grant.Metadata[MetadataDPoPThumbprint] = dpopThumbprint
+	}
+
+	if dpopThumbprint != "" {
+		addState.DPoPThumbprint = &dpopThumbprint
+		raw, err := json.Marshal(addState)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal additional state: %w", err)
+		}
+		grant.AdditionalState = raw
 	}
 	// TODO - update the expiry to match the extended time.
 	if err := s.config.Storage.UpdateGrant(ctx, grant); err != nil {
@@ -214,7 +224,7 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 	if s.now().After(grant.ExpiresAt) {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "code expired"}
 	}
-	if subtle.ConstantTimeCompare(oldAuthCode, authToken.Stored()) == 0 {
+	if oldAuthCode == nil || subtle.ConstantTimeCompare(oldAuthCode.Token, authToken.Stored()) == 0 {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
 	}
 
@@ -251,7 +261,7 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 	}
 
 	// Unpack encrypted metadata if present
-	var encryptedMetadata map[string]string
+	var encryptedMetadata []byte
 	if grant.EncryptedMetadata != nil {
 		// Create token from the auth code to decrypt metadata
 		authToken, err := token.FromUserToken(treq.Code, tokenUsageAuthCode)
@@ -259,20 +269,16 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 			return nil, fmt.Errorf("failed to create token from auth code: %w", err)
 		}
 
-		decrypted, err := authToken.Decrypt(grant.EncryptedMetadata, grant.ID.String())
+		encryptedMetadata, err = authToken.Decrypt(grant.EncryptedMetadata, []byte(grant.ID.String()))
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt metadata: %w", err)
-		}
-
-		if err := json.Unmarshal(decrypted, &encryptedMetadata); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal decrypted metadata: %w", err)
 		}
 	}
 
 	// we have a validated request. Call out to the handler to get the details.
 	// Check if this grant is DPoP-bound by looking for thumbprint in metadata
 	isDPoPBound := false
-	if grant.Metadata != nil && grant.Metadata[MetadataDPoPThumbprint] != "" {
+	if addState.DPoPThumbprint != nil && *addState.DPoPThumbprint != "" {
 		isDPoPBound = true
 	}
 
@@ -319,11 +325,19 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 	}
 
-	// Enforce DPoP binding if the grant was initiated with DPoP
-	storedThumbprint := ""
-	if grant.Metadata != nil {
-		storedThumbprint = grant.Metadata[MetadataDPoPThumbprint]
+	var addState storedAdditionalState
+	if len(grant.AdditionalState) > 0 {
+		if err := json.Unmarshal(grant.AdditionalState, &addState); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal additional state: %w", err)
+		}
 	}
+
+	// Enforce DPoP binding if the grant was initiated with DPoP
+	var storedThumbprint string
+	if addState.DPoPThumbprint != nil {
+		storedThumbprint = *addState.DPoPThumbprint
+	}
+
 	if storedThumbprint != "" {
 		if _, err = s.verifyDPoPProof(req, &storedThumbprint); err != nil {
 			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "DPoP proof key mismatch"}
@@ -358,12 +372,12 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	if s.now().After(grant.ExpiresAt) {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "token expired"}
 	}
-	if subtle.ConstantTimeCompare(refreshToken.Stored(), oldRefreshToken) == 0 {
+	if oldRefreshToken == nil || subtle.ConstantTimeCompare(refreshToken.Stored(), oldRefreshToken.Token) == 0 {
 		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 	}
 
 	// Unpack encrypted metadata if present
-	var encryptedMetadata map[string]string
+	var encryptedMetadata []byte
 	if grant.EncryptedMetadata != nil {
 		// Create token from the old refresh token to decrypt metadata
 		// We need to use the stored refresh token hash to reconstruct the token
@@ -372,13 +386,9 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 			return nil, fmt.Errorf("failed to create token from refresh token: %w", err)
 		}
 
-		decrypted, err := oldRefreshToken.Decrypt(grant.EncryptedMetadata, grant.ID.String())
+		encryptedMetadata, err = oldRefreshToken.Decrypt(grant.EncryptedMetadata, []byte(grant.ID.String()))
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt metadata: %w", err)
-		}
-
-		if err := json.Unmarshal(decrypted, &encryptedMetadata); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal decrypted metadata: %w", err)
 		}
 	}
 
@@ -386,7 +396,7 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	// TODO - need to re-do this too.
 
 	// Check if this grant is DPoP-bound by looking for thumbprint in metadata
-	isDPoPBound := grant.Metadata != nil && grant.Metadata[MetadataDPoPThumbprint] != ""
+	isDPoPBound := storedThumbprint != ""
 
 	tr := &TokenRequest{
 		GrantID:           grant.ID,
@@ -406,6 +416,13 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		}
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
+
+	rtUntil := tresp.RefreshTokenValidUntil
+	if rtUntil.IsZero() {
+		rtUntil = s.now().Add(s.config.MaxRefreshTime)
+	}
+
+	grant.ExpiresAt = rtUntil
 
 	return s.buildTokenResponse(ctx, alg, grant, tresp)
 }
@@ -427,9 +444,18 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg *string, grant *Sto
 	}()
 
 	if slices.Contains(grant.GrantedScopes, oidc.ScopeOfflineAccess) {
+		rtUntil := tresp.RefreshTokenValidUntil
+		if rtUntil.IsZero() {
+			rtUntil = s.now().Add(s.config.MaxRefreshTime)
+		}
+
 		newToken := token.New(tokenUsageRefresh)
 		refreshTok = newToken.User()
-		grant.RefreshToken = newToken.Stored()
+		grant.RefreshToken = &TokenWithExpiry{
+			Token:     newToken.Stored(),
+			ExpiresAt: rtUntil,
+		}
+		grant.ExpiresAt = rtUntil
 		saveGrant = true
 	}
 
@@ -440,7 +466,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg *string, grant *Sto
 	}
 
 	// Update encrypted metadata if provided
-	if tresp.EncryptedMetadata != nil {
+	if len(tresp.EncryptedMetadata) > 0 {
 		// Create a new token for encrypting the metadata
 		// For refresh tokens, we need to use the new refresh token
 		var encryptToken token.Token
@@ -456,14 +482,8 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg *string, grant *Sto
 			encryptToken = token.New(tokenUsageRefresh)
 		}
 
-		// Marshal the encrypted metadata
-		emdjson, err := json.Marshal(tresp.EncryptedMetadata)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal encrypted metadata: %w", err)
-		}
-
 		// Encrypt the metadata
-		encryptedMetadata, err := encryptToken.Encrypt(string(emdjson), grant.ID.String())
+		encryptedMetadata, err := encryptToken.Encrypt(tresp.EncryptedMetadata, []byte(grant.ID.String()))
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt metadata: %w", err)
 		}
@@ -648,6 +668,9 @@ func absoluteURI(req *http.Request) string {
 func (s *Server) verifyDPoPProof(req *http.Request, expectedThumbprint *string) (thumbprint string, err error) {
 	dpopHeader := req.Header.Get("DPoP")
 	if dpopHeader == "" {
+		if expectedThumbprint != nil {
+			return "", fmt.Errorf("DPoP header required")
+		}
 		return "", nil
 	}
 

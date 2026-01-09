@@ -1,6 +1,7 @@
 package token
 
 import (
+	"bytes"
 	"encoding/base64"
 	"testing"
 )
@@ -8,44 +9,43 @@ import (
 func TestTokenWorkflows(t *testing.T) {
 	tests := []struct {
 		name           string
-		plaintext      string
-		additionalData string
+		plaintext      []byte
+		additionalData []byte
 		usage          string
 	}{
 		{
 			name:           "simple text",
-			plaintext:      "hello world",
-			additionalData: "grant123",
+			plaintext:      []byte("hello world"),
+			additionalData: []byte("grant123"),
 			usage:          "access_token",
 		},
 		{
 			name:           "empty plaintext",
-			plaintext:      "",
-			additionalData: "grant456",
+			plaintext:      []byte(""),
+			additionalData: []byte("grant456"),
 			usage:          "refresh_token",
 		},
 		{
-			name:           "empty additional data",
-			plaintext:      "secret data",
-			additionalData: "",
-			usage:          "authorization_code",
+			name:      "empty additional data",
+			plaintext: []byte("secret data"),
+			usage:     "authorization_code",
 		},
 		{
 			name:           "unicode text",
-			plaintext:      "Hello, 世界! 🌍",
-			additionalData: "grant789",
+			plaintext:      []byte("Hello, 世界! 🌍"),
+			additionalData: []byte("grant789"),
 			usage:          "id_token",
 		},
 		{
 			name:           "long text",
-			plaintext:      "This is a very long piece of text that should be encrypted and decrypted properly. It contains multiple sentences and should test the encryption/decryption functionality thoroughly.",
-			additionalData: "grant-long",
+			plaintext:      []byte("This is a very long piece of text that should be encrypted and decrypted properly. It contains multiple sentences and should test the encryption/decryption functionality thoroughly."),
+			additionalData: []byte("grant-long"),
 			usage:          "device_code",
 		},
 		{
 			name:           "empty usage",
-			plaintext:      "test data",
-			additionalData: "grant-empty-usage",
+			plaintext:      []byte("test data"),
+			additionalData: []byte("grant-empty-usage"),
 			usage:          "",
 		},
 	}
@@ -82,7 +82,7 @@ func TestTokenWorkflows(t *testing.T) {
 				}
 
 				// Verify encrypted data is different from plaintext
-				if string(encrypted) == tt.plaintext {
+				if bytes.Equal(encrypted, tt.plaintext) {
 					t.Error("Encrypted data should not match plaintext")
 				}
 
@@ -94,7 +94,7 @@ func TestTokenWorkflows(t *testing.T) {
 				}
 
 				// Verify decrypted data matches original
-				if string(decrypted) != tt.plaintext {
+				if !bytes.Equal(decrypted, tt.plaintext) {
 					t.Errorf("Decrypted data doesn't match original. Got %q, want %q", string(decrypted), tt.plaintext)
 				}
 			})
@@ -149,8 +149,8 @@ func TestTokenWorkflows(t *testing.T) {
 				}
 
 				// Verify decrypted data matches original
-				if string(decrypted) != tt.plaintext {
-					t.Errorf("Decrypted data doesn't match original. Got %q, want %q", string(decrypted), tt.plaintext)
+				if !bytes.Equal(decrypted, tt.plaintext) {
+					t.Errorf("Decrypted data doesn't match original. Got %q, want %q", decrypted, tt.plaintext)
 				}
 
 				// Test reverse: encrypt with original, decrypt with derived
@@ -166,8 +166,8 @@ func TestTokenWorkflows(t *testing.T) {
 					return
 				}
 
-				if string(decrypted2) != tt.plaintext {
-					t.Errorf("Reverse decrypted data doesn't match original. Got %q, want %q", string(decrypted2), tt.plaintext)
+				if !bytes.Equal(decrypted2, tt.plaintext) {
+					t.Errorf("Reverse decrypted data doesn't match original. Got %q, want %q", decrypted2, tt.plaintext)
 				}
 			})
 		})
@@ -176,8 +176,8 @@ func TestTokenWorkflows(t *testing.T) {
 
 // TestUsageDomainSeparation tests that different usage values create different tokens
 func TestUsageDomainSeparation(t *testing.T) {
-	plaintext := "test data"
-	additionalData := "grant123"
+	plaintext := []byte("test data")
+	additionalData := []byte("grant123")
 
 	// Create tokens with different usage values
 	token1 := New("access_token")
@@ -196,24 +196,24 @@ func TestUsageDomainSeparation(t *testing.T) {
 	}
 
 	// Test that tokens with different usage cannot decrypt each other's data
-	encrypted1, err := token1.Encrypt(plaintext, additionalData)
+	encrypted1, err := token1.Encrypt(plaintext, []byte(additionalData))
 	if err != nil {
 		t.Fatalf("Encrypt with token1 failed: %v", err)
 	}
 
-	encrypted2, err := token2.Encrypt(plaintext, additionalData)
+	encrypted2, err := token2.Encrypt(plaintext, []byte(additionalData))
 	if err != nil {
 		t.Fatalf("Encrypt with token2 failed: %v", err)
 	}
 
 	// Token2 should not be able to decrypt token1's data
-	_, err = token2.Decrypt(encrypted1, additionalData)
+	_, err = token2.Decrypt(encrypted1, []byte(additionalData))
 	if err == nil {
 		t.Error("Token2 should not be able to decrypt token1's data")
 	}
 
 	// Token1 should not be able to decrypt token2's data
-	_, err = token1.Decrypt(encrypted2, additionalData)
+	_, err = token1.Decrypt(encrypted2, []byte(additionalData))
 	if err == nil {
 		t.Error("Token1 should not be able to decrypt token2's data")
 	}
@@ -228,8 +228,8 @@ func TestUsageDomainSeparation(t *testing.T) {
 	if err != nil {
 		t.Errorf("Derived token should be able to decrypt original data: %v", err)
 	}
-	if string(decrypted) != plaintext {
-		t.Errorf("Decrypted data doesn't match original. Got %q, want %q", string(decrypted), plaintext)
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Errorf("Decrypted data doesn't match original. Got %q, want %q", decrypted, plaintext)
 	}
 }
 
@@ -300,30 +300,30 @@ func TestUsageMismatch(t *testing.T) {
 	plaintext := "test data"
 	additionalData := "grant123"
 
-	encryptedOriginal, err := originalToken.Encrypt(plaintext, additionalData)
+	encryptedOriginal, err := originalToken.Encrypt([]byte(plaintext), []byte(additionalData))
 	if err != nil {
 		t.Fatalf("Encrypt with original token failed: %v", err)
 	}
 
 	// Wrong usage token should not be able to decrypt original's data
-	_, err = derivedTokenWrong.Decrypt(encryptedOriginal, additionalData)
+	_, err = derivedTokenWrong.Decrypt(encryptedOriginal, []byte(additionalData))
 	if err == nil {
 		t.Error("Token with wrong usage should not be able to decrypt original's data")
 	}
 
 	// Empty usage token should not be able to decrypt original's data
-	_, err = derivedTokenEmpty.Decrypt(encryptedOriginal, additionalData)
+	_, err = derivedTokenEmpty.Decrypt(encryptedOriginal, []byte(additionalData))
 	if err == nil {
 		t.Error("Token with empty usage should not be able to decrypt original's data")
 	}
 
 	// Correct usage token should be able to decrypt original's data
-	decrypted, err := derivedTokenCorrect.Decrypt(encryptedOriginal, additionalData)
+	decrypted, err := derivedTokenCorrect.Decrypt(encryptedOriginal, []byte(additionalData))
 	if err != nil {
 		t.Errorf("Token with correct usage should be able to decrypt original's data: %v", err)
 	}
-	if string(decrypted) != plaintext {
-		t.Errorf("Decrypted data doesn't match original. Got %q, want %q", string(decrypted), plaintext)
+	if !bytes.Equal(decrypted, []byte(plaintext)) {
+		t.Errorf("Decrypted data doesn't match original. Got %q, want %q", decrypted, plaintext)
 	}
 }
 
@@ -374,7 +374,7 @@ func TestEncryptionErrorCases(t *testing.T) {
 	additionalData := "grant123"
 
 	// Encrypt some data
-	encrypted, err := token.Encrypt(plaintext, additionalData)
+	encrypted, err := token.Encrypt([]byte(plaintext), []byte(additionalData))
 	if err != nil {
 		t.Fatalf("Setup encryption failed: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestEncryptionErrorCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := token.Decrypt(tt.ciphertext, tt.additionalData)
+			_, err := token.Decrypt(tt.ciphertext, []byte(tt.additionalData))
 			if tt.wantErr && err == nil {
 				t.Error("expected error but got none")
 			}

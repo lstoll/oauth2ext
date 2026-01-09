@@ -224,9 +224,12 @@ func TestCodeToken(t *testing.T) {
 			UserID:        "testsub",
 			ClientID:      es256ClientID,
 			GrantedScopes: []string{oidc.ScopeOfflineAccess},
-			AuthCode:      newToken.Stored(),
-			GrantedAt:     time.Now(),
-			ExpiresAt:     time.Now().Add(1 * time.Minute),
+			AuthCode: &TokenWithExpiry{
+				Token:     newToken.Stored(),
+				ExpiresAt: time.Now().Add(1 * time.Minute),
+			},
+			GrantedAt: time.Now(),
+			ExpiresAt: time.Now().Add(1 * time.Minute),
 			Request: &AuthRequest{
 				ClientID:    es256ClientID,
 				RedirectURI: es256ClientRedirect,
@@ -372,7 +375,7 @@ func TestRefreshToken(t *testing.T) {
 		}
 
 		// march to the future, when we should be expired
-		o.now = func() time.Time { return time.Now().Add(1 * time.Hour) }
+		o.now = func() time.Time { return time.Now().Add(7 * time.Hour) }
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeRefreshToken,
@@ -614,9 +617,12 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		UserID:        "testsub",
 		ClientID:      "client-id",
 		GrantedScopes: []string{oidc.ScopeOfflineAccess},
-		RefreshToken:  newToken.Stored(),
-		GrantedAt:     time.Now(),
-		ExpiresAt:     time.Now().Add(60 * time.Minute),
+		RefreshToken: &TokenWithExpiry{
+			Token:     newToken.Stored(),
+			ExpiresAt: time.Now().Add(60 * time.Minute),
+		},
+		GrantedAt: time.Now(),
+		ExpiresAt: time.Now().Add(60 * time.Minute),
 	}
 
 	if err := smgr.CreateGrant(context.Background(), grant); err != nil {
@@ -636,9 +642,12 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		UserID:        "testsub",
 		ClientID:      "client-id",
 		GrantedScopes: []string{oidc.ScopeOfflineAccess},
-		AuthCode:      newToken.Stored(),
-		GrantedAt:     time.Now(),
-		ExpiresAt:     time.Now().Add(1 * time.Minute),
+		AuthCode: &TokenWithExpiry{
+			Token:     newToken.Stored(),
+			ExpiresAt: time.Now().Add(1 * time.Minute),
+		},
+		GrantedAt: time.Now(),
+		ExpiresAt: time.Now().Add(1 * time.Minute),
 		Request: &AuthRequest{
 			ClientID:    "client-id",
 			RedirectURI: "https://redirect",

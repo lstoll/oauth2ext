@@ -92,7 +92,7 @@ func FromUserToken(userToken, usage string) (Token, error) {
 }
 
 // Encrypt encrypts the plaintext with this token's encryption key.
-func (t *Token) Encrypt(plaintext, additionalData string) ([]byte, error) {
+func (t *Token) Encrypt(plaintext []byte, additionalData []byte) ([]byte, error) {
 	if len(t.encryption) != keyLength {
 		return nil, fmt.Errorf("encryption key is not the correct length")
 	}
@@ -112,14 +112,14 @@ func (t *Token) Encrypt(plaintext, additionalData string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to generate nonce: %v", err)
 	}
 
-	ciphertext := aead.Seal(nil, nonce, []byte(plaintext), []byte(additionalData))
+	ciphertext := aead.Seal(nil, nonce, plaintext, additionalData)
 
 	result := append(nonce, ciphertext...)
 	return result, nil
 }
 
 // Decrypt decrypts the ciphertext with this token's encryption key.
-func (t *Token) Decrypt(ciphertext []byte, additionalData string) ([]byte, error) {
+func (t *Token) Decrypt(ciphertext []byte, additionalData []byte) ([]byte, error) {
 	if len(t.encryption) != keyLength {
 		return nil, fmt.Errorf("encryption key is not the correct length")
 	}
@@ -139,7 +139,7 @@ func (t *Token) Decrypt(ciphertext []byte, additionalData string) ([]byte, error
 		return nil, fmt.Errorf("failed to create GCM: %v", err)
 	}
 
-	plain, err := aead.Open(nil, nonce, enc, []byte(additionalData))
+	plain, err := aead.Open(nil, nonce, enc, additionalData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open ciphertext: %v", err)
 	}

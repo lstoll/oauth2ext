@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -112,10 +113,19 @@ func TestDPoPTokenFlow(t *testing.T) {
 		if grant == nil {
 			t.Fatal("grant not found")
 		}
-		dpopThumbprintFromMetadata := ""
-		if grant.Metadata != nil {
-			dpopThumbprintFromMetadata = grant.Metadata[MetadataDPoPThumbprint]
+
+		var addState storedAdditionalState
+		if len(grant.AdditionalState) > 0 {
+			if err := json.Unmarshal(grant.AdditionalState, &addState); err != nil {
+				t.Fatalf("failed to unmarshal additional state: %v", err)
+			}
 		}
+
+		dpopThumbprintFromMetadata := ""
+		if addState.DPoPThumbprint != nil {
+			dpopThumbprintFromMetadata = *addState.DPoPThumbprint
+		}
+
 		t.Logf("Grant DPoP thumbprint from metadata: %s", dpopThumbprintFromMetadata)
 		if dpopThumbprintFromMetadata == "" {
 			t.Error("expected grant to have DPoP thumbprint in metadata")
@@ -128,17 +138,23 @@ func TestDPoPTokenFlow(t *testing.T) {
 		refreshToken := token.New(tokenUsageRefresh)
 		dpopThumbprint := "test-thumbprint-123"
 
+		addState := storedAdditionalState{
+			DPoPThumbprint: &dpopThumbprint,
+		}
+		addStateBytes, _ := json.Marshal(addState)
+
 		grant := &StoredGrant{
 			ID:            grantID,
 			UserID:        userID,
 			ClientID:      clientID,
 			GrantedScopes: []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
-			RefreshToken:  refreshToken.Stored(),
-			GrantedAt:     time.Now(),
-			ExpiresAt:     time.Now().Add(24 * time.Hour),
-			Metadata: map[string]string{
-				MetadataDPoPThumbprint: dpopThumbprint,
+			RefreshToken: &TokenWithExpiry{
+				Token:     refreshToken.Stored(),
+				ExpiresAt: time.Now().Add(24 * time.Hour),
 			},
+			GrantedAt:       time.Now(),
+			ExpiresAt:       time.Now().Add(24 * time.Hour),
+			AdditionalState: addStateBytes,
 		}
 
 		if err := server.config.Storage.CreateGrant(context.Background(), grant); err != nil {
@@ -175,10 +191,10 @@ func TestDPoPTokenFlow(t *testing.T) {
 		expectedThumbprint := result.Thumbprint
 
 		// Update grant with correct thumbprint in metadata
-		if grant.Metadata == nil {
-			grant.Metadata = make(map[string]string)
-		}
-		grant.Metadata[MetadataDPoPThumbprint] = expectedThumbprint
+		addState.DPoPThumbprint = &expectedThumbprint
+		addStateBytes, _ = json.Marshal(addState)
+		grant.AdditionalState = addStateBytes
+
 		if err := server.config.Storage.UpdateGrant(context.Background(), grant); err != nil {
 			t.Fatalf("failed to update grant: %v", err)
 		}
@@ -210,17 +226,24 @@ func TestDPoPTokenFlow(t *testing.T) {
 		t.Run("Refresh fails without DPoP proof", func(t *testing.T) {
 			// Recreate grant since previous test consumed it
 			refreshToken2 := token.New(tokenUsageRefresh)
+
+			addState := storedAdditionalState{
+				DPoPThumbprint: &expectedThumbprint,
+			}
+			addStateBytes, _ := json.Marshal(addState)
+
 			grant2 := &StoredGrant{
 				ID:            uuid.New(),
 				UserID:        userID,
 				ClientID:      clientID,
 				GrantedScopes: []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
-				RefreshToken:  refreshToken2.Stored(),
-				GrantedAt:     time.Now(),
-				ExpiresAt:     time.Now().Add(24 * time.Hour),
-				Metadata: map[string]string{
-					MetadataDPoPThumbprint: expectedThumbprint,
+				RefreshToken: &TokenWithExpiry{
+					Token:     refreshToken2.Stored(),
+					ExpiresAt: time.Now().Add(24 * time.Hour),
 				},
+				GrantedAt:       time.Now(),
+				ExpiresAt:       time.Now().Add(24 * time.Hour),
+				AdditionalState: addStateBytes,
 			}
 			if err := server.config.Storage.CreateGrant(context.Background(), grant2); err != nil {
 				t.Fatalf("failed to create grant: %v", err)
@@ -261,17 +284,23 @@ func TestDPoPTokenFlow(t *testing.T) {
 			}
 
 			refreshToken3 := token.New(tokenUsageRefresh)
+			addState := storedAdditionalState{
+				DPoPThumbprint: &expectedThumbprint,
+			}
+			addStateBytes, _ := json.Marshal(addState)
+
 			grant3 := &StoredGrant{
 				ID:            uuid.New(),
 				UserID:        userID,
 				ClientID:      clientID,
 				GrantedScopes: []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
-				RefreshToken:  refreshToken3.Stored(),
-				GrantedAt:     time.Now(),
-				ExpiresAt:     time.Now().Add(24 * time.Hour),
-				Metadata: map[string]string{
-					MetadataDPoPThumbprint: expectedThumbprint,
+				RefreshToken: &TokenWithExpiry{
+					Token:     refreshToken3.Stored(),
+					ExpiresAt: time.Now().Add(24 * time.Hour),
 				},
+				GrantedAt:       time.Now(),
+				ExpiresAt:       time.Now().Add(24 * time.Hour),
+				AdditionalState: addStateBytes,
 			}
 			if err := server.config.Storage.CreateGrant(context.Background(), grant3); err != nil {
 				t.Fatalf("failed to create grant: %v", err)

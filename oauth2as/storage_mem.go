@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"sync"
 
 	"github.com/google/uuid"
@@ -39,13 +40,13 @@ func (m *MemStorage) CreateGrant(ctx context.Context, grant *StoredGrant) error 
 	m.grants[grant.ID] = grant
 
 	// Store auth code mapping if present
-	if len(grant.AuthCode) > 0 {
-		m.authCodes[hex.EncodeToString(grant.AuthCode)] = grant.ID
+	if grant.AuthCode != nil {
+		m.authCodes[hex.EncodeToString(grant.AuthCode.Token)] = grant.ID
 	}
 
 	// Store refresh token mapping if present
-	if len(grant.RefreshToken) > 0 {
-		m.refreshTokens[hex.EncodeToString(grant.RefreshToken)] = grant.ID
+	if grant.RefreshToken != nil {
+		m.refreshTokens[hex.EncodeToString(grant.RefreshToken.Token)] = grant.ID
 	}
 
 	return nil
@@ -63,26 +64,30 @@ func (m *MemStorage) UpdateGrant(ctx context.Context, grant *StoredGrant) error 
 	}
 
 	// Remove old auth code mapping if it changed
-	if len(existing.AuthCode) > 0 && (len(grant.AuthCode) == 0 || subtle.ConstantTimeCompare(existing.AuthCode, grant.AuthCode) == 0) {
-		delete(m.authCodes, hex.EncodeToString(existing.AuthCode))
+	if existing.AuthCode != nil {
+		if grant.AuthCode == nil || subtle.ConstantTimeCompare(existing.AuthCode.Token, grant.AuthCode.Token) == 0 {
+			delete(m.authCodes, hex.EncodeToString(existing.AuthCode.Token))
+		}
 	}
 
 	// Remove old refresh token mapping if it changed
-	if len(existing.RefreshToken) > 0 && (len(grant.RefreshToken) == 0 || subtle.ConstantTimeCompare(existing.RefreshToken, grant.RefreshToken) == 0) {
-		delete(m.refreshTokens, hex.EncodeToString(existing.RefreshToken))
+	if existing.RefreshToken != nil {
+		if grant.RefreshToken == nil || subtle.ConstantTimeCompare(existing.RefreshToken.Token, grant.RefreshToken.Token) == 0 {
+			delete(m.refreshTokens, hex.EncodeToString(existing.RefreshToken.Token))
+		}
 	}
 
 	// Update the grant
 	m.grants[grant.ID] = grant
 
 	// Add new auth code mapping if present
-	if len(grant.AuthCode) > 0 {
-		m.authCodes[hex.EncodeToString(grant.AuthCode)] = grant.ID
+	if grant.AuthCode != nil {
+		m.authCodes[hex.EncodeToString(grant.AuthCode.Token)] = grant.ID
 	}
 
 	// Add new refresh token mapping if present
-	if len(grant.RefreshToken) > 0 {
-		m.refreshTokens[hex.EncodeToString(grant.RefreshToken)] = grant.ID
+	if grant.RefreshToken != nil {
+		m.refreshTokens[hex.EncodeToString(grant.RefreshToken.Token)] = grant.ID
 	}
 
 	return nil
@@ -99,13 +104,13 @@ func (m *MemStorage) ExpireGrant(ctx context.Context, id uuid.UUID) error {
 	}
 
 	// Remove auth code mapping if present
-	if len(grant.AuthCode) > 0 {
-		delete(m.authCodes, hex.EncodeToString(grant.AuthCode))
+	if grant.AuthCode != nil {
+		delete(m.authCodes, hex.EncodeToString(grant.AuthCode.Token))
 	}
 
 	// Remove refresh token mapping if present
-	if len(grant.RefreshToken) > 0 {
-		delete(m.refreshTokens, hex.EncodeToString(grant.RefreshToken))
+	if grant.RefreshToken != nil {
+		delete(m.refreshTokens, hex.EncodeToString(grant.RefreshToken.Token))
 	}
 
 	// Remove the grant
@@ -185,14 +190,20 @@ func copyStoredGrant(grant *StoredGrant) *StoredGrant {
 	copy(copied.GrantedScopes, grant.GrantedScopes)
 
 	// Copy pointers
-	if len(grant.AuthCode) > 0 {
-		copied.AuthCode = make([]byte, len(grant.AuthCode))
-		copy(copied.AuthCode, grant.AuthCode)
+	if grant.AuthCode != nil {
+		copied.AuthCode = &TokenWithExpiry{
+			Token:     make([]byte, len(grant.AuthCode.Token)),
+			ExpiresAt: grant.AuthCode.ExpiresAt,
+		}
+		copy(copied.AuthCode.Token, grant.AuthCode.Token)
 	}
 
-	if len(grant.RefreshToken) > 0 {
-		copied.RefreshToken = make([]byte, len(grant.RefreshToken))
-		copy(copied.RefreshToken, grant.RefreshToken)
+	if grant.RefreshToken != nil {
+		copied.RefreshToken = &TokenWithExpiry{
+			Token:     make([]byte, len(grant.RefreshToken.Token)),
+			ExpiresAt: grant.RefreshToken.ExpiresAt,
+		}
+		copy(copied.RefreshToken.Token, grant.RefreshToken.Token)
 	}
 
 	// Copy AuthRequest if present
@@ -211,17 +222,20 @@ func copyStoredGrant(grant *StoredGrant) *StoredGrant {
 	}
 
 	// Copy metadata maps
-	if grant.Metadata != nil {
-		copied.Metadata = make(map[string]string, len(grant.Metadata))
-		for k, v := range grant.Metadata {
-			copied.Metadata[k] = v
-		}
+	if len(grant.Metadata) > 0 {
+		copied.Metadata = make([]byte, len(grant.Metadata))
+		copy(copied.Metadata, grant.Metadata)
 	}
 
 	// Copy encrypted metadata
 	if len(grant.EncryptedMetadata) > 0 {
 		copied.EncryptedMetadata = make([]byte, len(grant.EncryptedMetadata))
 		copy(copied.EncryptedMetadata, grant.EncryptedMetadata)
+	}
+
+	if len(grant.AdditionalState) > 0 {
+		copied.AdditionalState = make(json.RawMessage, len(grant.AdditionalState))
+		copy(copied.AdditionalState, grant.AdditionalState)
 	}
 
 	return copied

@@ -2,6 +2,7 @@ package oauth2as
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,36 +13,50 @@ const (
 	MetadataDPoPThumbprint = "dpop_thumbprint"
 )
 
+// TokenWithExpiry represents a token that is issued for a grant, that has an
+// explicity expiration time.
+type TokenWithExpiry struct {
+	Token     []byte    `json:"token,omitzero"`
+	ExpiresAt time.Time `json:"expiresAt,omitzero"`
+}
+
 type StoredGrant struct {
 	// ID is the unique identifier for this grant.
-	ID uuid.UUID
+	ID uuid.UUID `json:"id,omitzero"`
 	// AuthCode is the authorization code for the initial token exchange.
-	AuthCode []byte
+	AuthCode *TokenWithExpiry `json:"authCode,omitzero"`
 	// UserID is the user ID that was granted access.
-	UserID string
+	UserID string `json:"userId,omitzero"`
 	// ClientID is the client ID that was granted access.
-	ClientID string
+	ClientID string `json:"clientId,omitzero"`
 	// GrantedScopes are the scopes that were actually granted.
-	GrantedScopes []string
+	GrantedScopes []string `json:"grantedScopes,omitzero"`
 	// Request captures the request that was used to grant access. Used for
 	// finalizing the code flow.
-	Request *AuthRequest
+	Request *AuthRequest `json:"request,omitzero"`
 	// RefreshToken is the refresh token for the grant.
-	RefreshToken []byte
+	RefreshToken *TokenWithExpiry `json:"refreshToken,omitzero"`
 	// GrantedAt is the time at which the grant was granted.
-	GrantedAt time.Time
+	GrantedAt time.Time `json:"grantedAt,omitzero"`
 	// ExpiresAt is the time at which the grant will expire.
-	ExpiresAt time.Time
+	ExpiresAt time.Time `json:"expiresAt,omitzero"`
 
-	// Metadata is arbitrary metadata that can be stored with the grant. This can
-	// include application-specific data as well as protocol metadata like DPoP
-	// thumbprints (see MetadataDPoPThumbprint constant).
-	Metadata map[string]string
-	// EncryptedMetadata stores the encrypted metadata associated with this
-	// grant.
-	EncryptedMetadata []byte
+	// AdditionalState contains additional internal state this library uses. It
+	// should not be interacted with directly.
+	AdditionalState json.RawMessage `json:"additionalState,omitzero"`
+
+	// Metadata is arbitrary application-specific metadata that can be stored
+	// with the grant. .
+	Metadata []byte `json:"metadata,omitzero"`
+	// EncryptedMetadata stores the application-specific encrypted metadata
+	// associated with this grant.
+	EncryptedMetadata []byte `json:"encryptedMetadata,omitzero"`
 
 	// TODO -acr, AMR etc.
+}
+
+type storedAdditionalState struct {
+	DPoPThumbprint *string `json:"dpopThumbprint,omitzero"`
 }
 
 // Storage is the interface for storing and retrieving grants.
