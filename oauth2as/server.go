@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
+	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 )
 
@@ -42,6 +43,10 @@ type Config struct {
 	// Verifier is used for verifying tokens issued by this server, for the
 	// userinfo endpoint and other places tokens issued by this server are used.
 	Verifier jwt.Verifier
+
+	// DPoPVerifier is used for verifying DPoP proofs on token requests. This is
+	// optional - if not provided, DPoP proofs will not be verified or enforced.
+	DPoPVerifier *dpop.Verifier
 
 	Logger *slog.Logger
 

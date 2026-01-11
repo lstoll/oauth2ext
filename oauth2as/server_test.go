@@ -102,7 +102,7 @@ func TestCodeToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		tresp, err := o.codeToken(context.TODO(), treq)
+		tresp, err := o.codeToken(context.TODO(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -124,13 +124,13 @@ func TestCodeToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		_, err := o.codeToken(context.Background(), treq)
+		_, err := o.codeToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
 		// replay fails
-		_, err = o.codeToken(context.Background(), treq)
+		_, err = o.codeToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
 			t.Errorf("want invalid token grant error, got: %v", err)
 		}
@@ -148,7 +148,7 @@ func TestCodeToken(t *testing.T) {
 			ClientSecret: "invalid-secret",
 		}
 
-		_, err := o.codeToken(context.Background(), treq)
+		_, err := o.codeToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeUnauthorizedClient {
 			t.Errorf("want unauthorized client error, got: %v", err)
 		}
@@ -168,7 +168,7 @@ func TestCodeToken(t *testing.T) {
 			ClientSecret: otherClientSecret,
 		}
 
-		_, err := o.codeToken(context.Background(), treq)
+		_, err := o.codeToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeUnauthorizedClient {
 			t.Errorf("want unauthorized client error, got: %v", err)
 		}
@@ -193,7 +193,7 @@ func TestCodeToken(t *testing.T) {
 			}, nil
 		}
 
-		tresp, err := o.codeToken(context.Background(), treq)
+		tresp, err := o.codeToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -242,7 +242,7 @@ func TestCodeToken(t *testing.T) {
 			ClientSecret: es256ClientSecret,
 		}
 
-		tresp, err := o.codeToken(context.TODO(), treq)
+		tresp, err := o.codeToken(context.TODO(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -350,7 +350,7 @@ func TestRefreshToken(t *testing.T) {
 				ClientSecret: clientSecret,
 			}
 
-			tresp, err := o.refreshToken(context.Background(), treq)
+			tresp, err := o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 			if err != nil {
 				t.Fatalf("iter %d: unexpected error calling token with refresh token: %v", i, err)
 			}
@@ -376,7 +376,7 @@ func TestRefreshToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		_, err := o.refreshToken(context.Background(), treq)
+		_, err := o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 		if te, ok := err.(*oauth2.TokenError); !ok || te.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
 			t.Errorf("expired session should have given invalid_grant, got: %v", te)
 		}
@@ -408,7 +408,7 @@ func TestRefreshToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		_, err := o.refreshToken(context.Background(), treq)
+		_, err := o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 
 		if err == nil {
 			t.Fatal("want error refreshing, got none")
@@ -433,7 +433,7 @@ func TestRefreshToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		_, err = o.refreshToken(context.Background(), treq)
+		_, err = o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 
 		if err == nil {
 			t.Fatal("want error refreshing, got none")
