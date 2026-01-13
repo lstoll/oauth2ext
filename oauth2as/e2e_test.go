@@ -302,6 +302,15 @@ func (c staticClientSource) ValidateClientSecret(ctx context.Context, clientID, 
 	}), nil
 }
 
+func (c staticClientSource) ClientSecrets(ctx context.Context, clientID string) ([]string, error) {
+	for _, sc := range c {
+		if sc.ID == clientID {
+			return sc.Secrets, nil
+		}
+	}
+	return nil, fmt.Errorf("client not found")
+}
+
 func (c staticClientSource) RedirectURIs(ctx context.Context, clientID string) ([]string, error) {
 	for _, sc := range c {
 		if sc.ID == clientID {
