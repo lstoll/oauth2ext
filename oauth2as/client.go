@@ -31,10 +31,9 @@ func ClientOptSigningAlg(alg string) ClientOpt {
 type ClientSource interface {
 	// IsValidClientID should return true if the passed client ID is valid
 	IsValidClientID(_ context.Context, clientID string) (ok bool, err error)
-	// ValidateClientSecret should confirm if the passed secret is valid for the
-	// given client. If no secret is provided, clientSecret will be empty but
-	// this will still be called.
-	ValidateClientSecret(_ context.Context, clientID, clientSecret string) (ok bool, err error)
+	// ClientSecrets should return the list of valid client secrets for the
+	// given client.
+	ClientSecrets(_ context.Context, clientID string) ([]string, error)
 	// ValidateRedirectURI should return the list of valid redirect URIs. They
 	// will be compared for an exact match, with the exception of loopback
 	// addresses, which can have a variable port

@@ -2,6 +2,7 @@ package oauth2as
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -162,14 +163,23 @@ func (s *Server) validateTokenClient(ctx context.Context, req *oauth2.TokenReque
 		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
 	}
 
-	// validate the client
-	cok, err := s.config.Clients.ValidateClientSecret(ctx, req.ClientID, req.ClientSecret)
+	secrets, err := s.config.Clients.ClientSecrets(ctx, req.ClientID)
 	if err != nil {
-		return &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to check client id & secret", Cause: err}
-
+		return &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get client secrets", Cause: err}
 	}
-	if !cok {
+	if len(secrets) == 0 {
 		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "Invalid client secret"}
+	}
+
+	var matchFound int32
+	for _, secret := range secrets {
+		matchFound |= int32(subtle.ConstantTimeCompare([]byte(secret), []byte(req.ClientSecret)))
+	}
+	if matchFound != 1 {
+		return &oauth2.TokenError{
+			ErrorCode:   oauth2.TokenErrorCodeUnauthorizedClient,
+			Description: "Invalid client secret",
+		}
 	}
 
 	return nil
