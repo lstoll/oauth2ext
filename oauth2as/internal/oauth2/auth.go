@@ -87,11 +87,17 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 
 	}
 
+	var scopes []string
+	trimmedScope := strings.TrimSpace(scope)
+	if trimmedScope != "" {
+		scopes = strings.Split(trimmedScope, " ")
+	}
+
 	return &AuthRequest{
 		ClientID:      cid,
 		RedirectURI:   ruri,
 		State:         state,
-		Scopes:        strings.Split(strings.TrimSpace(scope), " "),
+		Scopes:        scopes,
 		ResponseType:  rt,
 		Raw:           req.Form,
 		CodeChallenge: codeChallenge,

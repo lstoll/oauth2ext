@@ -1,0 +1,15 @@
+edition = "2023";
+
+package lds.li.oauth2ext.oauth2as.internal.token;
+
+import "google/protobuf/go_features.proto";
+
+option go_package = "lds.li/oauth2ext/oauth2as/internal/token";
+option features.(pb.go).api_level = API_OPAQUE;
+
+message TokenData {
+  string grant_id = 1;
+  string user_id = 2;
+  string token_id = 3;
+  bytes secret = 4;
+}

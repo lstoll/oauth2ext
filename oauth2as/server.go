@@ -14,18 +14,13 @@ import (
 )
 
 const (
-	// DefaultAuthValidityTime is used if the AuthValidityTime is not
-	// configured.
-	DefaultAuthValidityTime = 10 * time.Minute
 	// DefaultCodeValidityTime is used if the CodeValidityTime is not
 	// configured.
-	DefaultCodeValidityTime = 60 * time.Second
+	DefaultCodeValidityTime = 1 * time.Minute
 	// DefaultIDTokenValidity is the default IDTokenValidity time.
 	DefaultIDTokenValidity = 1 * time.Hour
-	// DefaultsAccessTokenValidity is the default AccessTokenValdity time.
+	// DefaultsAccessTokenValidity is the default AccessTokenValidity time.
 	DefaultsAccessTokenValidity = 1 * time.Hour
-	// DefaultMaxRefreshTime is the default value sessions are refreshable for.
-	DefaultMaxRefreshTime = 30 * 24 * time.Hour
 )
 
 // Config is used to set the configuration for creating a server instance.
@@ -53,28 +48,27 @@ type Config struct {
 	TokenHandler    TokenHandler
 	UserinfoHandler UserinfoHandler
 
-	// AuthValidityTime is the maximum time an authorization flow/AuthID is
-	// valid. This is the time from Starting to Finishing the authorization. The
-	// optimal time here will be application specific, and should encompass how
-	// long the app expects a user to complete the "upstream" authorization
-	// process. Defaults to DefaultAuthValidityTime
-	AuthValidityTime time.Duration
 	// CodeValidityTime is the maximum time the authorization code is valid,
 	// before it is exchanged for a token (code flow). This should be a short
-	// value, as the exhange should generally not take long. Defaults to DefaultCodeValidityTime.
+	// value, as the exchange should generally not take long. Defaults to
+	// DefaultCodeValidityTime.
 	CodeValidityTime time.Duration
 	// IDTokenValidity sets the default validity for issued ID tokens. This can
 	// be overridden on a per-request basis.
 	IDTokenValidity time.Duration
 	// AccessTokenValidity sets the default validity for issued access tokens.
 	// This can be overridden on a per-request basis. Must be equal or less to
-	// the IDTokenValitity time.
+	// the IDTokenValidity time.
 	AccessTokenValidity time.Duration
 	// MaxRefreshTime sets the longest time a session can be refreshed for, from
 	// the time it was created. This can be overridden on a per-request basis.
-	// Defaults to DefaultMaxRefreshTime. Any refesh token may be considered
-	// valid up until this time.
+	// If 0, refresh tokens will never be issued. This is the default.
 	MaxRefreshTime time.Duration
+	// RefreshTokenRotationGracePeriod is the time window where an old refresh
+	// token remains valid after being rotated. This helps handle network
+	// failures where the client might retry with the old token. Defaults to 0
+	// (no grace period).
+	RefreshTokenRotationGracePeriod time.Duration
 }
 
 type Server struct {
@@ -125,14 +119,28 @@ func NewServer(c Config) (*Server, error) {
 	if c.IDTokenValidity == 0 {
 		c.IDTokenValidity = DefaultIDTokenValidity
 	}
-	if c.AuthValidityTime == 0 {
-		c.AuthValidityTime = DefaultAuthValidityTime
-	}
 	if c.CodeValidityTime == 0 {
 		c.CodeValidityTime = DefaultCodeValidityTime
 	}
-	if c.MaxRefreshTime == 0 {
-		c.MaxRefreshTime = DefaultMaxRefreshTime
+
+	// Validate token validity times
+	if c.AccessTokenValidity < 0 {
+		return nil, fmt.Errorf("access token validity must be positive")
+	}
+	if c.IDTokenValidity < 0 {
+		return nil, fmt.Errorf("ID token validity must be positive")
+	}
+	if c.CodeValidityTime < 0 {
+		return nil, fmt.Errorf("code validity time must be positive")
+	}
+	if c.MaxRefreshTime < 0 {
+		return nil, fmt.Errorf("max refresh time must be positive")
+	}
+	if c.RefreshTokenRotationGracePeriod < 0 {
+		return nil, fmt.Errorf("refresh token rotation grace period must be positive or zero")
+	}
+	if c.AccessTokenValidity > c.IDTokenValidity {
+		return nil, fmt.Errorf("access token validity (%v) must be equal to or less than ID token validity (%v)", c.AccessTokenValidity, c.IDTokenValidity)
 	}
 
 	svr := &Server{

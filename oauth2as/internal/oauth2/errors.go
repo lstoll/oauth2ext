@@ -75,8 +75,7 @@ type HTTPError struct {
 	// Message is presented to the user, so this should be considered.
 	// if it's not set, "Internal error" will be used.
 	Message string
-	// cause message is presented in the Error() output, so it should be used
-	// for internal text
+	// CauseMsg is included in Error() output and can contain internal details.
 	CauseMsg string
 	Cause    error
 	// WWWAuthenticate is passed in the appropriate header field in the response
@@ -208,7 +207,7 @@ type BearerError struct {
 	Description string
 }
 
-// String encodes the error in a format suitible for including in a www-authenticate header
+// String encodes the error in a format suitable for including in a www-authenticate header
 func (b *BearerError) String() string {
 	ret := []string{}
 	if b.Realm != "" {
@@ -283,7 +282,7 @@ type TokenError struct {
 	// 	client
 	WWWAuthenticate string `json:"-"`
 	// Cause wraps any upstream error that resulted in this token being issued,
-	// if this error should be unrwappable
+	// if this error should be unwrappable
 	Cause error `json:"-"`
 }
 

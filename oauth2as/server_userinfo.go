@@ -49,7 +49,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// TODO - scopes or audience check on the token?
+	// TODO: Implement scope and audience validation on the access token
 
 	atJWT, err := s.verifyAccessToken(authSp[1])
 	if err != nil {
@@ -76,7 +76,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	// TODO - if not set, we should just not handle userinfo.
+	// TODO: Return an error if UserinfoHandler is not configured
 	uiresp, err := s.config.UserinfoHandler(req.Context(), uireq)
 	if err != nil {
 		herr := &oauth2.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error in user handler"}
@@ -89,7 +89,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// TODO - pre-fill the identity parts that use fixed server values.
+	// TODO: Pre-populate standard claims (iss, aud, etc.) in the identity response
 
 	if err := json.NewEncoder(w).Encode(uiresp.Identity); err != nil {
 		_ = oauth2.WriteError(w, req, err)

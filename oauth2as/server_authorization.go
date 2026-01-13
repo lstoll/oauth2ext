@@ -2,50 +2,42 @@ package oauth2as
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 
-	"github.com/google/uuid"
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
-	"lds.li/oauth2ext/oauth2as/internal/token"
 )
 
 type AuthRequest struct {
 	// ClientID is the client ID that is requesting authentication.
-	ClientID string
+	ClientID string `json:"clientID,omitzero"`
 	// RedirectURI the client specified. This is an OPTIONAL field, if not
 	// passed will be set to the zero value. If provided, it will have been
 	// validated.
-	RedirectURI string
+	RedirectURI string `json:"redirectURI,omitzero"`
 	// State is the state value that was passed in the request.
-	State string
+	State string `json:"state,omitzero"`
 	// Scopes is the list of scopes that the client is requesting.
-	Scopes []string
+	Scopes []string `json:"scopes,omitzero"`
 	// CodeChallenge is the PKCE code challenge. If it is provided, it will be
 	// S256 format. If not provided, it will be an empty string.
-	CodeChallenge string
+	CodeChallenge string `json:"codeChallenge,omitzero"`
 	// ACRValues is the list of ACR values that the client is requesting.
-	ACRValues []string
+	ACRValues []string `json:"acrValues,omitzero"`
 
 	// Raw is the raw URL values that were passed in the request.
-	Raw url.Values
+	Raw url.Values `json:"raw,omitzero"`
 }
 
 func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
-	// Note - we don't strictly handle errors as the spec says. We always return
-	// them to the user to deal with, and never redirect back. Maybe we should
-	// do that at some point, but I'm leaning towards not.
+	// Note: Error handling deviates from the spec - errors are returned directly
+	// rather than redirected to the client's redirect_uri.
+	// TODO - consider if we should fix this.
 	authreq, err := oauth2.ParseAuthRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse auth request: %w", err)
-	}
-
-	redir, err := url.Parse(authreq.RedirectURI)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse redirect URI %s: %w", authreq.RedirectURI, err)
 	}
 
 	cidok, err := s.config.Clients.IsValidClientID(req.Context(), authreq.ClientID)
@@ -61,23 +53,16 @@ func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
 		return nil, fmt.Errorf("error getting redirect URIs for client ID %s: %w", authreq.ClientID, err)
 	}
 
-	// Handle the case where no redirect URI is provided
-	if authreq.RedirectURI == "" {
-		if len(redirs) != 1 {
-			return nil, fmt.Errorf("client ID %s has multiple redirect URIs, but none were provided", authreq.ClientID)
-		}
-		// Use the single registered redirect URI
-		authreq.RedirectURI = redirs[0]
-		// Re-parse the redirect URI since we changed it
-		redir, err = url.Parse(authreq.RedirectURI)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse redirect URI %s: %w", authreq.RedirectURI, err)
-		}
-	} else {
-		// Validate the provided redirect URI
-		if !isValidRedirectURI(authreq.RedirectURI, redirs) {
-			return nil, fmt.Errorf("redirect URI %s is not valid for client ID %s", authreq.RedirectURI, authreq.ClientID)
-		}
+	// Validate and resolve the redirect URI
+	validatedRedirectURI, err := validateAndResolveRedirectURI(authreq.RedirectURI, redirs, authreq.ClientID)
+	if err != nil {
+		return nil, err
+	}
+	authreq.RedirectURI = validatedRedirectURI
+
+	redir, err := url.Parse(authreq.RedirectURI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse redirect URI %s: %w", authreq.RedirectURI, err)
 	}
 
 	switch authreq.ResponseType {
@@ -110,14 +95,14 @@ type AuthGrant struct {
 	// UserID is the user ID that was granted access. This is used to form the subject
 	// claim, and is provided on subsequent actions.
 	UserID string
-	// Metadata is arbitraty metadata that can be stored with the grant. Can be
+	// Metadata is arbitrary metadata that can be stored with the grant. Can be
 	// used for auditing or tracking other information that is associated with
 	// the grant. This is not sensitive, and can be accessed at any time.
-	Metadata map[string]string
+	Metadata []byte
 	// EncryptedMetadata is the encrypted metadata that can be stored with the
 	// grant. This is only available to token callbacks. Can be used to store
 	// sensitive, grant-specific information like upstream auth tokens.
-	EncryptedMetadata map[string]string
+	EncryptedMetadata []byte
 }
 
 func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI string, _ error) {
@@ -128,56 +113,40 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		return "", fmt.Errorf("auth request is required")
 	}
 
-	grantID := uuid.New()
-
-	authCode := token.New(tokenUsageAuthCode)
+	expiresAt := s.now().Add(s.config.MaxRefreshTime)
+	if s.config.MaxRefreshTime == 0 {
+		expiresAt = s.now().Add(s.config.CodeValidityTime)
+	}
 
 	sg := &StoredGrant{
-		ID:            grantID,
 		UserID:        grant.UserID,
 		ClientID:      grant.Request.ClientID,
 		GrantedScopes: grant.GrantedScopes,
-		AuthCode:      authCode.Stored(),
 		Request:       grant.Request,
 		GrantedAt:     s.now(),
-		ExpiresAt:     s.now().Add(s.config.CodeValidityTime),
+		ExpiresAt:     expiresAt, // Grant has absolute lifetime
 		Metadata:      grant.Metadata,
 	}
-	if grant.EncryptedMetadata != nil {
-		emdjson, err := json.Marshal(grant.EncryptedMetadata)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal metadata: %w", err)
-		}
-		encryptedMetadata, err := authCode.Encrypt(string(emdjson), grantID.String())
-		if err != nil {
-			return "", fmt.Errorf("failed to encrypt metadata: %w", err)
-		}
-		sg.EncryptedMetadata = encryptedMetadata
+
+	loadedGrant := &loadedAuthCodeGrant{
+		grant:             sg,
+		decryptedMetadata: grant.EncryptedMetadata,
 	}
 
-	if err := s.config.Storage.CreateGrant(ctx, sg); err != nil {
-		return "", fmt.Errorf("failed to create grant: %w", err)
+	_, authCodeString, err := s.putGrantWithAuthCode(ctx, loadedGrant, s.now().Add(s.config.CodeValidityTime))
+	if err != nil {
+		return "", fmt.Errorf("failed to put grant with auth code: %w", err)
 	}
 
-	// Handle the case where no redirect URI is provided
+	// Validate and resolve the redirect URI
 	redirs, err := s.config.Clients.RedirectURIs(ctx, grant.Request.ClientID)
 	if err != nil {
 		return "", fmt.Errorf("error getting redirect URIs for client ID %s: %w", grant.Request.ClientID, err)
 	}
 
-	var redirURI string
-	if grant.Request.RedirectURI == "" {
-		if len(redirs) != 1 {
-			return "", fmt.Errorf("client ID %s has multiple redirect URIs, but none were provided", grant.Request.ClientID)
-		}
-		// Use the single registered redirect URI
-		redirURI = redirs[0]
-	} else {
-		// Validate the provided redirect URI
-		if !isValidRedirectURI(grant.Request.RedirectURI, redirs) {
-			return "", fmt.Errorf("redirect URI %s is not valid for client ID %s", grant.Request.RedirectURI, grant.Request.ClientID)
-		}
-		redirURI = grant.Request.RedirectURI
+	redirURI, err := validateAndResolveRedirectURI(grant.Request.RedirectURI, redirs, grant.Request.ClientID)
+	if err != nil {
+		return "", err
 	}
 
 	redir, err := url.Parse(redirURI)
@@ -188,8 +157,28 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 	codeResp := &oauth2.CodeAuthResponse{
 		RedirectURI: redir,
 		State:       grant.Request.State,
-		Code:        authCode.User(),
+		Code:        authCodeString,
 	}
 
 	return codeResp.ToRedirectURI().String(), nil
+}
+
+// validateAndResolveRedirectURI validates the provided redirect URI against the
+// list of registered redirects for a client. If no redirect URI is provided and
+// the client has exactly one registered redirect, it returns that redirect.
+// Otherwise, it validates that the provided redirect is in the registered list.
+func validateAndResolveRedirectURI(redirectURI string, registeredRedirects []string, clientID string) (string, error) {
+	if redirectURI == "" {
+		if len(registeredRedirects) != 1 {
+			return "", fmt.Errorf("client ID %s has multiple redirect URIs, but none were provided", clientID)
+		}
+		// Use the single registered redirect URI
+		return registeredRedirects[0], nil
+	}
+
+	// Validate the provided redirect URI
+	if !isValidRedirectURI(redirectURI, registeredRedirects) {
+		return "", fmt.Errorf("redirect URI %s is not valid for client ID %s", redirectURI, clientID)
+	}
+	return redirectURI, nil
 }

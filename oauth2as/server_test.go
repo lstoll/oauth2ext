@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/oauth2as/internal"
@@ -211,15 +210,12 @@ func TestCodeToken(t *testing.T) {
 
 	t.Run("Should issue different tokens for different algorithms", func(t *testing.T) {
 		o := newOIDC()
-		newToken := token.New(tokenUsageAuthCode)
 
 		// Create a StoredGrant with the auth code
 		grant := &StoredGrant{
-			ID:            uuid.New(),
 			UserID:        "testsub",
 			ClientID:      es256ClientID,
 			GrantedScopes: []string{oidc.ScopeOfflineAccess},
-			AuthCode:      newToken.Stored(),
 			GrantedAt:     time.Now(),
 			ExpiresAt:     time.Now().Add(1 * time.Minute),
 			Request: &AuthRequest{
@@ -230,13 +226,30 @@ func TestCodeToken(t *testing.T) {
 			},
 		}
 
-		if err := o.config.Storage.CreateGrant(context.Background(), grant); err != nil {
+		grantID, err := o.config.Storage.CreateGrant(context.Background(), grant)
+		if err != nil {
 			t.Fatal(err)
 		}
 
+		newToken := token.New(tokenUsageAuthCode, grantID, grant.UserID)
+		authCodeID := newUUIDv4()
+
+		// Create token entry for the auth code
+		err = o.config.Storage.CreateAuthCode(context.Background(), grant.UserID, grantID, authCodeID, &StoredAuthCode{
+			Code:             newToken.Stored(),
+			GrantID:          grantID,
+			UserID:           grant.UserID,
+			ValidUntil:       time.Now().Add(1 * time.Minute),
+			StorageExpiresAt: time.Now().Add(1 * time.Minute),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		authCodeStr := newToken.ToUser(authCodeID)
+
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeAuthorizationCode,
-			Code:         newToken.User(),
+			Code:         authCodeStr,
 			RedirectURI:  es256ClientRedirect,
 			ClientID:     es256ClientID,
 			ClientSecret: es256ClientSecret,
@@ -324,7 +337,6 @@ func TestRefreshToken(t *testing.T) {
 					},
 				},
 
-				AuthValidityTime: 1 * time.Minute,
 				CodeValidityTime: 1 * time.Minute,
 				MaxRefreshTime:   6 * time.Hour,
 			},
@@ -367,7 +379,7 @@ func TestRefreshToken(t *testing.T) {
 		}
 
 		// march to the future, when we should be expired
-		o.now = func() time.Time { return time.Now().Add(1 * time.Hour) }
+		o.now = func() time.Time { return time.Now().Add(7 * time.Hour) }
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeRefreshToken,
@@ -600,38 +612,44 @@ func testSignerVerifier(t *testing.T) (AlgorithmSigner, jwt.Verifier) {
 }
 
 func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
-	newToken := token.New(tokenUsageRefresh)
-	refreshToken = newToken.User()
-
 	// Create a StoredGrant with the refresh token
 	grant := &StoredGrant{
-		ID:            uuid.New(),
 		UserID:        "testsub",
 		ClientID:      "client-id",
 		GrantedScopes: []string{oidc.ScopeOfflineAccess},
-		RefreshToken:  newToken.Stored(),
 		GrantedAt:     time.Now(),
 		ExpiresAt:     time.Now().Add(60 * time.Minute),
 	}
 
-	if err := smgr.CreateGrant(context.Background(), grant); err != nil {
+	grantID, err := smgr.CreateGrant(context.Background(), grant)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	return refreshToken
+	newToken := token.New(tokenUsageRefresh, grantID, grant.UserID)
+	refreshTokenID := newUUIDv4()
+
+	// Create token entry for the refresh token
+	err = smgr.CreateRefreshToken(context.Background(), grant.UserID, grantID, refreshTokenID, &StoredRefreshToken{
+		Token:            newToken.Stored(),
+		GrantID:          grantID,
+		UserID:           grant.UserID,
+		ValidUntil:       time.Now().Add(60 * time.Minute),
+		StorageExpiresAt: time.Now().Add(60 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return newToken.ToUser(refreshTokenID)
 }
 
 func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
-	newToken := token.New(tokenUsageAuthCode)
-	code := newToken.User()
-
 	// Create a StoredGrant with the auth code
 	grant := &StoredGrant{
-		ID:            uuid.New(),
 		UserID:        "testsub",
 		ClientID:      "client-id",
 		GrantedScopes: []string{oidc.ScopeOfflineAccess},
-		AuthCode:      newToken.Stored(),
 		GrantedAt:     time.Now(),
 		ExpiresAt:     time.Now().Add(1 * time.Minute),
 		Request: &AuthRequest{
@@ -642,11 +660,27 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		},
 	}
 
-	if err := smgr.CreateGrant(context.Background(), grant); err != nil {
+	grantID, err := smgr.CreateGrant(context.Background(), grant)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	return code
+	newToken := token.New(tokenUsageAuthCode, grantID, grant.UserID)
+	authCodeID := newUUIDv4()
+
+	// Create token entry for the auth code
+	err = smgr.CreateAuthCode(context.Background(), grant.UserID, grantID, authCodeID, &StoredAuthCode{
+		Code:             newToken.Stored(),
+		GrantID:          grantID,
+		UserID:           grant.UserID,
+		ValidUntil:       time.Now().Add(1 * time.Minute),
+		StorageExpiresAt: time.Now().Add(1 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return newToken.ToUser(authCodeID)
 }
 
 type staticClient struct {

@@ -2,227 +2,284 @@ package oauth2as
 
 import (
 	"context"
-	"crypto/subtle"
-	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"sync"
-
-	"github.com/google/uuid"
+	"time"
 )
 
-// MemStorage implements the Storage interface with an in-memory dataset.
-// All items return nil when not found.
+// MemStorage implements the Storage interface with an in-memory dataset. It
+// serializes and deserializes the data, to avoid things hanging on to
+// references to the original data.
 type MemStorage struct {
 	mu sync.RWMutex
-	// grants stores grants by their ID
-	grants map[uuid.UUID]*StoredGrant
-	// authCodes maps authorization codes to grant IDs
-	authCodes map[string]uuid.UUID
-	// refreshTokens maps refresh tokens to grant IDs
-	refreshTokens map[string]uuid.UUID
+	// grants stores grants by their ID as JSON
+	grants map[string]json.RawMessage
+	// authCodes stores authorization codes by their ID as JSON
+	authCodes map[string]json.RawMessage
+	// refreshTokens stores refresh tokens by their ID as JSON
+	refreshTokens map[string]json.RawMessage
 }
 
 // NewMemStorage creates a new in-memory storage instance.
 func NewMemStorage() *MemStorage {
 	return &MemStorage{
-		grants:        make(map[uuid.UUID]*StoredGrant),
-		authCodes:     make(map[string]uuid.UUID),
-		refreshTokens: make(map[string]uuid.UUID),
+		grants:        make(map[string]json.RawMessage),
+		authCodes:     make(map[string]json.RawMessage),
+		refreshTokens: make(map[string]json.RawMessage),
 	}
 }
 
-// CreateGrant stores a new grant in memory.
-func (m *MemStorage) CreateGrant(ctx context.Context, grant *StoredGrant) error {
+// CreateGrant stores a new grant in memory and returns its ID.
+func (m *MemStorage) CreateGrant(ctx context.Context, grant *StoredGrant) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Store the grant by ID
-	m.grants[grant.ID] = grant
+	id := newUUIDv4()
 
-	// Store auth code mapping if present
-	if len(grant.AuthCode) > 0 {
-		m.authCodes[hex.EncodeToString(grant.AuthCode)] = grant.ID
+	grantJSON, err := json.Marshal(grant)
+	if err != nil {
+		return "", err
 	}
 
-	// Store refresh token mapping if present
-	if len(grant.RefreshToken) > 0 {
-		m.refreshTokens[hex.EncodeToString(grant.RefreshToken)] = grant.ID
-	}
+	m.grants[id] = grantJSON
 
-	return nil
+	return id, nil
 }
 
 // UpdateGrant updates an existing grant in memory.
-func (m *MemStorage) UpdateGrant(ctx context.Context, grant *StoredGrant) error {
+func (m *MemStorage) UpdateGrant(ctx context.Context, id string, grant *StoredGrant) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Get the existing grant to update mappings
-	existing, exists := m.grants[grant.ID]
+	grantJSON, exists := m.grants[id]
 	if !exists {
-		return nil // Grant doesn't exist, nothing to update
+		return ErrNotFound
 	}
 
-	// Remove old auth code mapping if it changed
-	if len(existing.AuthCode) > 0 && (len(grant.AuthCode) == 0 || subtle.ConstantTimeCompare(existing.AuthCode, grant.AuthCode) == 0) {
-		delete(m.authCodes, hex.EncodeToString(existing.AuthCode))
+	var storedGrant StoredGrant
+	if err := json.Unmarshal(grantJSON, &storedGrant); err != nil {
+		return err
 	}
 
-	// Remove old refresh token mapping if it changed
-	if len(existing.RefreshToken) > 0 && (len(grant.RefreshToken) == 0 || subtle.ConstantTimeCompare(existing.RefreshToken, grant.RefreshToken) == 0) {
-		delete(m.refreshTokens, hex.EncodeToString(existing.RefreshToken))
+	if storedGrant.Version != grant.Version {
+		return ErrConcurrentUpdate
 	}
 
-	// Update the grant
-	m.grants[grant.ID] = grant
+	grant.Version++
 
-	// Add new auth code mapping if present
-	if len(grant.AuthCode) > 0 {
-		m.authCodes[hex.EncodeToString(grant.AuthCode)] = grant.ID
+	// Marshal to JSON for storage
+	newGrantJSON, err := json.Marshal(grant)
+	if err != nil {
+		return err
 	}
 
-	// Add new refresh token mapping if present
-	if len(grant.RefreshToken) > 0 {
-		m.refreshTokens[hex.EncodeToString(grant.RefreshToken)] = grant.ID
-	}
+	m.grants[id] = newGrantJSON
 
 	return nil
 }
 
-// ExpireGrant removes a grant from memory.
-func (m *MemStorage) ExpireGrant(ctx context.Context, id uuid.UUID) error {
+// ExpireGrant removes a grant from memory, and all associated tokens.
+func (m *MemStorage) ExpireGrant(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	grant, exists := m.grants[id]
-	if !exists {
-		return nil // Grant doesn't exist, nothing to expire
-	}
-
-	// Remove auth code mapping if present
-	if len(grant.AuthCode) > 0 {
-		delete(m.authCodes, hex.EncodeToString(grant.AuthCode))
-	}
-
-	// Remove refresh token mapping if present
-	if len(grant.RefreshToken) > 0 {
-		delete(m.refreshTokens, hex.EncodeToString(grant.RefreshToken))
-	}
-
-	// Remove the grant
 	delete(m.grants, id)
 
 	return nil
 }
 
-// GetGrant retrieves a grant by its ID. Returns nil if not found.
-func (m *MemStorage) GetGrant(ctx context.Context, id uuid.UUID) (*StoredGrant, error) {
+// GetGrant retrieves a grant by its ID. Returns ErrNotFound if not found.
+func (m *MemStorage) GetGrant(ctx context.Context, id string) (*StoredGrant, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	grant, exists := m.grants[id]
+	grantJSON, exists := m.grants[id]
 	if !exists {
-		return nil, nil
+		return nil, ErrNotFound
 	}
 
-	// Return a copy to prevent external modifications
-	return copyStoredGrant(grant), nil
+	var grant StoredGrant
+	if err := json.Unmarshal(grantJSON, &grant); err != nil {
+		return nil, err
+	}
+
+	if grant.ExpiresAt.Before(time.Now()) {
+		return nil, ErrNotFound
+	}
+
+	return &grant, nil
 }
 
-// GetGrantByAuthCode retrieves a grant by its authorization code. Returns nil if not found.
-func (m *MemStorage) GetGrantByAuthCode(ctx context.Context, authCode []byte) (*StoredGrant, error) {
+// CreateAuthCode stores a new authorization code in memory using the provided ID.
+func (m *MemStorage) CreateAuthCode(ctx context.Context, userID, grantID, codeID string, code *StoredAuthCode) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.authCodes[codeID]; exists {
+		return fmt.Errorf("auth code with ID %s already exists", codeID)
+	}
+
+	codeCopy := *code
+	codeCopy.GrantID = grantID
+	codeCopy.UserID = userID
+
+	// Marshal to JSON for storage
+	codeJSON, err := json.Marshal(&codeCopy)
+	if err != nil {
+		return err
+	}
+
+	m.authCodes[codeID] = codeJSON
+
+	return nil
+}
+
+// ExpireAuthCode removes an authorization code from memory.
+func (m *MemStorage) ExpireAuthCode(ctx context.Context, userID, grantID, codeID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	_, exists := m.authCodes[codeID]
+	if !exists {
+		return ErrNotFound
+	}
+	delete(m.authCodes, codeID)
+
+	return nil
+}
+
+// GetAuthCodeAndGrant retrieves an auth code and its associated grant by code ID.
+func (m *MemStorage) GetAuthCodeAndGrant(ctx context.Context, userID, grantID, codeID string) (*StoredAuthCode, *StoredGrant, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	grantID, exists := m.authCodes[hex.EncodeToString(authCode)]
+	codeJSON, exists := m.authCodes[codeID]
 	if !exists {
-		return nil, nil
+		return nil, nil, ErrNotFound
 	}
 
-	grant, exists := m.grants[grantID]
-	if !exists {
-		return nil, nil
+	var storedCode StoredAuthCode
+	if err := json.Unmarshal(codeJSON, &storedCode); err != nil {
+		return nil, nil, err
 	}
 
-	// Return a copy to prevent external modifications
-	return copyStoredGrant(grant), nil
+	// Return ErrNotFound if GrantID/UserID don't match (mimics DB lookup failure)
+	if storedCode.GrantID != grantID || storedCode.UserID != userID {
+		return nil, nil, ErrNotFound
+	}
+
+	grantJSON, exists := m.grants[storedCode.GrantID]
+	if !exists {
+		return nil, nil, ErrNotFound
+	}
+
+	var grant StoredGrant
+	if err := json.Unmarshal(grantJSON, &grant); err != nil {
+		return nil, nil, err
+	}
+
+	return &storedCode, &grant, nil
 }
 
-// GetGrantByRefreshToken retrieves a grant by its refresh token. Returns nil if not found.
-func (m *MemStorage) GetGrantByRefreshToken(ctx context.Context, refreshToken []byte) (*StoredGrant, error) {
+// CreateRefreshToken stores a new refresh token in memory using the provided ID.
+func (m *MemStorage) CreateRefreshToken(ctx context.Context, userID, grantID, tokenID string, token *StoredRefreshToken) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.refreshTokens[tokenID]; exists {
+		return fmt.Errorf("refresh token with ID %s already exists", tokenID)
+	}
+
+	tokenCopy := *token
+	tokenCopy.GrantID = grantID
+	tokenCopy.UserID = userID
+
+	// Marshal to JSON for storage
+	tokenJSON, err := json.Marshal(&tokenCopy)
+	if err != nil {
+		return err
+	}
+
+	m.refreshTokens[tokenID] = tokenJSON
+
+	return nil
+}
+
+// UpdateRefreshToken updates an existing refresh token in memory.
+func (m *MemStorage) UpdateRefreshToken(ctx context.Context, userID, grantID, tokenID string, token *StoredRefreshToken) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	tokenJSON, exists := m.refreshTokens[tokenID]
+	if !exists {
+		return ErrNotFound
+	}
+
+	var storedToken StoredRefreshToken
+	if err := json.Unmarshal(tokenJSON, &storedToken); err != nil {
+		return err
+	}
+
+	if storedToken.Version != token.Version {
+		return ErrConcurrentUpdate
+	}
+
+	token.Version++
+
+	// We could check if userID/grantID match existing, but simpler to just overwrite
+	newTokenJSON, err := json.Marshal(token)
+	if err != nil {
+		return err
+	}
+
+	m.refreshTokens[tokenID] = newTokenJSON
+
+	return nil
+}
+
+// ExpireRefreshToken removes a refresh token from memory.
+func (m *MemStorage) ExpireRefreshToken(ctx context.Context, userID, grantID, tokenID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	_, exists := m.refreshTokens[tokenID]
+	if !exists {
+		return ErrNotFound
+	}
+	delete(m.refreshTokens, tokenID)
+
+	return nil
+}
+
+// GetRefreshTokenAndGrant retrieves a refresh token and its associated grant by token ID.
+func (m *MemStorage) GetRefreshTokenAndGrant(ctx context.Context, userID, grantID, tokenID string) (*StoredRefreshToken, *StoredGrant, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	grantID, exists := m.refreshTokens[hex.EncodeToString(refreshToken)]
+	tokenJSON, exists := m.refreshTokens[tokenID]
 	if !exists {
-		return nil, nil
+		return nil, nil, ErrNotFound
 	}
 
-	grant, exists := m.grants[grantID]
+	var storedToken StoredRefreshToken
+	if err := json.Unmarshal(tokenJSON, &storedToken); err != nil {
+		return nil, nil, err
+	}
+
+	if storedToken.GrantID != grantID || storedToken.UserID != userID {
+		return nil, nil, ErrNotFound
+	}
+
+	grantJSON, exists := m.grants[storedToken.GrantID]
 	if !exists {
-		return nil, nil
+		return nil, nil, ErrNotFound
 	}
 
-	// Return a copy to prevent external modifications
-	return copyStoredGrant(grant), nil
-}
-
-// copyStoredGrant creates a deep copy of a StoredGrant to prevent external modifications.
-func copyStoredGrant(grant *StoredGrant) *StoredGrant {
-	if grant == nil {
-		return nil
+	var grant StoredGrant
+	if err := json.Unmarshal(grantJSON, &grant); err != nil {
+		return nil, nil, err
 	}
 
-	copied := &StoredGrant{
-		ID:            grant.ID,
-		UserID:        grant.UserID,
-		ClientID:      grant.ClientID,
-		GrantedScopes: make([]string, len(grant.GrantedScopes)),
-		GrantedAt:     grant.GrantedAt,
-		ExpiresAt:     grant.ExpiresAt,
-	}
-
-	// Copy slices
-	copy(copied.GrantedScopes, grant.GrantedScopes)
-
-	// Copy pointers
-	if len(grant.AuthCode) > 0 {
-		copied.AuthCode = make([]byte, len(grant.AuthCode))
-		copy(copied.AuthCode, grant.AuthCode)
-	}
-
-	if len(grant.RefreshToken) > 0 {
-		copied.RefreshToken = make([]byte, len(grant.RefreshToken))
-		copy(copied.RefreshToken, grant.RefreshToken)
-	}
-
-	// Copy AuthRequest if present
-	if grant.Request != nil {
-		copied.Request = &AuthRequest{
-			ClientID:      grant.Request.ClientID,
-			RedirectURI:   grant.Request.RedirectURI,
-			State:         grant.Request.State,
-			Scopes:        make([]string, len(grant.Request.Scopes)),
-			CodeChallenge: grant.Request.CodeChallenge,
-			ACRValues:     make([]string, len(grant.Request.ACRValues)),
-			Raw:           grant.Request.Raw, // This is a reference, but we'll keep it as is
-		}
-		copy(copied.Request.Scopes, grant.Request.Scopes)
-		copy(copied.Request.ACRValues, grant.Request.ACRValues)
-	}
-
-	// Copy metadata maps
-	if grant.Metadata != nil {
-		copied.Metadata = make(map[string]string, len(grant.Metadata))
-		for k, v := range grant.Metadata {
-			copied.Metadata[k] = v
-		}
-	}
-
-	// Copy encrypted metadata
-	if len(grant.EncryptedMetadata) > 0 {
-		copied.EncryptedMetadata = make([]byte, len(grant.EncryptedMetadata))
-		copy(copied.EncryptedMetadata, grant.EncryptedMetadata)
-	}
-
-	return copied
+	return &storedToken, &grant, nil
 }

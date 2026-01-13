@@ -1,4 +1,4 @@
-// Package oauth2as is an library implementation of helpers for implementing the
+// Package oauth2as is a library implementation of helpers for implementing the
 // core OIDC specification
 // (https://openid.net/specs/openid-connect-core-1_0.html). It aims to provide
 // the tools needed to build a compliant implementation of the specification.

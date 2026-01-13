@@ -143,6 +143,7 @@ func (h *OIDCConfigurationHandler) serveKeys(w http.ResponseWriter, req *http.Re
 	if err := h.getJWKS(req.Context()); err != nil {
 		slog.ErrorContext(req.Context(), "getting jwks", "err", err.Error())
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
+		return
 	}
 	jwks := h.currJWKS
 

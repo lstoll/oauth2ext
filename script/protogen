@@ -1,0 +1,15 @@
+#!/bin/bash
+set -e
+
+# Ensure we're at the root
+cd "$(dirname "$0")/.."
+
+PROTOBUF_MOD_DIR=$(go list -m -f '{{.Dir}}' google.golang.org/protobuf)
+
+protoc \
+  -I . \
+  -I "$PROTOBUF_MOD_DIR/src" \
+  --plugin=protoc-gen-go=script/protoc-gen-go \
+  --go_out=. \
+  --go_opt=paths=source_relative \
+  oauth2as/internal/token/token.proto
