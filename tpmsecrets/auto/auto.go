@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"lds.li/oauth2ext/clitoken"
+	"lds.li/oauth2ext/internal/platformsecrets"
 	"lds.li/oauth2ext/tpmsecrets"
 )
 
@@ -20,7 +20,7 @@ func init() {
 	}
 	tpmDir := filepath.Join(cacheDir, "lds-oauth2ext-tpm")
 
-	clitoken.RegisterPlatformSigner(func() (crypto.Signer, error) {
+	platformsecrets.RegisterPlatformSigner(func() (crypto.Signer, error) {
 		s := &tpmsecrets.TPMSigner{Dir: tpmDir}
 		if !tpmsecrets.IsTPMAvailable() {
 			return nil, fmt.Errorf("TPM not available")
@@ -28,5 +28,5 @@ func init() {
 		return s, nil
 	})
 
-	clitoken.RegisterCredentialCache(&tpmsecrets.TPMCredentialCache{Dir: tpmDir})
+	platformsecrets.RegisterCredentialCache(&tpmsecrets.TPMCredentialCache{Dir: tpmDir})
 }

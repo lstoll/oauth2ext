@@ -1,16 +1,22 @@
-//go:build darwin && cgo
+//go:build darwin
 
-package clitoken
+package keychainsecrets
 
 import (
 	"os"
 	"testing"
+
+	"lds.li/oauth2ext/internal/platformsecrets"
+)
+
+const (
+	issuer1         = "https://issuer1.test"
+	issuer1ClientID = "clientID"
 )
 
 func TestKeychainCredentialCache(t *testing.T) {
-	// This test requires access to macOS Keychain
-	if os.Getenv("TEST_KEYCHAIN_CREDENTIAL_CACHE") == "" || os.Getenv("TEST_KEYCHAIN_CREDENTIAL_CACHE_EXISTING") != "" {
-		t.Skip("TEST_KEYCHAIN_CREDENTIAL_CACHE not set, or TEST_KEYCHAIN_CREDENTIAL_CACHE_EXISTING is set")
+	if os.Getenv("TEST_KEYCHAIN") == "" {
+		t.Skip("TEST_KEYCHAIN not set")
 		return
 	}
 
@@ -20,7 +26,7 @@ func TestKeychainCredentialCache(t *testing.T) {
 		t.Fatal("cache is not available")
 	}
 
-	testCache(t, cache)
+	platformsecrets.TestCache(t, cache)
 }
 
 func TestKeychainCredentialCacheExisting(t *testing.T) {

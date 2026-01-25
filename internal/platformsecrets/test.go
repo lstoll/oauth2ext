@@ -1,7 +1,6 @@
-package clitoken
+package platformsecrets
 
 import (
-	"os"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -10,36 +9,12 @@ import (
 	"lds.li/oauth2ext/tokencache"
 )
 
-func TestKeychainCLICredentialCache(t *testing.T) {
-	// This test requires access to macOS Keychain
-	if os.Getenv("TEST_KEYCHAIN_CLI_CREDENTIAL_CACHE") == "" {
-		t.Skip("TEST_KEYCHAIN_CLI_CREDENTIAL_CACHE not set")
-		return
-	}
-
-	cache := &KeychainCLICredentialCache{}
-
-	if !cache.Available() {
-		t.Fatal("cache is not available")
-	}
-
-	testCache(t, cache)
-}
-
-func TestMemoryWriteThroughCredentialCache(t *testing.T) {
-	cache := &MemoryWriteThroughCredentialCache{
-		CredentialCache: &NullCredentialCache{},
-	}
-
-	testCache(t, cache)
-}
-
 const (
 	issuer1         = "https://issuer1.test"
 	issuer1ClientID = "clientID"
 )
 
-func testCache(t *testing.T, cache tokencache.CredentialCache) {
+func TestCache(t *testing.T, cache tokencache.CredentialCache) {
 	for _, tc := range []struct {
 		name string
 		run  func(cache tokencache.CredentialCache) (*oauth2.Token, error)
