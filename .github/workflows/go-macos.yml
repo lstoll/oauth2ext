@@ -3,7 +3,7 @@ on: [push]
 jobs:
 
   build:
-    name: "Build (macOS) - CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}"
+    name: "Build (Go ${{ matrix.go }} darwin) - ${{ matrix.envs.CGO_ENABLED == '1' && 'CGO' || 'Pure Go' }}"
     runs-on: macos-latest
     strategy:
       # we use a matrix because the two test types don't interact well -
@@ -13,6 +13,7 @@ jobs:
         envs:
         - CGO_ENABLED: 0
         - CGO_ENABLED: 1
+        go: [stable] # go: [ stable, oldstable ]
     env:
       GOTOOLCHAIN: local
 
@@ -33,9 +34,12 @@ jobs:
       id: go
 
     - name: Get dependencies
-      run: go mod download
+      run: |
+        go mod download
+        cd tpmsecrets && go mod download && cd -
+        cd keychainsecrets && go mod download && cd -
 
-    - name: Build & Test
+    - name: Build & Test (oauth2ext)
       run: |
         go build ./...
         go test ./...
@@ -44,6 +48,25 @@ jobs:
         TEST_KEYCHAIN: 1
         TEST_CTK_IDENTITY: 1
 
+    - name: Build & Test (tpmsecrets)
+      working-directory: ./tpmsecrets
+      run: |
+        go build ./...
+        go test ./...
+      env:
+        CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
+
+    - name: Build & Test (keychainsecrets)
+      working-directory: ./keychainsecrets
+      run: |
+        go build ./...
+        go test ./...
+      env:
+        CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
+        TEST_KEYCHAIN: 1
+        TEST_CTK_IDENTITY: 1
+
+
     # The goal here is to test against the keychain. We expect the same binary
     # to be able to read existing data in repeated invocations, and a new binary
     # to not be able to, but also clean up without user interaction and store
@@ -51,21 +74,26 @@ jobs:
     # don't conflict with the direct keychain versions.
 
     - name: Build CLI Token test binary
-      run: go test -c ./clitoken
+      working-directory: ./keychainsecrets
+      run: go test -c .
       env:
         CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
 
     - name: Test CLI Token initial
-      run: ./clitoken.test -test.v -test.timeout=15s
+      working-directory: ./keychainsecrets
+      run: ./keychainsecrets.test -test.v -test.timeout=15s
       env:
         CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
+        TEST_KEYCHAIN: 1
         TEST_KEYCHAIN_CREDENTIAL_CACHE: 1
         TEST_KEYCHAIN_CLI_CREDENTIAL_CACHE: 1
 
     - name: Test CLI Token with existing entry
-      run: ./clitoken.test -test.v -test.timeout=15s
+      working-directory: ./keychainsecrets
+      run: ./keychainsecrets.test -test.v -test.timeout=15s
       env:
         CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
+        TEST_KEYCHAIN: 1
         TEST_KEYCHAIN_CREDENTIAL_CACHE_EXISTING: 1
         TEST_KEYCHAIN_CREDENTIAL_CACHE: 1
 
@@ -73,9 +101,10 @@ jobs:
     # for the keychain. So inject a new file to change this, and also indicate
     # the change.
     - name: Build modified CLI Token test binary
+      working-directory: ./keychainsecrets
       run: |
-        cat <<- EOF > clitoken/modify.go
-        package clitoken
+        cat <<- EOF > modify.go
+        package keychainsecrets
 
         import "log"
 
@@ -84,12 +113,13 @@ jobs:
         }
         EOF
 
-        go test -c ./clitoken
+        go test -c .
       env:
         CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
 
     - name: Re-test CLI token with modified binary
-      run: ./clitoken.test -test.v -test.timeout=15s
+      working-directory: ./keychainsecrets
+      run: ./keychainsecrets.test -test.v -test.timeout=15s
       env:
         CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
         TEST_KEYCHAIN_CREDENTIAL_CACHE: 1

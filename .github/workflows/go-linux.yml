@@ -1,0 +1,62 @@
+name: Go
+on: [push]
+jobs:
+
+  build:
+    name: "Build (Go ${{ matrix.go }} on Linux)"
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
+    strategy:
+      matrix:
+        go: [stable] # go: [ stable, oldstable ]
+
+    steps:
+
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v4
+
+    - name: Install swtpm
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y swtpm
+
+    - name: Set up Go ${{ matrix.go }}
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go }}
+      id: go
+
+    - name: Get dependencies
+      run: |
+        go mod download
+        cd tpmsecrets && go mod download && cd -
+        cd keychainsecrets && go mod download && cd -
+
+    - name: Test (oauth2ext)
+      run: go test ./...
+
+    - name: Test (tpmsecrets)
+      working-directory: ./tpmsecrets
+      run: go test ./...
+
+    - name: Test (keychainsecrets)
+      working-directory: ./keychainsecrets
+      run: go test ./...
+
+    - name: Lint (oauth2ext)
+      uses: golangci/golangci-lint-action@v8
+      with:
+        version: latest
+
+    - name: Lint (tpmsecrets)
+      uses: golangci/golangci-lint-action@v8
+      with:
+        version: latest
+        working-directory: tpmsecrets
+
+    - name: Lint (keychainsecrets)
+      uses: golangci/golangci-lint-action@v8
+      with:
+        version: latest
+        working-directory: keychainsecrets

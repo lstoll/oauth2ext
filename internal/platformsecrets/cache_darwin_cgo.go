@@ -1,6 +1,6 @@
 //go:build darwin && cgo
 
-package clitoken
+package platformsecrets
 
 import (
 	"bytes"

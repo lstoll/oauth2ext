@@ -1,0 +1,42 @@
+name: Go
+on: [push]
+jobs:
+
+  build:
+    name: "Build (Go ${{ matrix.go }} on Windows)"
+    runs-on: windows-latest
+    env:
+      GOTOOLCHAIN: local
+    strategy:
+      matrix:
+        go: [stable] # go: [ stable, oldstable ]
+
+    steps:
+
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v4
+
+    - name: Set up Go ${{ matrix.go }}
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go }}
+      id: go
+
+    - name: Get dependencies
+      run: |
+        go mod download
+        cd tpmsecrets && go mod download && cd -
+        cd keychainsecrets && go mod download && cd -
+
+    - name: Test (oauth2ext)
+      run: go test ./...
+
+    # TODO - this at least makes sure it compiles, but the actions runner
+    # doesn't have a TPM. Would be nice to have one that does.
+    - name: Test (tpmsecrets)
+      working-directory: ./tpmsecrets
+      run: go test ./...
+
+    - name: Test (keychainsecrets)
+      working-directory: ./keychainsecrets
+      run: go test ./...
