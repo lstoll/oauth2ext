@@ -6,7 +6,6 @@ import (
 	"crypto"
 	"errors"
 	"io"
-	"runtime"
 
 	"lds.li/keychain"
 )
@@ -14,17 +13,20 @@ import (
 const sepSignerLabel = "oauth2ext-cli-sep"
 
 type darwinSEPSigner struct {
-	identity keychain.Identity
+	identity *keychain.Identity
 	signer   crypto.Signer
 }
 
 var _ crypto.Signer = &darwinSEPSigner{}
 
 func NewSEPSigner() (crypto.Signer, error) {
-	identity, err := keychain.GetCTKIdentity(sepSignerLabel, nil)
+	identity, err := keychain.GetIdentity(keychain.IdentityQuery{
+		Label: sepSignerLabel,
+		Type:  keychain.IdentityQueryTypeCTK,
+	})
 	if err != nil {
-		var kcErr *keychain.ErrSecOSStatus
-		if !errors.As(err, &kcErr) || kcErr.Code() != keychain.ErrSecOSStatusCodeItemNotFound {
+		var kcErr *keychain.Error
+		if !errors.As(err, &kcErr) || kcErr.Code() != keychain.ErrorCodeItemNotFound {
 			return nil, err
 		}
 
@@ -35,7 +37,10 @@ func NewSEPSigner() (crypto.Signer, error) {
 		}
 
 		// Get the identity with signing capability
-		identity, err = keychain.GetCTKIdentity(sepSignerLabel, nil)
+		identity, err = keychain.GetIdentity(keychain.IdentityQuery{
+			Label: sepSignerLabel,
+			Type:  keychain.IdentityQueryTypeCTK,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -44,7 +49,6 @@ func NewSEPSigner() (crypto.Signer, error) {
 	// Get the signer from the identity
 	signer, err := identity.Signer()
 	if err != nil {
-		identity.Close()
 		return nil, err
 	}
 
@@ -52,10 +56,6 @@ func NewSEPSigner() (crypto.Signer, error) {
 		identity: identity,
 		signer:   signer,
 	}
-
-	runtime.AddCleanup(dss, func(identity keychain.Identity) {
-		identity.Close()
-	}, identity)
 
 	return dss, nil
 }
