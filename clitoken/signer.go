@@ -21,6 +21,12 @@ var (
 	}
 )
 
+// RegisterPlatformSigner registers a signer. This is intended to be called by
+// platform specific packages (e.g. tpmsecrets) in their init functions.
+func RegisterPlatformSigner(f func() (crypto.Signer, error)) {
+	platformSigners = append([]func() (crypto.Signer, error){f}, platformSigners...)
+}
+
 // BestPlatformSigner returns the most preferred available signer for the
 // platform and environment, to be used for signing DPoP proofs in CLI tools.
 func BestPlatformSigner() (crypto.Signer, error) {

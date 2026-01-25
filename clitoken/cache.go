@@ -21,6 +21,13 @@ var (
 	genericCaches = []tokencache.CredentialCache{&KeychainCLICredentialCache{}, &NullCredentialCache{}}
 )
 
+// RegisterCredentialCache registers a credential cache. This is intended to be
+// called by platform specific packages (e.g. tpmsecrets) in their init
+// functions.
+func RegisterCredentialCache(c tokencache.CredentialCache) {
+	platformCaches = append([]tokencache.CredentialCache{c}, platformCaches...)
+}
+
 type PassphrasePromptFunc func(prompt string) (passphrase string, err error)
 
 // BestCredentialCache returns the most preferred available credential client
