@@ -60,9 +60,9 @@ func (k *KeychainCredentialCache) Get(issuer, key string) (*oauth2.Token, error)
 		Account: string(accountB),
 	})
 	if err != nil {
-		var kcErr *keychain.ErrSecOSStatus
+		var kcErr *keychain.Error
 		if errors.As(err, &kcErr) {
-			if kcErr.Code() == keychain.ErrSecOSStatusCodeItemNotFound {
+			if kcErr.Code() == keychain.ErrorCodeItemNotFound {
 				// not found, just return nil
 				return nil, nil
 			}
@@ -124,8 +124,8 @@ func (k *KeychainCredentialCache) Set(issuer, key string, token *oauth2.Token) e
 		Service: service,
 		Account: string(accountB),
 	}); err != nil {
-		var kcErr *keychain.ErrSecOSStatus
-		if !errors.As(err, &kcErr) || kcErr.Code() != keychain.ErrSecOSStatusCodeItemNotFound {
+		var kcErr *keychain.Error
+		if !errors.As(err, &kcErr) || kcErr.Code() != keychain.ErrorCodeItemNotFound {
 			return fmt.Errorf("deleting existing item: %w", err)
 		}
 	}
@@ -163,9 +163,9 @@ func (k *KeychainCredentialCache) Delete(issuer, key string) error {
 		Account: string(accountB),
 	})
 	if err != nil {
-		var kcErr *keychain.ErrSecOSStatus
+		var kcErr *keychain.Error
 		if errors.As(err, &kcErr) {
-			if kcErr.Code() == keychain.ErrSecOSStatusCodeItemNotFound {
+			if kcErr.Code() == keychain.ErrorCodeItemNotFound {
 				return nil
 			}
 		}
@@ -196,9 +196,9 @@ func (k *KeychainCredentialCache) List() ([]KeychainListItem, error) {
 		Service: service,
 	})
 	if err != nil {
-		var kcErr *keychain.ErrSecOSStatus
+		var kcErr *keychain.Error
 		if errors.As(err, &kcErr) {
-			if kcErr.Code() == keychain.ErrSecOSStatusCodeItemNotFound {
+			if kcErr.Code() == keychain.ErrorCodeItemNotFound {
 				// no items found, just return empty list
 				return nil, nil
 			}
@@ -233,9 +233,9 @@ func (k *KeychainCredentialCache) DeleteAll() error {
 	if err := keychain.DeleteGenericPassword(keychain.GenericPasswordQuery{
 		Service: service,
 	}); err != nil {
-		var kcErr *keychain.ErrSecOSStatus
+		var kcErr *keychain.Error
 		if errors.As(err, &kcErr) {
-			if kcErr.Code() == keychain.ErrSecOSStatusCodeItemNotFound {
+			if kcErr.Code() == keychain.ErrorCodeItemNotFound {
 				return nil
 			}
 		}
