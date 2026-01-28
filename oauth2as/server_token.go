@@ -390,7 +390,15 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		rtUntil = s.now().Add(s.config.MaxRefreshTime)
 	}
 
+	// Update grant expiration based on refresh token validity time
 	loadedGrant.grant.ExpiresAt = rtUntil
+	// Save the grant immediately so buildTokenResponse can use the updated ExpiresAt for capping
+	if err := s.config.Storage.UpdateGrant(ctx, loadedGrant.grantID, loadedGrant.grant); err != nil {
+		if errors.Is(err, ErrConcurrentUpdate) {
+			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+		}
+		return nil, fmt.Errorf("failed to update grant expiration: %w", err)
+	}
 
 	trresp, newRTID, err := s.buildTokenResponse(ctx, alg, loadedGrant, tresp, isDPoPBound)
 	if errors.Is(err, ErrConcurrentUpdate) {
