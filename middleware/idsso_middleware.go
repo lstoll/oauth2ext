@@ -1,4 +1,4 @@
-package oidcmiddleware
+package middleware
 
 import (
 	"context"
@@ -9,7 +9,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/claims"
 	"lds.li/oauth2ext/oidc"
@@ -22,32 +21,9 @@ const loginStateExpiresAfter = 5 * time.Minute
 // keys from the issuer.
 const DefaultKeyRefreshIterval = 1 * time.Hour
 
-type tokenContextKey struct{}
-
 var baseLogAttr = slog.String("component", "oidc-middleware")
 
 func errAttr(err error) slog.Attr { return slog.String("err", err.Error()) }
-
-// SessionData contains the data this middleware needs to save/restore across
-// requests. This should be stored using a method that does not reveal the
-// contents to the end user in any way.
-type SessionData struct {
-	// Logins tracks state for in-progress logins.
-	Logins []SessionDataLogin `json:"logins,omitempty"`
-	// Token contains the issued token from a successful authentication flow.
-	Token *oidc.TokenWithID `json:"token,omitempty"`
-}
-
-type SessionDataLogin struct {
-	// State for an in-progress auth flow.
-	State string `json:"oidc_state,omitempty"`
-	// PKCEChallenge for the in-progress auth flow
-	PKCEChallenge string `json:"pkce_challenge,omitempty"`
-	// ReturnTo is where we should navigate to at the end of the flow
-	ReturnTo string `json:"oidc_return_to,omitempty"`
-	// Expires is when this can be discarded, Unix time.
-	Expires int `json:"expires,omitempty"`
-}
 
 // SessionStore are used for managing state across requests.
 type SessionStore interface {
@@ -60,18 +36,18 @@ type SessionStore interface {
 	SaveOIDCSession(http.ResponseWriter, *http.Request, *SessionData) error
 }
 
-// Handler wraps another http.Handler, protecting it with OIDC authentication.
-type Handler struct {
-	// Provider is the OIDC provider we verify tokens against. Required.
+// IDSSOHandler wraps another http.Handler, protecting it with web-based OIDC ID
+// SSO. The handler is for a single client ID. IDClaims is the type of decoded
+// ID token claims (e.g. *claims.VerifiedID).
+type IDSSOHandler[IDClaims claims.Claimable] struct {
+	Verifier *claims.Verifier[IDClaims]
+	// Validator validates ID tokens for this handler's client ID. Required.
+	Validator claims.Validator[IDClaims]
+	// Provider is used for PKCE (CodeChallengeMethodsSupported). Set by
+	// NewIDSSOHandlerFromDiscovery when using discovery.
 	Provider *provider.Provider
-	// OAuth2Config are the options used for the oauth2 flow. Required unless a
-	// OAuth2ConfigSource is set.
+	// OAuth2Config are the options used for the oauth2 flow. Required.
 	OAuth2Config *oauth2.Config
-	// OAuth2ConfigSource is a function that can be used to dynamically generate
-	// the OAuth2Config. If set, it will be used instead of the OAuth2Config
-	// field. This can be used to dynamically replace the client secret or other
-	// options.
-	OAuth2ConfigSource func(context.Context) (oauth2.Config, error)
 	// AuthCodeOptions options that can be passed when creating the auth code
 	// URL. This can be used to request ACRs or other items.
 	AuthCodeOptions []oauth2.AuthCodeOption
@@ -85,39 +61,60 @@ type Handler struct {
 	BaseURL string
 }
 
-// NewFromDiscovery will construct a Handler by discovering the configuration
-// from the Issuer. If the sessStore is nil, Cookies will be used. The handler
-// can be customized after calling this.
-func NewFromDiscovery(ctx context.Context, sessStore SessionStore, issuer, clientID, clientSecret, redirectURL string) (*Handler, error) {
-	provider, err := provider.DiscoverOIDCProvider(ctx, issuer)
+// NewIDSSOHandlerFromDiscovery constructs a handler by discovering the
+// configuration from the issuer. If sessStore is nil, cookies will be used.
+// The handler can be customized after calling this.
+func NewIDSSOHandlerFromDiscovery(ctx context.Context, sessStore SessionStore, issuer, clientID, clientSecret, redirectURL string) (*IDSSOHandler[*claims.VerifiedID], error) {
+	prov, err := provider.DiscoverOIDCProvider(ctx, issuer)
 	if err != nil {
 		return nil, fmt.Errorf("discovering provider: %w", err)
+	}
+
+	verifier, err := claims.NewVerifier[*claims.VerifiedID](prov)
+	if err != nil {
+		return nil, fmt.Errorf("creating verifier: %w", err)
 	}
 
 	if sessStore == nil {
 		sessStore = &Cookiestore{}
 	}
 
-	return &Handler{
-		Provider: provider,
-		OAuth2Config: &oauth2.Config{
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
-			Endpoint:     provider.Endpoint(),
-			Scopes:       []string{oidc.ScopeOpenID},
-			RedirectURL:  redirectURL,
-		},
+	cfg := &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Endpoint:     prov.Endpoint(),
+		Scopes:       []string{oidc.ScopeOpenID},
+		RedirectURL:  redirectURL,
+	}
+	h := &IDSSOHandler[*claims.VerifiedID]{
+		Verifier:     verifier,
+		Validator:    claims.NewIDTokenValidator(&claims.IDTokenValidatorOpts{ClientID: &cfg.ClientID}),
+		Provider:     prov,
+		OAuth2Config: cfg,
 		SessionStore: sessStore,
-	}, nil
+	}
+	return h, nil
+}
+
+// NewFromDiscovery is an alias for NewIDSSOHandlerFromDiscovery for backward
+// compatibility. It returns a handler configured for standard OIDC ID claims
+// (*claims.VerifiedID).
+func NewFromDiscovery(ctx context.Context, sessStore SessionStore, issuer, clientID, clientSecret, redirectURL string) (*IDSSOHandler[*claims.VerifiedID], error) {
+	return NewIDSSOHandlerFromDiscovery(ctx, sessStore, issuer, clientID, clientSecret, redirectURL)
 }
 
 // Wrap returns an http.Handler that wraps the given http.Handler and
 // provides OIDC authentication.
-func (h *Handler) Wrap(next http.Handler) http.Handler {
+func (h *IDSSOHandler[IDClaims]) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h.SessionStore == nil {
 			slog.ErrorContext(r.Context(), "Uninitialized session store", baseLogAttr)
 			http.Error(w, "Uninitialized session store", http.StatusInternalServerError)
+			return
+		}
+		if h.Validator == nil {
+			slog.ErrorContext(r.Context(), "Uninitialized validator", baseLogAttr)
+			http.Error(w, "Uninitialized validator", http.StatusInternalServerError)
 			return
 		}
 		session, err := h.SessionStore.GetOIDCSession(r)
@@ -135,8 +132,9 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 				return
 			}
 
-			// Authentication successful
-			r = r.WithContext(context.WithValue(r.Context(), tokenContextKey{}, contextData{
+			// Authentication successful. Key by this handler instance so only
+			// this handler can retrieve the claims.
+			r = r.WithContext(context.WithValue(r.Context(), h, contextData{
 				token:    tok,
 				idclaims: idclaims,
 			}))
@@ -175,59 +173,55 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 	})
 }
 
-// authenticateExisting returns (claims, nil) if the user is authenticated,
-// (nil, error) if a fatal error occurs, or (nil, nil) if the user is not
-// authenticated but no fatal error occurred.
+// authenticateExisting returns (token, idClaims, nil) if the user is
+// authenticated, (nil, nil, error) if a fatal error occurs, or (nil, nil, nil)
+// if the user is not authenticated but no fatal error occurred.
 //
 // This function may modify the session if a token is refreshed, so it must be
 // saved afterward.
-func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*oauth2.Token, *jwt.VerifiedJWT) {
+func (h *IDSSOHandler[IDClaims]) authenticateExisting(r *http.Request, session *SessionData) (*oauth2.Token, IDClaims) {
 	ctx := r.Context()
 
 	if session.Token == nil {
-		return nil, nil
+		var zero IDClaims
+		return nil, zero
 	}
 
-	o2cfg, err := h.getOAuth2Config(ctx)
+	o2cfg, err := h.getOAuth2Config()
 	if err != nil {
-		return nil, nil
+		var zero IDClaims
+		return nil, zero
 	}
 
-	verifier, err := claims.NewIDTokenVerifier(h.Provider)
-	if err != nil {
-		return nil, nil
-	}
-
-	validator := claims.NewIDTokenValidator(&claims.IDTokenValidatorOpts{
-		ClientID: &o2cfg.ClientID,
-	})
-
-	// we always verify, as in the cookie store case the integrity of the data
+	// We always verify, as in the cookie store case the integrity of the data
 	// is not trusted.
-	verifiedID, err := verifier.VerifyAndDecodeToken(ctx, *session.Token.Token, validator)
+	idClaims, err := h.Verifier.VerifyAndDecodeToken(ctx, *session.Token.Token, h.Validator)
 	if err != nil {
 		// Attempt to refresh the token
 		if session.Token.RefreshToken == "" {
-			return nil, nil
+			var zero IDClaims
+			return nil, zero
 		}
 		token, err := o2cfg.TokenSource(ctx, session.Token.Token).Token()
 		if err != nil {
-			return nil, nil
+			var zero IDClaims
+			return nil, zero
 		}
 		session.Token = &oidc.TokenWithID{Token: token}
-		verifiedID, err = verifier.VerifyAndDecodeToken(ctx, *token, validator)
+		idClaims, err = h.Verifier.VerifyAndDecodeToken(ctx, *token, h.Validator)
 		if err != nil {
-			return nil, nil
+			var zero IDClaims
+			return nil, zero
 		}
 	}
 
-	// create a new token with refresh token stripped. We ultimtely don't want
+	// Create a new token with refresh token stripped. We ultimately don't want
 	// downstream consumers refreshing themselves, as it will likely invalidate
 	// ours. This should mainly be used during a HTTP request lifecycle too, so
 	// we would have done the job of refreshing if needed.
 	retTok := *session.Token.Token
 	retTok.RefreshToken = ""
-	return &retTok, verifiedID.JWT()
+	return &retTok, idClaims
 }
 
 // authenticateCallback returns (returnTo, nil) if the user is authenticated,
@@ -236,7 +230,7 @@ func (h *Handler) authenticateExisting(r *http.Request, session *SessionData) (*
 //
 // This function may modify the session if a token is authenticated, so it must be
 // saved afterward.
-func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (string, error) {
+func (h *IDSSOHandler[IDClaims]) authenticateCallback(r *http.Request, session *SessionData) (string, error) {
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
@@ -270,11 +264,11 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 	}
 
 	opts := h.AuthCodeOptions
-	if slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
+	if h.Provider != nil && slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
 		opts = append(opts, oauth2.VerifierOption(foundLogin.PKCEChallenge))
 	}
 
-	o2cfg, err := h.getOAuth2Config(ctx)
+	o2cfg, err := h.getOAuth2Config()
 	if err != nil {
 		return "", err
 	}
@@ -283,18 +277,7 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 		return "", err
 	}
 
-	// TODO(lstoll) do we want to verify the ID token here? was retrieved from a
-	// trusted source....
-	verifier, err := claims.NewIDTokenVerifier(h.Provider)
-	if err != nil {
-		return "", err
-	}
-
-	validator := claims.NewIDTokenValidator(&claims.IDTokenValidatorOpts{
-		ClientID: &o2cfg.ClientID,
-	})
-
-	if _, err := verifier.VerifyAndDecodeToken(ctx, *token, validator); err != nil {
+	if _, err := h.Verifier.VerifyAndDecodeToken(ctx, *token, h.Validator); err != nil {
 		return "", fmt.Errorf("verifying id_token failed: %w", err)
 	}
 
@@ -315,7 +298,7 @@ func (h *Handler) authenticateCallback(r *http.Request, session *SessionData) (s
 	return returnTo, nil
 }
 
-func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (string, error) {
+func (h *IDSSOHandler[IDClaims]) startAuthentication(r *http.Request, session *SessionData) (string, error) {
 	session.Token = nil
 
 	var (
@@ -325,7 +308,7 @@ func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (st
 	)
 
 	opts := h.AuthCodeOptions
-	if slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
+	if h.Provider != nil && slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
 		pkceChallenge = oauth2.GenerateVerifier()
 		opts = append(opts, oauth2.S256ChallengeOption(pkceChallenge))
 	}
@@ -340,46 +323,33 @@ func (h *Handler) startAuthentication(r *http.Request, session *SessionData) (st
 		Expires:       int(time.Now().Add(loginStateExpiresAfter).Unix()),
 	})
 
-	o2cfg, err := h.getOAuth2Config(r.Context())
+	o2cfg, err := h.getOAuth2Config()
 	if err != nil {
 		return "", err
 	}
 	return o2cfg.AuthCodeURL(state, opts...), nil
 }
 
-func (h *Handler) getOAuth2Config(ctx context.Context) (oauth2.Config, error) {
-	if h.OAuth2ConfigSource != nil {
-		return h.OAuth2ConfigSource(ctx)
-	}
+func (h *IDSSOHandler[IDClaims]) getOAuth2Config() (oauth2.Config, error) {
 	if h.OAuth2Config == nil {
-		return oauth2.Config{}, fmt.Errorf("no OAuth2Config or OAuth2ConfigSource provided")
+		return oauth2.Config{}, fmt.Errorf("no OAuth2Config provided")
 	}
 	return *h.OAuth2Config, nil
 }
 
 type contextData struct {
 	token    *oauth2.Token
-	idclaims *jwt.VerifiedJWT
+	idclaims interface{}
 }
 
-// IDClaimsFromContext returns the validated OIDC ID Claims from the given
-// request context.
-func IDClaimsFromContext(ctx context.Context) (*jwt.VerifiedJWT, bool) {
-	cd, ok := ctx.Value(tokenContextKey{}).(contextData)
+// IDClaimsFromContext returns the validated OIDC ID claims from the given
+// request context only if they were set by this handler instance.
+func (h *IDSSOHandler[IDClaims]) IDClaimsFromContext(ctx context.Context) (IDClaims, bool) {
+	cd, ok := ctx.Value(h).(contextData)
 	if !ok {
-		return nil, false
+		var zero IDClaims
+		return zero, false
 	}
-
-	return cd.idclaims, true
-}
-
-// OAuth2TokenFromContext returns the oauth2 token from the given request
-// context.
-func OAuth2TokenFromContext(ctx context.Context) (*oauth2.Token, bool) {
-	cd, ok := ctx.Value(tokenContextKey{}).(contextData)
-	if !ok {
-		return nil, false
-	}
-
-	return cd.token, true
+	idclaims, ok := cd.idclaims.(IDClaims)
+	return idclaims, ok
 }

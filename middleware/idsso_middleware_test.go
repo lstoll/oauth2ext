@@ -1,4 +1,4 @@
-package oidcmiddleware
+package middleware
 
 import (
 	"bytes"
@@ -17,6 +17,7 @@ import (
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/claims"
 	"lds.li/oauth2ext/internal"
 	"lds.li/oauth2ext/oidc"
 )
@@ -187,20 +188,6 @@ func (s *mockOIDCServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestMiddleware_HappyPath(t *testing.T) {
-	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		idt, ok := IDClaimsFromContext(r.Context())
-		if !ok {
-			http.Error(w, "no ID token in context", http.StatusInternalServerError)
-			return
-		}
-		sub, err := idt.Subject()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		_, _ = w.Write(fmt.Appendf(nil, "sub: %s", sub))
-	})
-
 	oidcServer, oidcHTTPServer := startMockOIDCServer(t)
 
 	httpServer := httptest.NewTLSServer(nil)
@@ -218,6 +205,20 @@ func TestMiddleware_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idt, ok := handler.IDClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, "no ID token in context", http.StatusInternalServerError)
+			return
+		}
+		sub, err := idt.Subject()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(fmt.Appendf(nil, "sub: %s", sub))
+	})
 
 	httpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// TODO - do we want a better way to do this, or should this basically
@@ -274,18 +275,9 @@ func TestMiddleware_HappyPath(t *testing.T) {
 }
 
 func TestContext(t *testing.T) {
-	var ( // Capture in handler
-		gotIDClaims *jwt.VerifiedJWT
+	var (
+		gotIDClaims *claims.VerifiedID
 	)
-	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		idclaims, ok := IDClaimsFromContext(r.Context())
-		if !ok {
-			t.Log("handler: no ID token in context")
-			http.Error(w, "no ID token in context", http.StatusInternalServerError)
-			return
-		}
-		gotIDClaims = idclaims
-	})
 
 	oidcServer, oidcHTTPServer := startMockOIDCServer(t)
 
@@ -304,6 +296,16 @@ func TestContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idclaims, ok := handler.IDClaimsFromContext(r.Context())
+		if !ok {
+			t.Log("handler: no ID token in context")
+			http.Error(w, "no ID token in context", http.StatusInternalServerError)
+			return
+		}
+		gotIDClaims = idclaims
+	})
 
 	httpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// TODO - do we want a better way to do this, or should this basically
