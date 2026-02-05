@@ -1,4 +1,4 @@
-package platformsecrets
+package clitoken
 
 import (
 	"crypto"
@@ -9,7 +9,8 @@ import (
 	"sync"
 )
 
-// MemSigner is a fallback signer, that exists for the process lifetime only.
+// MemSigner is a simple fallback signer, that exists for the process lifetime
+// only.
 type MemSigner struct {
 	key     crypto.Signer
 	keyOnce sync.Once

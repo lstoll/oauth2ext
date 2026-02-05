@@ -7,7 +7,7 @@ import (
 )
 
 var (
-	platformCaches  = []tokencache.CredentialCache{&MemCredentialCache{}}
+	platformCaches  = []tokencache.CredentialCache{}
 	platformSigners = []func() (crypto.Signer, error){}
 )
 
@@ -27,7 +27,7 @@ func BestCredentialCache() tokencache.CredentialCache {
 		}
 	}
 
-	return &MemCredentialCache{}
+	return nil
 }
 
 // RegisterPlatformSigner registers a signer. This is intended to be called by
@@ -38,14 +38,14 @@ func RegisterPlatformSigner(f func() (crypto.Signer, error)) {
 
 // BestPlatformSigner returns the most preferred available signer for the
 // platform and environment, to be used for signing DPoP proofs in CLI tools.
-func BestPlatformSigner() (crypto.Signer, error) {
+func BestPlatformSigner() crypto.Signer {
 	for _, s := range platformSigners {
 		signer, err := s()
 		if err != nil {
 			continue
 		}
-		return signer, nil
+		return signer
 	}
 
-	return &MemSigner{}, nil
+	return nil
 }

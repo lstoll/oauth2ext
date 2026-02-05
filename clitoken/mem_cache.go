@@ -1,4 +1,4 @@
-package platformsecrets
+package clitoken
 
 import (
 	"fmt"
@@ -8,7 +8,8 @@ import (
 	"lds.li/oauth2ext/tokencache"
 )
 
-// MemCredentialCache is a simple in-memory credential cache.
+// MemCredentialCache is a simple in-memory credential cache, that exists as a
+// fallback for the process lifetime only.
 type MemCredentialCache struct {
 	m   map[string]*oauth2.Token
 	mMu sync.RWMutex
