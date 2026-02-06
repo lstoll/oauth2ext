@@ -1,4 +1,4 @@
-package oidcmiddleware
+package middleware
 
 import (
 	"errors"
