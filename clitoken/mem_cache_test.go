@@ -1,7 +1,9 @@
-package platformsecrets
+package clitoken
 
 import (
 	"testing"
+
+	"lds.li/oauth2ext/internal/platformsecrets"
 )
 
 func TestMemoryWriteThroughCredentialCache(t *testing.T) {
@@ -11,5 +13,5 @@ func TestMemoryWriteThroughCredentialCache(t *testing.T) {
 		t.Fatal("cache is not available")
 	}
 
-	TestCache(t, cache)
+	platformsecrets.TestCache(t, cache)
 }
