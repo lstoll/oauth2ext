@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 )
@@ -103,6 +104,9 @@ type AuthGrant struct {
 	// grant. This is only available to token callbacks. Can be used to store
 	// sensitive, grant-specific information like upstream auth tokens.
 	EncryptedMetadata []byte
+	// ExpiresAt is the time at which the grant will expire. If zero, the
+	// default grant validity will be used to calculate this.
+	ExpiresAt time.Time
 }
 
 func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI string, _ error) {
@@ -113,9 +117,9 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		return "", fmt.Errorf("auth request is required")
 	}
 
-	expiresAt := s.now().Add(s.config.MaxRefreshTime)
-	if s.config.MaxRefreshTime == 0 {
-		expiresAt = s.now().Add(s.config.CodeValidityTime)
+	expiresAt := grant.ExpiresAt
+	if expiresAt.IsZero() {
+		expiresAt = s.now().Add(s.config.GrantValidity)
 	}
 
 	sg := &StoredGrant{

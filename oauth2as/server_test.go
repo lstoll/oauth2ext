@@ -337,8 +337,9 @@ func TestRefreshToken(t *testing.T) {
 					},
 				},
 
-				CodeValidityTime: 1 * time.Minute,
-				MaxRefreshTime:   6 * time.Hour,
+				CodeValidityTime:     1 * time.Minute,
+				RefreshTokenValidity: 6 * time.Hour,
+				GrantValidity:        6 * time.Hour,
 			},
 
 			now: time.Now,
@@ -378,8 +379,8 @@ func TestRefreshToken(t *testing.T) {
 			refreshToken = tresp.RefreshToken
 		}
 
-		// march to the future, when we should be expired
-		o.now = func() time.Time { return time.Now().Add(7 * time.Hour) }
+		// try again while we still should be within the expiry period.
+		o.now = func() time.Time { return time.Now().Add(5 * time.Hour) }
 
 		treq := &oauth2.TokenRequest{
 			GrantType:    oauth2.GrantTypeRefreshToken,
@@ -388,7 +389,26 @@ func TestRefreshToken(t *testing.T) {
 			ClientSecret: clientSecret,
 		}
 
-		_, err := o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
+		tresp, err := o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
+		if err != nil {
+			t.Fatalf("failed to refresh token while still in validity period: %v", err)
+		}
+		refreshToken = tresp.RefreshToken
+		if refreshToken == "" {
+			t.Fatal("refresh request should have returned a refresh token, but got none")
+		}
+
+		// march to the future, when we should be expired
+		o.now = func() time.Time { return time.Now().Add(7 * time.Hour) }
+
+		treq = &oauth2.TokenRequest{
+			GrantType:    oauth2.GrantTypeRefreshToken,
+			RefreshToken: refreshToken,
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+		}
+
+		_, err = o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
 		if te, ok := err.(*oauth2.TokenError); !ok || te.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
 			t.Errorf("expired session should have given invalid_grant, got: %v", te)
 		}
@@ -618,7 +638,7 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		ClientID:      "client-id",
 		GrantedScopes: []string{oidc.ScopeOfflineAccess},
 		GrantedAt:     time.Now(),
-		ExpiresAt:     time.Now().Add(60 * time.Minute),
+		ExpiresAt:     time.Now().Add(6 * time.Hour),
 	}
 
 	grantID, err := smgr.CreateGrant(context.Background(), grant)
@@ -634,8 +654,8 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		Token:            newToken.Stored(),
 		GrantID:          grantID,
 		UserID:           grant.UserID,
-		ValidUntil:       time.Now().Add(60 * time.Minute),
-		StorageExpiresAt: time.Now().Add(60 * time.Minute),
+		ValidUntil:       time.Now().Add(6 * time.Hour),
+		StorageExpiresAt: time.Now().Add(6 * time.Hour),
 	})
 	if err != nil {
 		t.Fatal(err)
