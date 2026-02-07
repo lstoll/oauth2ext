@@ -10,8 +10,6 @@ import (
 	"lds.li/keychain"
 )
 
-const sepSignerLabel = "oauth2ext-cli-sep"
-
 type darwinSEPSigner struct {
 	identity *keychain.Identity
 	signer   crypto.Signer
@@ -19,9 +17,15 @@ type darwinSEPSigner struct {
 
 var _ crypto.Signer = &darwinSEPSigner{}
 
-func NewSEPSigner() (crypto.Signer, error) {
+type sepSignerOpts struct{}
+
+type SepSignerOpt func(opts *sepSignerOpts)
+
+// NewSEPSigner returns a secure-enclave backed signer for the given label. If
+// one does not exist, a CTK identity will be created.
+func NewSEPSigner(label string, opts ...SepSignerOpt) (crypto.Signer, error) {
 	identity, err := keychain.GetIdentity(keychain.IdentityQuery{
-		Label: sepSignerLabel,
+		Label: label,
 		Type:  keychain.IdentityQueryTypeCTK,
 	})
 	if err != nil {
@@ -31,14 +35,14 @@ func NewSEPSigner() (crypto.Signer, error) {
 		}
 
 		// Identity doesn't exist, create it
-		_, err = keychain.CreateCTKIdentity(sepSignerLabel, keychain.CTKKeyTypeP256)
+		_, err = keychain.CreateCTKIdentity(label, keychain.CTKKeyTypeP256)
 		if err != nil {
 			return nil, err
 		}
 
 		// Get the identity with signing capability
 		identity, err = keychain.GetIdentity(keychain.IdentityQuery{
-			Label: sepSignerLabel,
+			Label: label,
 			Type:  keychain.IdentityQueryTypeCTK,
 		})
 		if err != nil {
