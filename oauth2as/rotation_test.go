@@ -43,7 +43,8 @@ func TestRefreshTokenRotationAndGrace(t *testing.T) {
 			},
 		},
 		RefreshTokenRotationGracePeriod: 1 * time.Second,
-		MaxRefreshTime:                  1 * time.Hour,
+		RefreshTokenValidity:            1 * time.Hour,
+		GrantValidity:                   1 * time.Hour,
 	}
 
 	op, err := oauth2as.NewServer(opcfg)
@@ -173,7 +174,8 @@ func TestConcurrentRefreshAttempts(t *testing.T) {
 			},
 		},
 		RefreshTokenRotationGracePeriod: 1 * time.Second,
-		MaxRefreshTime:                  1 * time.Hour,
+		RefreshTokenValidity:            1 * time.Hour,
+		GrantValidity:                   1 * time.Hour,
 	}
 
 	op, err := oauth2as.NewServer(opcfg)
@@ -295,7 +297,8 @@ func TestReplacedByTokenIDTracking(t *testing.T) {
 			},
 		},
 		RefreshTokenRotationGracePeriod: 1 * time.Second,
-		MaxRefreshTime:                  1 * time.Hour,
+		RefreshTokenValidity:            1 * time.Hour,
+		GrantValidity:                   1 * time.Hour,
 	}
 
 	op, err := oauth2as.NewServer(opcfg)
@@ -429,7 +432,8 @@ func TestEncryptedMetadataWithRotation(t *testing.T) {
 				Opts:         []oauth2as.ClientOpt{oauth2as.ClientOptSkipPKCE()},
 			},
 		},
-		MaxRefreshTime: 1 * time.Hour,
+		RefreshTokenValidity: 1 * time.Hour,
+		GrantValidity:        1 * time.Hour,
 	}
 
 	op, err := oauth2as.NewServer(opcfg)

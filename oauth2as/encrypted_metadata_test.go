@@ -69,11 +69,12 @@ func TestEncryptedMetadataFlow(t *testing.T) {
 	signer, jwtVerifier := getTestSigner(t)
 
 	opcfg := oauth2as.Config{
-		Issuer:         oidcSvr.URL,
-		Storage:        s,
-		Signer:         signer,
-		Verifier:       jwtVerifier,
-		MaxRefreshTime: 1 * time.Hour,
+		Issuer:               oidcSvr.URL,
+		Storage:              s,
+		Signer:               signer,
+		Verifier:             jwtVerifier,
+		RefreshTokenValidity: 1 * time.Hour,
+		GrantValidity:        1 * time.Hour,
 		TokenHandler: func(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
 			metadataSeenByHandler = req.DecryptedMetadata
 			handlerCalled <- struct{}{}
