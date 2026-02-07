@@ -22,6 +22,8 @@ const (
 	DefaultIDTokenValidity = 1 * time.Hour
 	// DefaultsAccessTokenValidity is the default AccessTokenValidity time.
 	DefaultsAccessTokenValidity = 1 * time.Hour
+	// DefaultGrantValidity is the default GrantValidity time.
+	DefaultGrantValidity = 1 * time.Hour
 )
 
 // Config is used to set the configuration for creating a server instance.
@@ -61,10 +63,16 @@ type Config struct {
 	// This can be overridden on a per-request basis. Must be equal or less to
 	// the IDTokenValidity time.
 	AccessTokenValidity time.Duration
-	// MaxRefreshTime sets the longest time a session can be refreshed for, from
-	// the time it was created. This can be overridden on a per-request basis.
-	// If 0, refresh tokens will never be issued. This is the default.
-	MaxRefreshTime time.Duration
+	// RefreshTokenValidity sets the validity for issued refresh tokens. If 0,
+	// the service will not issue refresh tokens. The maximum time refresh
+	// tokens can be used will also be capped by the GrantValidity.
+	RefreshTokenValidity time.Duration
+	// GrantValidity sets the maximum lifetime a given grant is valid for. After
+	// this time, no more refreshes can be performed. A grant may become invalid
+	// before this time if there are no currently valid tokens issued against
+	// it. This can be overidden on a per-grant basis. Defaults to
+	// [DefaultGrantValidity].
+	GrantValidity time.Duration
 	// RefreshTokenRotationGracePeriod is the time window where an old refresh
 	// token remains valid after being rotated. This helps handle network
 	// failures where the client might retry with the old token. Defaults to 0
@@ -123,6 +131,9 @@ func NewServer(c Config) (*Server, error) {
 	if c.CodeValidityTime == 0 {
 		c.CodeValidityTime = DefaultCodeValidityTime
 	}
+	if c.GrantValidity == 0 {
+		c.GrantValidity = DefaultGrantValidity
+	}
 
 	// Validate token validity times
 	if c.AccessTokenValidity < 0 {
@@ -134,8 +145,8 @@ func NewServer(c Config) (*Server, error) {
 	if c.CodeValidityTime < 0 {
 		return nil, fmt.Errorf("code validity time must be positive")
 	}
-	if c.MaxRefreshTime < 0 {
-		return nil, fmt.Errorf("max refresh time must be positive")
+	if c.GrantValidity < 0 {
+		return nil, fmt.Errorf("grant validity must be positive")
 	}
 	if c.RefreshTokenRotationGracePeriod < 0 {
 		return nil, fmt.Errorf("refresh token rotation grace period must be positive or zero")

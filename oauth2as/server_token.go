@@ -385,13 +385,6 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	rtUntil := tresp.RefreshTokenValidUntil
-	if rtUntil.IsZero() {
-		rtUntil = s.now().Add(s.config.MaxRefreshTime)
-	}
-
-	loadedGrant.grant.ExpiresAt = rtUntil
-
 	trresp, newRTID, err := s.buildTokenResponse(ctx, alg, loadedGrant, tresp, isDPoPBound)
 	if errors.Is(err, ErrConcurrentUpdate) {
 		// expire the grant, there's likely another issuance in flight.
@@ -441,7 +434,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg *string, loadedGran
 	if slices.Contains(loadedGrant.Grant().GrantedScopes, oidc.ScopeOfflineAccess) {
 		rtUntil := tresp.RefreshTokenValidUntil
 		if rtUntil.IsZero() {
-			rtUntil = s.now().Add(s.config.MaxRefreshTime)
+			rtUntil = s.now().Add(s.config.RefreshTokenValidity)
 		}
 
 		// Cap the refresh token expiry at the grant's absolute expiration
