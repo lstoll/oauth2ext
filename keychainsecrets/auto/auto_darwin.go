@@ -9,10 +9,11 @@ import (
 	"lds.li/oauth2ext/keychainsecrets"
 )
 
+const sepSignerLabel = "oauth2ext-cli-sep"
+
 func init() {
 	platformsecrets.RegisterPlatformSigner(func() (crypto.Signer, error) {
-		return keychainsecrets.NewSEPSigner()
+		return keychainsecrets.NewSEPSigner(sepSignerLabel)
 	})
-
 	platformsecrets.RegisterCredentialCache(&keychainsecrets.KeychainCredentialCache{})
 }

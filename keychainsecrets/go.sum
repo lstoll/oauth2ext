@@ -20,3 +20,5 @@ lds.li/keychain v0.0.0-20260125191015-a9e54317a85c h1:X4fYg+GGKepHZQ6D3He+HEF/80
 lds.li/keychain v0.0.0-20260125191015-a9e54317a85c/go.mod h1:7FBBMA51yibUWiHqAGjboezcfq0AyzKf6153Z1VKceM=
 lds.li/keychain v0.1.0 h1:qyQGNM3a2/dCRXQB8p4C8e7Q/ZTtAHOfbeymFQ7uY/8=
 lds.li/keychain v0.1.0/go.mod h1:7FBBMA51yibUWiHqAGjboezcfq0AyzKf6153Z1VKceM=
+lds.li/keychain v0.1.1-0.20260207204813-c020dde5cf1c h1:1+hgb/aGwTMgMArU+uNM1OzsHs0Y4NkP8CHtsylYgfQ=
+lds.li/keychain v0.1.1-0.20260207204813-c020dde5cf1c/go.mod h1:7FBBMA51yibUWiHqAGjboezcfq0AyzKf6153Z1VKceM=

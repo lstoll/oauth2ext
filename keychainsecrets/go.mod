@@ -6,7 +6,7 @@ replace lds.li/oauth2ext => ../
 
 require (
 	golang.org/x/oauth2 v0.34.0
-	lds.li/keychain v0.1.0
+	lds.li/keychain v0.1.1-0.20260207204813-c020dde5cf1c
 	lds.li/oauth2ext v0.0.0-00010101000000-000000000000
 )
 
