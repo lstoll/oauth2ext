@@ -155,10 +155,9 @@ func TestDPoPTokenFlow(t *testing.T) {
 		refreshTokenID := newUUIDv4()
 
 		// Create token entry for the refresh token
-		err = server.config.Storage.CreateRefreshToken(context.Background(), userID, grantID, refreshTokenID, &StoredRefreshToken{
+		err = server.config.Storage.CreateRefreshToken(context.Background(), refreshTokenID, &StoredRefreshToken{
 			Token:            refreshToken.Stored(),
 			GrantID:          grantID,
-			UserID:           userID,
 			ValidUntil:       time.Now().Add(24 * time.Hour),
 			StorageExpiresAt: time.Now().Add(24 * time.Hour),
 		})
@@ -253,10 +252,9 @@ func TestDPoPTokenFlow(t *testing.T) {
 			refreshTokenID2 := newUUIDv4()
 
 			// Create token entry for the refresh token
-			err = server.config.Storage.CreateRefreshToken(context.Background(), userID, grantID2, refreshTokenID2, &StoredRefreshToken{
+			err = server.config.Storage.CreateRefreshToken(context.Background(), refreshTokenID2, &StoredRefreshToken{
 				Token:            refreshToken2.Stored(),
 				GrantID:          grantID2,
-				UserID:           userID,
 				ValidUntil:       time.Now().Add(24 * time.Hour),
 				StorageExpiresAt: time.Now().Add(24 * time.Hour),
 			})
@@ -321,10 +319,9 @@ func TestDPoPTokenFlow(t *testing.T) {
 			refreshTokenID3 := newUUIDv4()
 
 			// Create token entry for the refresh token
-			err = server.config.Storage.CreateRefreshToken(context.Background(), userID, grantID3, refreshTokenID3, &StoredRefreshToken{
+			err = server.config.Storage.CreateRefreshToken(context.Background(), refreshTokenID3, &StoredRefreshToken{
 				Token:            refreshToken3.Stored(),
 				GrantID:          grantID3,
-				UserID:           userID,
 				ValidUntil:       time.Now().Add(24 * time.Hour),
 				StorageExpiresAt: time.Now().Add(24 * time.Hour),
 			})

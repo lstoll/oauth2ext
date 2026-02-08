@@ -77,7 +77,7 @@ func (s *Server) getGrantFromAuthCode(ctx context.Context, presentedCode string)
 		return nil, errGrantTokenInvalid
 	}
 
-	storedCode, grant, err := s.config.Storage.GetAuthCodeAndGrant(ctx, parsedCode.Payload().GetUserId(), parsedCode.Payload().GetGrantId(), parsedCode.ID())
+	storedCode, grant, err := s.config.Storage.GetAuthCodeAndGrant(ctx, parsedCode.ID())
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, errGrantNotFound
@@ -137,7 +137,7 @@ func (s *Server) getGrantFromRefreshToken(ctx context.Context, presentedToken st
 		return nil, errGrantTokenInvalid
 	}
 
-	storedToken, grant, err := s.config.Storage.GetRefreshTokenAndGrant(ctx, parsedToken.Payload().GetUserId(), parsedToken.Payload().GetGrantId(), parsedToken.ID())
+	storedToken, grant, err := s.config.Storage.GetRefreshTokenAndGrant(ctx, parsedToken.ID())
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, errGrantNotFound
@@ -239,9 +239,8 @@ func (s *Server) putGrantWithAuthCode(ctx context.Context, loadedGrant *loadedAu
 	cid := newUUIDv4()
 
 	// Create the auth code
-	err = s.config.Storage.CreateAuthCode(ctx, loadedGrant.grant.UserID, grid, cid, &StoredAuthCode{
+	err = s.config.Storage.CreateAuthCode(ctx, cid, &StoredAuthCode{
 		GrantID:           grid,
-		UserID:            loadedGrant.grant.UserID,
 		Code:              tok.Stored(),
 		ValidUntil:        codeExpiresAt,
 		StorageExpiresAt:  loadedGrant.grant.ExpiresAt, // Keep code around as long as the grant
@@ -320,9 +319,8 @@ func (s *Server) putGrantWithRefreshToken(ctx context.Context, loadedGrant *load
 
 	tid := newUUIDv4()
 
-	err = s.config.Storage.CreateRefreshToken(ctx, loadedGrant.grant.UserID, grid, tid, &StoredRefreshToken{
+	err = s.config.Storage.CreateRefreshToken(ctx, tid, &StoredRefreshToken{
 		GrantID:           grid,
-		UserID:            loadedGrant.grant.UserID,
 		Token:             tok.Stored(),
 		ValidUntil:        tokenExpiresAt,
 		StorageExpiresAt:  loadedGrant.grant.ExpiresAt, // Keep token around as long as the grant

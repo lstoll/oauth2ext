@@ -24,7 +24,6 @@ const (
 type StoredAuthCode struct {
 	Code    []byte `json:"code,omitzero"`
 	GrantID string `json:"grantId,omitzero"`
-	UserID  string `json:"userId,omitzero"`
 	// ValidUntil is the time at which the code is no longer valid for use.
 	ValidUntil time.Time `json:"validUntil,omitzero"`
 	// StorageExpiresAt is the time at which the code can be deleted from storage.
@@ -42,7 +41,6 @@ type StoredAuthCode struct {
 type StoredRefreshToken struct {
 	Token   []byte `json:"token,omitzero"`
 	GrantID string `json:"grantId,omitzero"`
-	UserID  string `json:"userId,omitzero"`
 	// ValidUntil is the time at which the token is no longer valid for use.
 	ValidUntil time.Time `json:"validUntil,omitzero"`
 	// StorageExpiresAt is the time at which the token can be deleted from storage.
@@ -126,28 +124,28 @@ type Storage interface {
 
 	// CreateAuthCode creates a new authorization code associated with a grant and
 	// returns a unique opaque identifier. Auth codes are short-lived and single-use.
-	CreateAuthCode(ctx context.Context, userID, grantID, codeID string, code *StoredAuthCode) error
+	CreateAuthCode(ctx context.Context, codeID string, code *StoredAuthCode) error
 	// ExpireAuthCode expires an authorization code. Returns ErrNotFound if the
 	// code was not found.
-	ExpireAuthCode(ctx context.Context, userID, grantID, codeID string) error
+	ExpireAuthCode(ctx context.Context, codeID string) error
 	// GetAuthCodeAndGrant retrieves an auth code and its associated grant by
 	// code ID. Returns ErrNotFound if the code does not exist.
-	GetAuthCodeAndGrant(ctx context.Context, userID, grantID, codeID string) (*StoredAuthCode, *StoredGrant, error)
+	GetAuthCodeAndGrant(ctx context.Context, codeID string) (*StoredAuthCode, *StoredGrant, error)
 
 	// CreateRefreshToken creates a new refresh token associated with a grant
 	// and returns a unique opaque identifier. Refresh tokens are long-lived and
 	// support rotation.
-	CreateRefreshToken(ctx context.Context, userID, grantID, tokenID string, token *StoredRefreshToken) error
+	CreateRefreshToken(ctx context.Context, tokenID string, token *StoredRefreshToken) error
 	// UpdateRefreshToken updates an existing refresh token. Returns
 	// ErrNotFound if the token does not exist. Used for updating rotation
 	// tracking fields. Implementations MUST perform an optimistic locking check
 	// using the Version field. If the stored version does not match the version
 	// in the provided token, it MUST return ErrConcurrentUpdate. On success,
 	// the stored version MUST be incremented.
-	UpdateRefreshToken(ctx context.Context, userID, grantID, tokenID string, token *StoredRefreshToken) error
+	UpdateRefreshToken(ctx context.Context, tokenID string, token *StoredRefreshToken) error
 	// ExpireRefreshToken expires a refresh token. Returns ErrNotFound if the token was not found.
-	ExpireRefreshToken(ctx context.Context, userID, grantID, tokenID string) error
+	ExpireRefreshToken(ctx context.Context, tokenID string) error
 	// GetRefreshTokenAndGrant retrieves a refresh token and its associated grant by token ID.
 	// Returns ErrNotFound if the token does not exist.
-	GetRefreshTokenAndGrant(ctx context.Context, userID, grantID, tokenID string) (*StoredRefreshToken, *StoredGrant, error)
+	GetRefreshTokenAndGrant(ctx context.Context, tokenID string) (*StoredRefreshToken, *StoredGrant, error)
 }

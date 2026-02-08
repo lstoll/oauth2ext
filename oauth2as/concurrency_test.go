@@ -58,12 +58,11 @@ func TestRefreshTokenConcurrency(t *testing.T) {
 	rtID := "rt-1"
 	rt := &StoredRefreshToken{
 		GrantID:          gid,
-		UserID:           userID,
 		Token:            tok.Stored(),
 		ValidUntil:       time.Now().Add(1 * time.Hour),
 		StorageExpiresAt: time.Now().Add(1 * time.Hour),
 	}
-	if err := srv.config.Storage.CreateRefreshToken(context.Background(), userID, gid, rtID, rt); err != nil {
+	if err := srv.config.Storage.CreateRefreshToken(context.Background(), rtID, rt); err != nil {
 		t.Fatalf("failed to create refresh token: %v", err)
 	}
 
