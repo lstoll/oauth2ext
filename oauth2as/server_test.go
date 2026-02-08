@@ -235,10 +235,9 @@ func TestCodeToken(t *testing.T) {
 		authCodeID := newUUIDv4()
 
 		// Create token entry for the auth code
-		err = o.config.Storage.CreateAuthCode(context.Background(), grant.UserID, grantID, authCodeID, &StoredAuthCode{
+		err = o.config.Storage.CreateAuthCode(context.Background(), authCodeID, &StoredAuthCode{
 			Code:             newToken.Stored(),
 			GrantID:          grantID,
-			UserID:           grant.UserID,
 			ValidUntil:       time.Now().Add(1 * time.Minute),
 			StorageExpiresAt: time.Now().Add(1 * time.Minute),
 		})
@@ -650,10 +649,9 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 	refreshTokenID := newUUIDv4()
 
 	// Create token entry for the refresh token
-	err = smgr.CreateRefreshToken(context.Background(), grant.UserID, grantID, refreshTokenID, &StoredRefreshToken{
+	err = smgr.CreateRefreshToken(context.Background(), refreshTokenID, &StoredRefreshToken{
 		Token:            newToken.Stored(),
 		GrantID:          grantID,
-		UserID:           grant.UserID,
 		ValidUntil:       time.Now().Add(6 * time.Hour),
 		StorageExpiresAt: time.Now().Add(6 * time.Hour),
 	})
@@ -689,10 +687,9 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 	authCodeID := newUUIDv4()
 
 	// Create token entry for the auth code
-	err = smgr.CreateAuthCode(context.Background(), grant.UserID, grantID, authCodeID, &StoredAuthCode{
+	err = smgr.CreateAuthCode(context.Background(), authCodeID, &StoredAuthCode{
 		Code:             newToken.Stored(),
 		GrantID:          grantID,
-		UserID:           grant.UserID,
 		ValidUntil:       time.Now().Add(1 * time.Minute),
 		StorageExpiresAt: time.Now().Add(1 * time.Minute),
 	})

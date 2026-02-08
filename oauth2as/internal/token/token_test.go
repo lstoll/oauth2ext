@@ -124,9 +124,6 @@ func TestTokenWorkflows(t *testing.T) {
 				if parsedToken.ID() != tokenID {
 					t.Errorf("Parsed token ID mismatch. Got %s, want %s", parsedToken.ID(), tokenID)
 				}
-				if parsedToken.Payload().GetGrantId() != grantID {
-					t.Errorf("Parsed token GrantID mismatch. Got %s, want %s", parsedToken.Payload().GetGrantId(), grantID)
-				}
 
 				derivedToken, err := parsedToken.Verify(tt.usage, originalToken.Stored(), grantID, userID)
 				if err != nil {

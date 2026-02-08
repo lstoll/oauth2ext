@@ -178,7 +178,7 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 	}
 
 	pt, _ := token.ParseUserToken(treq.Code, tokenUsageAuthCode) // already parsed in getGrantFromAuthCode, so this is safe
-	if err := s.config.Storage.ExpireAuthCode(ctx, pt.Payload().GetUserId(), pt.Payload().GetGrantId(), pt.ID()); err != nil {
+	if err := s.config.Storage.ExpireAuthCode(ctx, pt.ID()); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
 		}
@@ -309,7 +309,7 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	if loadedGrant.refreshToken.ReplacedByTokenID != "" {
 		// Strict Option 2: Revoke the new one, and issue a third.
 		// Token reused within grace period: revoke the replacement token and issue a new one
-		if err := s.config.Storage.ExpireRefreshToken(ctx, pt.Payload().GetUserId(), pt.Payload().GetGrantId(), loadedGrant.refreshToken.ReplacedByTokenID); err != nil {
+		if err := s.config.Storage.ExpireRefreshToken(ctx, loadedGrant.refreshToken.ReplacedByTokenID); err != nil {
 			if !errors.Is(err, ErrNotFound) {
 				return nil, fmt.Errorf("failed to revoke replaced token during reuse: %w", err)
 			}
@@ -317,14 +317,14 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	} else {
 		if s.config.RefreshTokenRotationGracePeriod > 0 {
 			loadedGrant.refreshToken.ValidUntil = s.now().Add(s.config.RefreshTokenRotationGracePeriod)
-			if err := s.config.Storage.UpdateRefreshToken(ctx, pt.Payload().GetUserId(), pt.Payload().GetGrantId(), pt.ID(), loadedGrant.refreshToken); err != nil {
+			if err := s.config.Storage.UpdateRefreshToken(ctx, pt.ID(), loadedGrant.refreshToken); err != nil {
 				if errors.Is(err, ErrConcurrentUpdate) {
 					return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
 				}
 				return nil, fmt.Errorf("failed to update refresh token with grace expiry: %w", err)
 			}
 		} else {
-			if err := s.config.Storage.ExpireRefreshToken(ctx, pt.Payload().GetUserId(), pt.Payload().GetGrantId(), pt.ID()); err != nil {
+			if err := s.config.Storage.ExpireRefreshToken(ctx, pt.ID()); err != nil {
 				if errors.Is(err, ErrNotFound) {
 					return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 				}
@@ -400,7 +400,7 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	if s.config.RefreshTokenRotationGracePeriod > 0 && newRTID != "" {
 		pt, _ := token.ParseUserToken(treq.RefreshToken, tokenUsageRefresh)
 		loadedGrant.refreshToken.ReplacedByTokenID = newRTID
-		err := s.config.Storage.UpdateRefreshToken(ctx, loadedGrant.grant.UserID, loadedGrant.grantID, pt.ID(), loadedGrant.refreshToken)
+		err := s.config.Storage.UpdateRefreshToken(ctx, pt.ID(), loadedGrant.refreshToken)
 		if errors.Is(err, ErrConcurrentUpdate) {
 			// if we get here, hard fail the token regardless of grace period -
 			// we've had a duplicate update, and risk forking the token history.

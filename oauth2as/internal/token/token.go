@@ -84,15 +84,8 @@ func ParseUserToken(userToken string, usage Usage) (*ParsedToken, error) {
 
 // Verify verifies the parsed token against the stored value, returning the
 // verified token if successful.
-func (p *ParsedToken) Verify(usage Usage, storedValue []byte, expectedGrantID, expectedUserID string) (*Token, error) {
-	if p.payload.GetGrantId() != expectedGrantID {
-		return nil, fmt.Errorf("token grant ID %q does not match expected %q", p.payload.GetGrantId(), expectedGrantID)
-	}
-	if p.payload.GetUserId() != expectedUserID {
-		return nil, fmt.Errorf("token user ID %q does not match expected %q", p.payload.GetUserId(), expectedUserID)
-	}
-
-	info := fmt.Sprintf("%s:%s:%s", usage.Name, expectedGrantID, expectedUserID)
+func (p *ParsedToken) Verify(usage Usage, storedValue []byte, expectedTokenID, expectedGrantID string) (*Token, error) {
+	info := fmt.Sprintf("%s:%s:%s", usage.Name, expectedTokenID, expectedGrantID)
 
 	stored, err := hkdf.Key(sha256.New, p.user, storedSalt, info, keyLength)
 	if err != nil {
@@ -134,11 +127,7 @@ type Token struct {
 
 // ToUser returns the value that should be exposed and used by the user.
 func (t Token) ToUser(tokenID string) string {
-	grantID := t.payload.GetGrantId()
-	userID := t.payload.GetUserId()
 	builder := TokenData_builder{
-		GrantId: &grantID,
-		UserId:  &userID,
 		TokenId: &tokenID,
 		Secret:  t.user,
 	}
@@ -161,14 +150,14 @@ func (t Token) Stored() []byte {
 }
 
 // New creates a new token.
-func New(usage Usage, grantID, userID string) Token {
+func New(usage Usage, tokenID, grantID string) Token {
 	var tok = make([]byte, 32)
 
 	if n, err := rand.Read(tok); err != nil || n != 32 {
 		panic(fmt.Sprintf("failed to generate random token: %v", err))
 	}
 
-	info := fmt.Sprintf("%s:%s:%s", usage.Name, grantID, userID)
+	info := fmt.Sprintf("%s:%s:%s", usage.Name, tokenID, grantID)
 
 	stored, err := tinksubtle.ComputeHKDF("SHA256", tok, storedSalt, []byte(info), keyLength)
 	if err != nil {
@@ -180,18 +169,12 @@ func New(usage Usage, grantID, userID string) Token {
 		panic(fmt.Sprintf("failed to generate encryption key: %v", err))
 	}
 
-	builder := TokenData_builder{
-		GrantId: &grantID,
-		UserId:  &userID,
-	}
-	td := builder.Build()
-
 	return Token{
 		user:       tok,
 		stored:     stored,
 		encryption: encryption,
 		usage:      usage,
-		payload:    td,
+		payload:    TokenData_builder{}.Build(),
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+var _ Storage = (*MemStorage)(nil)
+
 // MemStorage implements the Storage interface with an in-memory dataset. It
 // serializes and deserializes the data, to avoid things hanging on to
 // references to the original data.
@@ -112,7 +114,7 @@ func (m *MemStorage) GetGrant(ctx context.Context, id string) (*StoredGrant, err
 }
 
 // CreateAuthCode stores a new authorization code in memory using the provided ID.
-func (m *MemStorage) CreateAuthCode(ctx context.Context, userID, grantID, codeID string, code *StoredAuthCode) error {
+func (m *MemStorage) CreateAuthCode(ctx context.Context, codeID string, code *StoredAuthCode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -120,12 +122,8 @@ func (m *MemStorage) CreateAuthCode(ctx context.Context, userID, grantID, codeID
 		return fmt.Errorf("auth code with ID %s already exists", codeID)
 	}
 
-	codeCopy := *code
-	codeCopy.GrantID = grantID
-	codeCopy.UserID = userID
-
 	// Marshal to JSON for storage
-	codeJSON, err := json.Marshal(&codeCopy)
+	codeJSON, err := json.Marshal(code)
 	if err != nil {
 		return err
 	}
@@ -136,7 +134,7 @@ func (m *MemStorage) CreateAuthCode(ctx context.Context, userID, grantID, codeID
 }
 
 // ExpireAuthCode removes an authorization code from memory.
-func (m *MemStorage) ExpireAuthCode(ctx context.Context, userID, grantID, codeID string) error {
+func (m *MemStorage) ExpireAuthCode(ctx context.Context, codeID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -150,7 +148,7 @@ func (m *MemStorage) ExpireAuthCode(ctx context.Context, userID, grantID, codeID
 }
 
 // GetAuthCodeAndGrant retrieves an auth code and its associated grant by code ID.
-func (m *MemStorage) GetAuthCodeAndGrant(ctx context.Context, userID, grantID, codeID string) (*StoredAuthCode, *StoredGrant, error) {
+func (m *MemStorage) GetAuthCodeAndGrant(ctx context.Context, codeID string) (*StoredAuthCode, *StoredGrant, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -162,11 +160,6 @@ func (m *MemStorage) GetAuthCodeAndGrant(ctx context.Context, userID, grantID, c
 	var storedCode StoredAuthCode
 	if err := json.Unmarshal(codeJSON, &storedCode); err != nil {
 		return nil, nil, err
-	}
-
-	// Return ErrNotFound if GrantID/UserID don't match (mimics DB lookup failure)
-	if storedCode.GrantID != grantID || storedCode.UserID != userID {
-		return nil, nil, ErrNotFound
 	}
 
 	grantJSON, exists := m.grants[storedCode.GrantID]
@@ -183,7 +176,7 @@ func (m *MemStorage) GetAuthCodeAndGrant(ctx context.Context, userID, grantID, c
 }
 
 // CreateRefreshToken stores a new refresh token in memory using the provided ID.
-func (m *MemStorage) CreateRefreshToken(ctx context.Context, userID, grantID, tokenID string, token *StoredRefreshToken) error {
+func (m *MemStorage) CreateRefreshToken(ctx context.Context, tokenID string, token *StoredRefreshToken) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -191,12 +184,8 @@ func (m *MemStorage) CreateRefreshToken(ctx context.Context, userID, grantID, to
 		return fmt.Errorf("refresh token with ID %s already exists", tokenID)
 	}
 
-	tokenCopy := *token
-	tokenCopy.GrantID = grantID
-	tokenCopy.UserID = userID
-
 	// Marshal to JSON for storage
-	tokenJSON, err := json.Marshal(&tokenCopy)
+	tokenJSON, err := json.Marshal(token)
 	if err != nil {
 		return err
 	}
@@ -207,7 +196,7 @@ func (m *MemStorage) CreateRefreshToken(ctx context.Context, userID, grantID, to
 }
 
 // UpdateRefreshToken updates an existing refresh token in memory.
-func (m *MemStorage) UpdateRefreshToken(ctx context.Context, userID, grantID, tokenID string, token *StoredRefreshToken) error {
+func (m *MemStorage) UpdateRefreshToken(ctx context.Context, tokenID string, token *StoredRefreshToken) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -239,7 +228,7 @@ func (m *MemStorage) UpdateRefreshToken(ctx context.Context, userID, grantID, to
 }
 
 // ExpireRefreshToken removes a refresh token from memory.
-func (m *MemStorage) ExpireRefreshToken(ctx context.Context, userID, grantID, tokenID string) error {
+func (m *MemStorage) ExpireRefreshToken(ctx context.Context, tokenID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -253,7 +242,7 @@ func (m *MemStorage) ExpireRefreshToken(ctx context.Context, userID, grantID, to
 }
 
 // GetRefreshTokenAndGrant retrieves a refresh token and its associated grant by token ID.
-func (m *MemStorage) GetRefreshTokenAndGrant(ctx context.Context, userID, grantID, tokenID string) (*StoredRefreshToken, *StoredGrant, error) {
+func (m *MemStorage) GetRefreshTokenAndGrant(ctx context.Context, tokenID string) (*StoredRefreshToken, *StoredGrant, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -265,10 +254,6 @@ func (m *MemStorage) GetRefreshTokenAndGrant(ctx context.Context, userID, grantI
 	var storedToken StoredRefreshToken
 	if err := json.Unmarshal(tokenJSON, &storedToken); err != nil {
 		return nil, nil, err
-	}
-
-	if storedToken.GrantID != grantID || storedToken.UserID != userID {
-		return nil, nil, ErrNotFound
 	}
 
 	grantJSON, exists := m.grants[storedToken.GrantID]
