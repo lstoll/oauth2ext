@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"lds.li/oauth2ext/oauth2as/internal/oauth2"
+	"lds.li/oauth2ext/oauth2as/oauth2proto"
 )
 
 type AuthRequest struct {
@@ -36,7 +36,7 @@ func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
 	// Note: Error handling deviates from the spec - errors are returned directly
 	// rather than redirected to the client's redirect_uri.
 	// TODO - consider if we should fix this.
-	authreq, err := oauth2.ParseAuthRequest(req)
+	authreq, err := oauth2proto.ParseAuthRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse auth request: %w", err)
 	}
@@ -67,7 +67,7 @@ func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
 	}
 
 	switch authreq.ResponseType {
-	case oauth2.ResponseTypeCode:
+	case oauth2proto.ResponseTypeCode:
 	default:
 		return nil, fmt.Errorf("response type %s is not supported", authreq.ResponseType)
 	}
@@ -158,7 +158,7 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		return "", fmt.Errorf("failed to parse authreq's URI: %w", err)
 	}
 
-	codeResp := &oauth2.CodeAuthResponse{
+	codeResp := &oauth2proto.CodeAuthResponse{
 		RedirectURI: redir,
 		State:       grant.Request.State,
 		Code:        authCodeString,

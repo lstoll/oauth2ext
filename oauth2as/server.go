@@ -11,7 +11,7 @@ import (
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/dpop"
-	"lds.li/oauth2ext/oauth2as/internal/oauth2"
+	"lds.li/oauth2ext/oauth2as/oauth2proto"
 )
 
 const (
@@ -168,18 +168,18 @@ func NewServer(c Config) (*Server, error) {
 	return svr, nil
 }
 
-func (s *Server) validateTokenClient(ctx context.Context, req *oauth2.TokenRequest, wantClientID string) error {
+func (s *Server) validateTokenClient(ctx context.Context, req *oauth2proto.TokenRequest, wantClientID string) error {
 	// check to see if we're working with the same client
 	if wantClientID != req.ClientID {
-		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
 	}
 
 	secrets, err := s.config.Clients.ClientSecrets(ctx, req.ClientID)
 	if err != nil {
-		return &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get client secrets", Cause: err}
+		return &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get client secrets", Cause: err}
 	}
 	if len(secrets) == 0 {
-		return &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "Invalid client secret"}
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "Invalid client secret"}
 	}
 
 	var matchFound int32
@@ -187,8 +187,8 @@ func (s *Server) validateTokenClient(ctx context.Context, req *oauth2.TokenReque
 		matchFound |= int32(subtle.ConstantTimeCompare([]byte(secret), []byte(req.ClientSecret)))
 	}
 	if matchFound != 1 {
-		return &oauth2.TokenError{
-			ErrorCode:   oauth2.TokenErrorCodeUnauthorizedClient,
+		return &oauth2proto.TokenError{
+			ErrorCode:   oauth2proto.TokenErrorCodeUnauthorizedClient,
 			Description: "Invalid client secret",
 		}
 	}
