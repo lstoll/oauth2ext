@@ -5,7 +5,7 @@ import (
 )
 
 func TestMemStorage(t *testing.T) {
-	TestStorage(t, func() Storage {
+	TestStorage(t, func(*testing.T) Storage {
 		return NewMemStorage()
 	})
 }
