@@ -17,11 +17,11 @@ import (
 //
 // The factory function is invoked at the start of each subtest to provide a fresh
 // Storage instance, ensuring tests do not interfere with each other.
-func TestStorage(t *testing.T, factory func() Storage) {
+func TestStorage(t *testing.T, factory func(t *testing.T) Storage) {
 	ctx := context.Background()
 
 	t.Run("CreateGrant_roundtrip", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		want := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -59,7 +59,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("GetGrant_notFound", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		_, err := s.GetGrant(ctx, "nonexistent-id")
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("GetGrant: want ErrNotFound, got %v", err)
@@ -67,7 +67,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("UpdateGrant_roundtrip", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -112,7 +112,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("UpdateGrant_concurrentUpdate", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -144,7 +144,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("UpdateGrant_conflictingUpdates", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -234,7 +234,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("UpdateGrant_notFound", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -251,7 +251,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("ExpireGrant_removesGrant", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -277,14 +277,14 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("ExpireGrant_idempotentForNonexistent", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		if err := s.ExpireGrant(ctx, "nonexistent-id"); err != nil {
 			t.Errorf("ExpireGrant for nonexistent: want nil, got %v", err)
 		}
 	})
 
 	t.Run("CreateAuthCode_roundtrip", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -330,7 +330,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("GetAuthCodeAndGrant_notFound", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		_, _, err := s.GetAuthCodeAndGrant(ctx, "nonexistent-code-id")
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("GetAuthCodeAndGrant: want ErrNotFound, got %v", err)
@@ -338,7 +338,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("ExpireAuthCode_removesCode", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -376,7 +376,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("ExpireAuthCode_notFound", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		err := s.ExpireAuthCode(ctx, "nonexistent-code-id")
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("ExpireAuthCode: want ErrNotFound, got %v", err)
@@ -384,7 +384,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("CreateRefreshToken_roundtrip", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -431,7 +431,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("UpdateRefreshToken_roundtrip", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -486,7 +486,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("UpdateRefreshToken_concurrentUpdate", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -529,7 +529,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("UpdateRefreshToken_conflictingUpdates", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -629,7 +629,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("UpdateRefreshToken_notFound", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		token := &StoredRefreshToken{
 			Token:            []byte("token"),
 			GrantID:          "grant-id",
@@ -645,7 +645,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("GetRefreshTokenAndGrant_notFound", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		_, _, err := s.GetRefreshTokenAndGrant(ctx, "nonexistent-token-id")
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("GetRefreshTokenAndGrant: want ErrNotFound, got %v", err)
@@ -653,7 +653,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("ExpireRefreshToken_removesToken", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		grant := &StoredGrant{
 			UserID:        "user-1",
 			ClientID:      "client-1",
@@ -691,7 +691,7 @@ func TestStorage(t *testing.T, factory func() Storage) {
 	})
 
 	t.Run("ExpireRefreshToken_notFound", func(t *testing.T) {
-		s := factory()
+		s := factory(t)
 		err := s.ExpireRefreshToken(ctx, "nonexistent-token-id")
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("ExpireRefreshToken: want ErrNotFound, got %v", err)
