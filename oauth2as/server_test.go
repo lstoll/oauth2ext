@@ -20,8 +20,8 @@ import (
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/oauth2as/internal"
-	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 	"lds.li/oauth2ext/oauth2as/internal/token"
+	"lds.li/oauth2ext/oauth2as/oauth2proto"
 	"lds.li/oauth2ext/oidc"
 )
 
@@ -93,8 +93,8 @@ func TestCodeToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeGrant(t, o.config.Storage)
 
-		treq := &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeAuthorizationCode,
+		treq := &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -115,8 +115,8 @@ func TestCodeToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeGrant(t, o.config.Storage)
 
-		treq := &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeAuthorizationCode,
+		treq := &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -130,7 +130,7 @@ func TestCodeToken(t *testing.T) {
 
 		// replay fails
 		_, err = o.codeToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
-		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
+		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeInvalidGrant {
 			t.Errorf("want invalid token grant error, got: %v", err)
 		}
 	})
@@ -139,8 +139,8 @@ func TestCodeToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeGrant(t, o.config.Storage)
 
-		treq := &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeAuthorizationCode,
+		treq := &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -148,7 +148,7 @@ func TestCodeToken(t *testing.T) {
 		}
 
 		_, err := o.codeToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
-		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeUnauthorizedClient {
+		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeUnauthorizedClient {
 			t.Errorf("want unauthorized client error, got: %v", err)
 		}
 	})
@@ -157,8 +157,8 @@ func TestCodeToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeGrant(t, o.config.Storage)
 
-		treq := &oauth2.TokenRequest{
-			GrantType:   oauth2.GrantTypeAuthorizationCode,
+		treq := &oauth2proto.TokenRequest{
+			GrantType:   oauth2proto.GrantTypeAuthorizationCode,
 			Code:        codeToken,
 			RedirectURI: redirectURI,
 			// This is not the credentials the code should be tracking, but are
@@ -168,7 +168,7 @@ func TestCodeToken(t *testing.T) {
 		}
 
 		_, err := o.codeToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
-		if err, ok := err.(*oauth2.TokenError); !ok || err.ErrorCode != oauth2.TokenErrorCodeUnauthorizedClient {
+		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeUnauthorizedClient {
 			t.Errorf("want unauthorized client error, got: %v", err)
 		}
 	})
@@ -177,8 +177,8 @@ func TestCodeToken(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeGrant(t, o.config.Storage)
 
-		treq := &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeAuthorizationCode,
+		treq := &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -246,8 +246,8 @@ func TestCodeToken(t *testing.T) {
 		}
 		authCodeStr := newToken.ToUser(authCodeID)
 
-		treq := &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeAuthorizationCode,
+		treq := &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeAuthorizationCode,
 			Code:         authCodeStr,
 			RedirectURI:  es256ClientRedirect,
 			ClientID:     es256ClientID,
@@ -355,8 +355,8 @@ func TestRefreshToken(t *testing.T) {
 
 		// keep trying to refresh
 		for i := 1; i <= 5; i++ {
-			treq := &oauth2.TokenRequest{
-				GrantType:    oauth2.GrantTypeRefreshToken,
+			treq := &oauth2proto.TokenRequest{
+				GrantType:    oauth2proto.GrantTypeRefreshToken,
 				RefreshToken: refreshToken,
 				ClientID:     clientID,
 				ClientSecret: clientSecret,
@@ -381,8 +381,8 @@ func TestRefreshToken(t *testing.T) {
 		// try again while we still should be within the expiry period.
 		o.now = func() time.Time { return time.Now().Add(5 * time.Hour) }
 
-		treq := &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeRefreshToken,
+		treq := &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeRefreshToken,
 			RefreshToken: refreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
@@ -400,15 +400,15 @@ func TestRefreshToken(t *testing.T) {
 		// march to the future, when we should be expired
 		o.now = func() time.Time { return time.Now().Add(7 * time.Hour) }
 
-		treq = &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeRefreshToken,
+		treq = &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeRefreshToken,
 			RefreshToken: refreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
 		}
 
 		_, err = o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
-		if te, ok := err.(*oauth2.TokenError); !ok || te.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
+		if te, ok := err.(*oauth2proto.TokenError); !ok || te.ErrorCode != oauth2proto.TokenErrorCodeInvalidGrant {
 			t.Errorf("expired session should have given invalid_grant, got: %v", te)
 		}
 	})
@@ -432,8 +432,8 @@ func TestRefreshToken(t *testing.T) {
 		// try and refresh, and observe intentional unauth error
 		returnErr = &unauthorizedErrImpl{error: errors.New(errDesc)}
 
-		treq := &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeRefreshToken,
+		treq := &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeRefreshToken,
 			RefreshToken: refreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
@@ -444,12 +444,12 @@ func TestRefreshToken(t *testing.T) {
 		if err == nil {
 			t.Fatal("want error refreshing, got none")
 		}
-		terr, ok := err.(*oauth2.TokenError)
+		terr, ok := err.(*oauth2proto.TokenError)
 		if !ok {
 			t.Fatalf("want token error, got: %T", err)
 		}
-		if terr.ErrorCode != oauth2.TokenErrorCodeInvalidGrant || terr.Description != errDesc {
-			t.Fatalf("unexpected code %q (want %q) or description %q (want %q)", terr.ErrorCode, oauth2.TokenErrorCodeInvalidGrant, terr.Description, errDesc)
+		if terr.ErrorCode != oauth2proto.TokenErrorCodeInvalidGrant || terr.Description != errDesc {
+			t.Fatalf("unexpected code %q (want %q) or description %q (want %q)", terr.ErrorCode, oauth2proto.TokenErrorCodeInvalidGrant, terr.Description, errDesc)
 		}
 
 		// refresh with generic err
@@ -457,8 +457,8 @@ func TestRefreshToken(t *testing.T) {
 
 		returnErr = errors.New("boomtown")
 
-		treq = &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeRefreshToken,
+		treq = &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeRefreshToken,
 			RefreshToken: refreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
@@ -469,7 +469,7 @@ func TestRefreshToken(t *testing.T) {
 		if err == nil {
 			t.Fatal("want error refreshing, got none")
 		}
-		if _, ok = err.(*oauth2.HTTPError); !ok {
+		if _, ok = err.(*oauth2proto.HTTPError); !ok {
 			t.Fatalf("want http error, got %T (%v)", err, err)
 		}
 	})

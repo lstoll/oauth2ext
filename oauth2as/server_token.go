@@ -16,8 +16,8 @@ import (
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/internal/th"
-	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 	"lds.li/oauth2ext/oauth2as/internal/token"
+	"lds.li/oauth2ext/oauth2as/oauth2proto"
 	"lds.li/oauth2ext/oidc"
 )
 
@@ -125,37 +125,37 @@ func (s *Server) TokenHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	treq, err := oauth2.ParseTokenRequest(req)
+	treq, err := oauth2proto.ParseTokenRequest(req)
 	if err != nil {
-		_ = oauth2.WriteError(w, req, err)
+		_ = oauth2proto.WriteError(w, req, err)
 		return
 	}
 
-	var resp *oauth2.TokenResponse
+	var resp *oauth2proto.TokenResponse
 	switch treq.GrantType {
-	case oauth2.GrantTypeAuthorizationCode:
+	case oauth2proto.GrantTypeAuthorizationCode:
 		resp, err = s.codeToken(req.Context(), req, treq)
-	case oauth2.GrantTypeRefreshToken:
+	case oauth2proto.GrantTypeRefreshToken:
 		resp, err = s.refreshToken(req.Context(), req, treq)
 	default:
-		err = &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid grant type", Cause: fmt.Errorf("grant type %s not handled", treq.GrantType)}
+		err = &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid grant type", Cause: fmt.Errorf("grant type %s not handled", treq.GrantType)}
 	}
 	if err != nil {
 		s.logger.WarnContext(req.Context(), "error in token handler", "grant-type", treq.GrantType, "err", err)
-		_ = oauth2.WriteError(w, req, err)
+		_ = oauth2proto.WriteError(w, req, err)
 		return
 	}
 
-	if err := oauth2.WriteTokenResponse(w, resp); err != nil {
+	if err := oauth2proto.WriteTokenResponse(w, resp); err != nil {
 		s.logger.ErrorContext(req.Context(), "error writing token response", "grant-type", treq.GrantType, "err", err)
-		_ = oauth2.WriteError(w, req, err)
+		_ = oauth2proto.WriteError(w, req, err)
 		return
 	}
 }
 
-func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.TokenRequest) (*oauth2.TokenResponse, error) {
+func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2proto.TokenRequest) (*oauth2proto.TokenResponse, error) {
 	if treq.Code == "" {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "code is required"}
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidRequest, Description: "code is required"}
 	}
 
 	// Verify DPoP proof if present. In the code flow, we allow any thumbprint -
@@ -168,11 +168,11 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 	loadedGrant, err := s.getGrantFromAuthCode(ctx, treq.Code)
 	if err != nil {
 		if errors.Is(err, errGrantTokenInvalid) {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid code"}
 		} else if errors.Is(err, errGrantExpired) {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid code"}
 		} else if errors.Is(err, errGrantNotFound) {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid code"}
 		}
 		return nil, fmt.Errorf("failed to get grant by auth code: %w", err)
 	}
@@ -180,19 +180,19 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 	pt, _ := token.ParseUserToken(treq.Code, tokenUsageAuthCode) // already parsed in getGrantFromAuthCode, so this is safe
 	if err := s.config.Storage.ExpireAuthCode(ctx, pt.ID()); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid code"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid code"}
 		}
 		return nil, fmt.Errorf("failed to expire auth code: %w", err)
 	}
 
 	if loadedGrant.grant.Request == nil {
 
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid grant"}
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid grant"}
 	}
 
 	// Validate that the redirect_uri matches the one from the authorization request
 	if treq.RedirectURI != loadedGrant.grant.Request.RedirectURI {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "redirect URI mismatch"}
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "redirect URI mismatch"}
 	}
 
 	if err := s.validateTokenClient(ctx, treq, loadedGrant.grant.ClientID); err != nil {
@@ -210,7 +210,7 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 
 	// Reject if PKCE is required but no code verifier was provided
 	if !copts.skipPKCE && treq.CodeVerifier == "" {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
 	}
 
 	var alg *string
@@ -221,7 +221,7 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 	// Verify the code verifier against the session data
 	if treq.CodeVerifier != "" {
 		if !verifyCodeChallenge(treq.CodeVerifier, loadedGrant.grant.Request.CodeChallenge) {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeUnauthorizedClient, Description: "PKCE verification failed"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "PKCE verification failed"}
 		}
 	}
 
@@ -233,7 +233,7 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 	// TODO: Update grant expiry when DPoP binding is added
 	if err := s.config.Storage.UpdateGrant(ctx, loadedGrant.grantID, loadedGrant.grant); err != nil {
 		if errors.Is(err, ErrConcurrentUpdate) {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
 		}
 		return nil, fmt.Errorf("failed to update grant: %w", err)
 	}
@@ -260,31 +260,31 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2.
 	if err != nil {
 		var uaerr unauthorizedErr
 		if errors.As(err, &uaerr) && uaerr.Unauthorized() {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: uaerr.Error()}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: uaerr.Error()}
 		}
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
+		return nil, &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
 	trresp, _, err := s.buildTokenResponse(ctx, alg, loadedGrant, tresp, isDPoPBound)
 	if err != nil && errors.Is(err, ErrConcurrentUpdate) {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
 	}
 	return trresp, err
 }
 
-func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oauth2.TokenRequest) (_ *oauth2.TokenResponse, retErr error) {
+func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oauth2proto.TokenRequest) (_ *oauth2proto.TokenResponse, retErr error) {
 	if treq.RefreshToken == "" {
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidRequest, Description: "refresh token is required"}
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidRequest, Description: "refresh token is required"}
 	}
 
 	loadedGrant, err := s.getGrantFromRefreshToken(ctx, treq.RefreshToken)
 	if err != nil {
 		if errors.Is(err, errGrantTokenInvalid) {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 		} else if errors.Is(err, errGrantExpired) {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 		} else if errors.Is(err, errGrantNotFound) {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 		}
 		return nil, fmt.Errorf("failed to get grant by refresh token: %w", err)
 	}
@@ -299,10 +299,10 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 			if err := s.config.Storage.ExpireGrant(ctx, loadedGrant.grantID); err != nil {
 				return nil, fmt.Errorf("failed to revoke grant on refresh token reuse: %w", err)
 			}
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 		}
 		// Token is expired but not replaced. Just a normal expiration.
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 	}
 
 	// Handle grace period for rotated tokens
@@ -319,14 +319,14 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 			loadedGrant.refreshToken.ValidUntil = s.now().Add(s.config.RefreshTokenRotationGracePeriod)
 			if err := s.config.Storage.UpdateRefreshToken(ctx, pt.ID(), loadedGrant.refreshToken); err != nil {
 				if errors.Is(err, ErrConcurrentUpdate) {
-					return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+					return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
 				}
 				return nil, fmt.Errorf("failed to update refresh token with grace expiry: %w", err)
 			}
 		} else {
 			if err := s.config.Storage.ExpireRefreshToken(ctx, pt.ID()); err != nil {
 				if errors.Is(err, ErrNotFound) {
-					return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
+					return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 				}
 				return nil, fmt.Errorf("failed to expire refresh token: %w", err)
 			}
@@ -342,10 +342,10 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	if storedThumbprint != "" {
 		thumbprint, err := s.verifyDPoPProof(s.config.Issuer, req, &storedThumbprint)
 		if err != nil {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "DPoP proof key mismatch"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "DPoP proof key mismatch"}
 		}
 		if thumbprint == "" {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "DPoP proof required"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "DPoP proof required"}
 		}
 	}
 
@@ -380,9 +380,9 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	if err != nil {
 		var uaerr unauthorizedErr
 		if errors.As(err, &uaerr) && uaerr.Unauthorized() {
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: uaerr.Error()}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: uaerr.Error()}
 		}
-		return nil, &oauth2.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
+		return nil, &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
 	trresp, newRTID, err := s.buildTokenResponse(ctx, alg, loadedGrant, tresp, isDPoPBound)
@@ -391,7 +391,7 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		if err := s.config.Storage.ExpireGrant(ctx, loadedGrant.grantID); err != nil {
 			slog.WarnContext(ctx, "failed to expire grant", "error", err)
 		}
-		return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to build refresh token response: %w", err)
 	}
@@ -409,7 +409,7 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 			if err := s.config.Storage.ExpireGrant(ctx, loadedGrant.grantID); err != nil {
 				slog.WarnContext(ctx, "failed to expire grant", "error", err)
 			}
-			return nil, &oauth2.TokenError{ErrorCode: oauth2.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
+			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
 		} else if err != nil {
 			return nil, fmt.Errorf("failed to update old refresh token: %w", err)
 		}
@@ -420,7 +420,7 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 
 // buildTokenResponse creates the oauth token response for code and refresh.
 // It works with both auth code grants and refresh token grants via the grantLoader interface.
-func (s *Server) buildTokenResponse(ctx context.Context, alg *string, loadedGrant grantLoader, tresp *TokenResponse, isDPoPBound bool) (_ *oauth2.TokenResponse, refreshTokenID string, _ error) {
+func (s *Server) buildTokenResponse(ctx context.Context, alg *string, loadedGrant grantLoader, tresp *TokenResponse, isDPoPBound bool) (_ *oauth2proto.TokenResponse, refreshTokenID string, _ error) {
 	// Update metadata from the handler response
 	if tresp.Metadata != nil {
 		loadedGrant.Grant().Metadata = tresp.Metadata
@@ -506,7 +506,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg *string, loadedGran
 		tokenType = "DPoP"
 	}
 
-	return &oauth2.TokenResponse{
+	return &oauth2proto.TokenResponse{
 		AccessToken:  atSigned,
 		RefreshToken: refreshToken,
 		TokenType:    tokenType,

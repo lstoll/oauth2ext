@@ -14,8 +14,8 @@ import (
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/internal/th"
-	"lds.li/oauth2ext/oauth2as/internal/oauth2"
 	"lds.li/oauth2ext/oauth2as/internal/token"
+	"lds.li/oauth2ext/oauth2as/oauth2proto"
 	"lds.li/oauth2ext/oidc"
 )
 
@@ -86,8 +86,8 @@ func TestDPoPTokenFlow(t *testing.T) {
 		req.Host = "localhost"
 		req.Header.Set("DPoP", dpopProof)
 
-		treq := &oauth2.TokenRequest{
-			GrantType:    oauth2.GrantTypeAuthorizationCode,
+		treq := &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeAuthorizationCode,
 			Code:         codeToken,
 			RedirectURI:  redirectURI,
 			ClientID:     clientID,
@@ -209,8 +209,8 @@ func TestDPoPTokenFlow(t *testing.T) {
 			req.Host = "localhost"
 			req.Header.Set("DPoP", dpopProof)
 
-			treq := &oauth2.TokenRequest{
-				GrantType:    oauth2.GrantTypeRefreshToken,
+			treq := &oauth2proto.TokenRequest{
+				GrantType:    oauth2proto.GrantTypeRefreshToken,
 				RefreshToken: refreshTokenStr,
 				ClientID:     clientID,
 				ClientSecret: clientSecret,
@@ -266,8 +266,8 @@ func TestDPoPTokenFlow(t *testing.T) {
 			// Request without DPoP header
 			req := httptest.NewRequest(http.MethodPost, "/token", nil)
 
-			treq := &oauth2.TokenRequest{
-				GrantType:    oauth2.GrantTypeRefreshToken,
+			treq := &oauth2proto.TokenRequest{
+				GrantType:    oauth2proto.GrantTypeRefreshToken,
 				RefreshToken: refreshTokenStr2,
 				ClientID:     clientID,
 				ClientSecret: clientSecret,
@@ -278,11 +278,11 @@ func TestDPoPTokenFlow(t *testing.T) {
 				t.Fatal("expected error when DPoP proof is missing")
 			}
 
-			tokenErr, ok := err.(*oauth2.TokenError)
+			tokenErr, ok := err.(*oauth2proto.TokenError)
 			if !ok {
 				t.Fatalf("expected TokenError, got %T", err)
 			}
-			if tokenErr.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
+			if tokenErr.ErrorCode != oauth2proto.TokenErrorCodeInvalidGrant {
 				t.Errorf("expected invalid_grant error, got %s", tokenErr.ErrorCode)
 			}
 		})
@@ -348,8 +348,8 @@ func TestDPoPTokenFlow(t *testing.T) {
 			req.Host = "localhost"
 			req.Header.Set("DPoP", wrongProof)
 
-			treq := &oauth2.TokenRequest{
-				GrantType:    oauth2.GrantTypeRefreshToken,
+			treq := &oauth2proto.TokenRequest{
+				GrantType:    oauth2proto.GrantTypeRefreshToken,
 				RefreshToken: refreshTokenStr3,
 				ClientID:     clientID,
 				ClientSecret: clientSecret,
@@ -360,11 +360,11 @@ func TestDPoPTokenFlow(t *testing.T) {
 				t.Fatal("expected error when DPoP key doesn't match")
 			}
 
-			tokenErr, ok := err.(*oauth2.TokenError)
+			tokenErr, ok := err.(*oauth2proto.TokenError)
 			if !ok {
 				t.Fatalf("expected TokenError, got %T", err)
 			}
-			if tokenErr.ErrorCode != oauth2.TokenErrorCodeInvalidGrant {
+			if tokenErr.ErrorCode != oauth2proto.TokenErrorCodeInvalidGrant {
 				t.Errorf("expected invalid_grant error, got %s", tokenErr.ErrorCode)
 			}
 		})
