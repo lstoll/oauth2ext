@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/oauth2"
 )
@@ -137,22 +138,29 @@ func (c *cliTokenSource) Token() (*oauth2.Token, error) {
 
 	var calls atomic.Uint32
 	mux.HandleFunc("GET /callback", func(w http.ResponseWriter, r *http.Request) {
+		renderOpts := &RenderOpts{}
+
+		if returner, ok := c.cfg.getOpener().(OpenerReturner); ok && returner.CanReturn() {
+			renderOpts.CloseAfter = time.Second * 2
+		}
+
 		if errMsg := r.FormValue("error"); errMsg != "" {
 			err := fmt.Errorf("%s: %s", errMsg, r.FormValue("error_description"))
 			resultCh <- result{err: err}
 
 			w.WriteHeader(http.StatusBadRequest)
-			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, err.Error())
+			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, err.Error(), renderOpts)
 			return
 		}
 
 		code := r.FormValue("code")
+
 		if code == "" {
 			err := fmt.Errorf("no code in request")
 			resultCh <- result{err: err}
 
 			w.WriteHeader(http.StatusBadRequest)
-			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, err.Error())
+			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, err.Error(), renderOpts)
 			return
 		}
 
@@ -162,7 +170,7 @@ func (c *cliTokenSource) Token() (*oauth2.Token, error) {
 			resultCh <- result{err: err}
 
 			w.WriteHeader(http.StatusBadRequest)
-			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, err.Error())
+			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, err.Error(), renderOpts)
 			return
 		}
 
@@ -170,12 +178,12 @@ func (c *cliTokenSource) Token() (*oauth2.Token, error) {
 			// Callback has been invoked multiple times, which should not happen.
 			// Bomb out to avoid a blocking channel write and to float this as a bug.
 			w.WriteHeader(http.StatusBadRequest)
-			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, "callback invoked multiple times")
+			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, "callback invoked multiple times", renderOpts)
 			return
 		}
 
 		w.WriteHeader(http.StatusOK)
-		_ = c.cfg.getRenderer().RenderLocalTokenSourceTokenIssued(w)
+		_ = c.cfg.getRenderer().RenderLocalTokenSourceTokenIssued(w, renderOpts)
 
 		resultCh <- result{code: code}
 	})
@@ -219,7 +227,12 @@ func (c *cliTokenSource) Token() (*oauth2.Token, error) {
 	case <-c.ctx.Done():
 		return nil, c.ctx.Err()
 	case res = <-resultCh:
-		// continue
+		// continue, returning if needed
+		if returner, ok := c.cfg.getOpener().(OpenerReturner); ok && returner.CanReturn() {
+			if err := returner.Return(c.ctx); err != nil {
+				return nil, fmt.Errorf("failed to return to calling application: %w", err)
+			}
+		}
 	}
 
 	if res.err != nil {

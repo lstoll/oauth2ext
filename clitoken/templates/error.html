@@ -17,5 +17,10 @@
             Please return to your terminal to try again.
         </div>
     </div>
+    {{if .CloseAfter}}
+    <script>
+        setTimeout(function() { window.close(); }, {{.CloseAfter}});
+    </script>
+    {{end}}
 </body>
 </html>

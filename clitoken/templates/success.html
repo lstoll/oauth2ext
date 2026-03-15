@@ -16,5 +16,10 @@
             You can now return to your terminal to continue.
         </div>
     </div>
+    {{if .CloseAfter}}
+    <script>
+        setTimeout(function() { window.close(); }, {{.CloseAfter}});
+    </script>
+    {{end}}
 </body>
 </html>
