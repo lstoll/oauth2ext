@@ -1,12 +1,16 @@
 package dpop
 
 import (
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"time"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
+	"github.com/tink-crypto/tink-go/v2/keyset"
+	"google.golang.org/protobuf/types/known/structpb"
 	"lds.li/oauth2ext/internal/th"
 )
 
@@ -19,6 +23,12 @@ type Verifier struct {
 	// if it has no explicit expiry. Defaults to DefaultValidityAfterIssue.
 	ValidityAfterIssue time.Duration
 
+	// TrustedRoots, when non-nil, requires a non-empty x5c JWT header. The leaf
+	// certificate must chain to one of these roots (per x509.Verify). The JWT
+	// signature is verified using the leaf certificate's public key. When nil,
+	// verification uses the embedded jwk header only (RFC 9449 default).
+	TrustedRoots *x509.CertPool
+
 	now time.Time
 }
 
@@ -28,6 +38,10 @@ type Proof struct {
 	VerifiedJWT *jwt.VerifiedJWT
 	// Thumbprint is the JWK thumbprint.
 	Thumbprint string
+	// CertificateChain is the validated x5c chain (leaf first, then
+	// intermediates toward the trust anchor) when [Verifier.TrustedRoots] was
+	// set; otherwise nil.
+	CertificateChain []*x509.Certificate
 }
 
 // ValidatorOpts parameters for DPoP token validation.
@@ -67,49 +81,24 @@ func (d *Verifier) VerifyAndDecode(compact string, validator *Validator) (*Proof
 		return nil, fmt.Errorf("parsing JWT header: %w", err)
 	}
 
-	jwkRaw, ok := header["jwk"]
-	if !ok {
-		return nil, fmt.Errorf("jwk header is missing")
-	}
+	var thumbprint string
+	var handle *keyset.Handle
+	var certChain []*x509.Certificate
 
-	thumbprint, err := calculateJWKThumbprint(jwkRaw)
+	if d.TrustedRoots != nil {
+		thumbprint, handle, certChain, err = d.verifyMaterialFromX5C(header)
+	} else {
+		thumbprint, handle, err = verifyMaterialFromJWK(header)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("calculating JWK thumbprint: %w", err)
+		return nil, err
 	}
 
-	// Firstly, make sure the thumbprint matches the expected one. Can fail fase
-	// if it doesn't
 	if !validator.opts.IgnoreThumbprint && thumbprint != validator.opts.ExpectedThumbprint {
 		return nil, fmt.Errorf("JWK thumbprint mismatch: got %q, want %q", thumbprint, validator.opts.ExpectedThumbprint)
 	}
 
-	// we need to make sure we have an alg for the JWK, for tink to handle it.
-	// We rely on it to validate the specified alg matches the key type.
-	alg, ok := header["alg"].(string)
-	if !ok {
-		return nil, fmt.Errorf("missing or invalid alg in header")
-	}
-
-	jwkMap, ok := jwkRaw.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("jwk is not a map")
-	}
-
-	jwkForTink := make(map[string]any)
-	maps.Copy(jwkForTink, jwkMap)
-	jwkForTink["alg"] = alg
-
-	jwkWithAlgJSON, err := json.Marshal(jwkForTink)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling jwk with alg: %w", err)
-	}
-
-	handle, err := jwt.JWKSetToPublicKeysetHandle(fmt.Appendf(nil, `{"keys":[%s]}`, string(jwkWithAlgJSON)))
-	if err != nil {
-		return nil, fmt.Errorf("creating keyset handle from JWK: %w", err)
-	}
-
-	verifier, err := jwt.NewVerifier(handle)
+	jwtVerifier, err := jwt.NewVerifier(handle)
 	if err != nil {
 		return nil, fmt.Errorf("creating tink verifier: %w", err)
 	}
@@ -122,7 +111,7 @@ func (d *Verifier) VerifyAndDecode(compact string, validator *Validator) (*Proof
 		return nil, fmt.Errorf("creating validator: %w", err)
 	}
 
-	verifiedJWT, err := verifier.VerifyAndDecode(compact, tinkValidator)
+	verifiedJWT, err := jwtVerifier.VerifyAndDecode(compact, tinkValidator)
 	if err != nil {
 		return nil, fmt.Errorf("verifying JWT: %w", err)
 	}
@@ -183,7 +172,159 @@ func (d *Verifier) VerifyAndDecode(compact string, validator *Validator) (*Proof
 	}
 
 	return &Proof{
-		VerifiedJWT: verifiedJWT,
-		Thumbprint:  thumbprint,
+		VerifiedJWT:      verifiedJWT,
+		Thumbprint:       thumbprint,
+		CertificateChain: certChain,
 	}, nil
+}
+
+func headerAlg(header *structpb.Struct) (string, error) {
+	if !hasClaimOfKind(header, "alg", &structpb.Value{Kind: &structpb.Value_StringValue{}}) {
+		return "", fmt.Errorf("alg header is missing")
+	}
+	alg := header.GetFields()["alg"].GetStringValue()
+	if alg == "" {
+		return "", fmt.Errorf("alg header is empty")
+	}
+	return alg, nil
+}
+
+func keysetHandleFromJWKWithAlg(jwk map[string]any, alg string) (*keyset.Handle, error) {
+	jwkForTink := make(map[string]any)
+	maps.Copy(jwkForTink, jwk)
+	jwkForTink["alg"] = alg
+	jwkWithAlgJSON, err := json.Marshal(jwkForTink)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling jwk with alg: %w", err)
+	}
+	handle, err := jwt.JWKSetToPublicKeysetHandle(fmt.Appendf(nil, `{"keys":[%s]}`, string(jwkWithAlgJSON)))
+	if err != nil {
+		return nil, fmt.Errorf("creating keyset handle from JWK: %w", err)
+	}
+	return handle, nil
+}
+
+func verifyMaterialFromJWK(header *structpb.Struct) (thumbprint string, handle *keyset.Handle, err error) {
+	if !hasClaimOfKind(header, "jwk", &structpb.Value{Kind: &structpb.Value_StructValue{}}) {
+		return "", nil, fmt.Errorf("jwk header is missing")
+	}
+	jwk := header.GetFields()["jwk"].GetStructValue().AsMap()
+	if len(jwk) == 0 {
+		return "", nil, fmt.Errorf("jwk header is missing")
+	}
+
+	thumbprint, err = calculateJWKThumbprint(jwk)
+	if err != nil {
+		return "", nil, fmt.Errorf("calculating JWK thumbprint: %w", err)
+	}
+
+	alg, err := headerAlg(header)
+	if err != nil {
+		return "", nil, err
+	}
+
+	handle, err = keysetHandleFromJWKWithAlg(jwk, alg)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return thumbprint, handle, nil
+}
+
+func (d *Verifier) verifyMaterialFromX5C(header *structpb.Struct) (thumbprint string, handle *keyset.Handle, chain []*x509.Certificate, err error) {
+	if !hasClaimOfKind(header, "x5c", &structpb.Value{Kind: &structpb.Value_ListValue{}}) {
+		return "", nil, nil, fmt.Errorf("x5c header is required when Verifier.TrustedRoots is set")
+	}
+	x5c := header.GetFields()["x5c"].GetListValue().AsSlice()
+	if len(x5c) == 0 {
+		return "", nil, nil, fmt.Errorf("x5c header is missing or empty")
+	}
+
+	certChain, err := parseAndVerifyCertChain(d.TrustedRoots, x5c)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("verifying certificate chain: %w", err)
+	}
+
+	leafCert := certChain[0]
+	leafJWK, err := publicKeyToJWK(leafCert.PublicKey)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("leaf certificate public key: %w", err)
+	}
+
+	thumbprint, err = calculateJWKThumbprint(leafJWK)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("calculating JWK thumbprint: %w", err)
+	}
+
+	if hasClaimOfKind(header, "jwk", &structpb.Value{Kind: &structpb.Value_StructValue{}}) {
+		hdrJWK := header.GetFields()["jwk"].GetStructValue().AsMap()
+		if len(hdrJWK) > 0 {
+			hdrTP, err := calculateJWKThumbprint(hdrJWK)
+			if err != nil {
+				return "", nil, nil, fmt.Errorf("calculating header jwk thumbprint: %w", err)
+			}
+			if hdrTP != thumbprint {
+				return "", nil, nil, fmt.Errorf("jwk does not match x5c leaf certificate public key")
+			}
+		}
+	}
+
+	alg, err := headerAlg(header)
+	if err != nil {
+		return "", nil, nil, err
+	}
+
+	handle, err = keysetHandleFromJWKWithAlg(leafJWK, alg)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("creating keyset handle from leaf certificate: %w", err)
+	}
+
+	return thumbprint, handle, certChain, nil
+}
+
+func parseAndVerifyCertChain(roots *x509.CertPool, x5c []any) ([]*x509.Certificate, error) {
+	if roots == nil {
+		return nil, fmt.Errorf("trusted roots are not set")
+	}
+
+	certs := make([]*x509.Certificate, 0, len(x5c))
+	for i, certB64 := range x5c {
+		certStr, ok := certB64.(string)
+		if !ok {
+			return nil, fmt.Errorf("x5c[%d] is not a string", i)
+		}
+
+		certDER, err := base64.StdEncoding.DecodeString(certStr)
+		if err != nil {
+			return nil, fmt.Errorf("decoding x5c[%d]: %w", i, err)
+		}
+
+		cert, err := x509.ParseCertificate(certDER)
+		if err != nil {
+			return nil, fmt.Errorf("parsing x5c[%d]: %w", i, err)
+		}
+
+		certs = append(certs, cert)
+	}
+
+	if len(certs) == 0 {
+		return nil, fmt.Errorf("no certificates in x5c chain")
+	}
+
+	leafCert := certs[0]
+	intermediates := certs[1:]
+
+	opts := x509.VerifyOptions{
+		Intermediates: x509.NewCertPool(),
+		Roots:         roots,
+	}
+	for _, intermediate := range intermediates {
+		opts.Intermediates.AddCert(intermediate)
+	}
+
+	if _, err := leafCert.Verify(opts); err != nil {
+		return nil, fmt.Errorf("certificate chain verification failed: %w", err)
+	}
+
+	return certs, nil
 }

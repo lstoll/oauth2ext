@@ -55,6 +55,8 @@ type TokenRequest struct {
 	// DPoPBound indicates whether this grant is bound to a DPoP key. If true,
 	// all token requests for this grant must include a valid DPoP proof.
 	DPoPBound bool
+	// DPoPProof includes the verified DPoP proof, if present.
+	DPoPProof *dpop.Proof
 }
 
 // TokenResponse is returned by the token endpoint handler, indicating what it
@@ -160,9 +162,13 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 
 	// Verify DPoP proof if present. In the code flow, we allow any thumbprint -
 	// the result is what we'll bind the grant to.
-	dpopThumbprint, err := s.verifyDPoPProof(s.config.Issuer, req, nil)
+	dpopProof, err := s.verifyDPoPProof(s.config.Issuer, req, nil)
 	if err != nil {
 		return nil, err
+	}
+	var dpopThumbprint string
+	if dpopProof != nil {
+		dpopThumbprint = dpopProof.Thumbprint
 	}
 
 	loadedGrant, err := s.getGrantFromAuthCode(ctx, treq.Code)
@@ -253,6 +259,7 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 		DecryptedMetadata: loadedGrant.decryptedMetadata,
 		IsRefresh:         false,
 		DPoPBound:         isDPoPBound,
+		DPoPProof:         dpopProof,
 	}
 
 	// TODO: Make TokenHandler callback optional for code exchange
@@ -339,12 +346,14 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		storedThumbprint = *loadedGrant.additionalState.DPoPThumbprint
 	}
 
+	var dpopProof *dpop.Proof
 	if storedThumbprint != "" {
-		thumbprint, err := s.verifyDPoPProof(s.config.Issuer, req, &storedThumbprint)
+		var err error
+		dpopProof, err = s.verifyDPoPProof(s.config.Issuer, req, &storedThumbprint)
 		if err != nil {
 			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "DPoP proof key mismatch"}
 		}
-		if thumbprint == "" {
+		if dpopProof == nil || dpopProof.Thumbprint == "" {
 			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "DPoP proof required"}
 		}
 	}
@@ -375,6 +384,7 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		DecryptedMetadata: loadedGrant.decryptedMetadata,
 		IsRefresh:         true,
 		DPoPBound:         isDPoPBound,
+		DPoPProof:         dpopProof,
 	}
 	tresp, err := s.config.TokenHandler(ctx, tr)
 	if err != nil {
@@ -618,27 +628,26 @@ func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
 }
 
 // verifyDPoPProof extracts and verifies the DPoP header from a request. Returns
-// the thumbprint if a valid DPoP proof is provided, empty string if no DPoP
-// header is present, or an error if the proof is invalid. The
-// expectedThumbprint parameter is optional, if it is not nil, the thumbprint
-// will be validated against it.
-func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbprint *string) (thumbprint string, err error) {
+// a verified [dpop.Proof] if a valid DPoP proof is provided, nil if no DPoP
+// header is present (and none is required), or an error if the proof is invalid.
+// When expectedThumbprint is non-nil, the proof's thumbprint must match it.
+func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbprint *string) (proof *dpop.Proof, err error) {
 	dpopHeader := req.Header.Get("DPoP")
 	if dpopHeader == "" {
 		if expectedThumbprint != nil {
-			return "", fmt.Errorf("DPoP header required")
+			return nil, fmt.Errorf("DPoP header required")
 		}
-		return "", nil
+		return nil, nil
 	}
 
 	if s.config.DPoPVerifier == nil {
 		slog.DebugContext(req.Context(), "DPoP proof provided but DPoP is not supported")
-		return "", nil
+		return nil, nil
 	}
 
 	issURL, err := url.Parse(iss)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse issuer: %w", err)
+		return nil, fmt.Errorf("failed to parse issuer: %w", err)
 	}
 
 	opts := &dpop.ValidatorOpts{
@@ -655,12 +664,12 @@ func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbpri
 	// Verify the DPoP proof (verifier will validate HTM/HTU from request)
 	validator, err := dpop.NewValidator(opts)
 	if err != nil {
-		return "", fmt.Errorf("failed to create validator: %w", err)
+		return nil, fmt.Errorf("failed to create validator: %w", err)
 	}
 	res, err := s.config.DPoPVerifier.VerifyAndDecode(dpopHeader, validator)
 	if err != nil {
-		return "", fmt.Errorf("failed to verify DPoP proof: %w", err)
+		return nil, fmt.Errorf("failed to verify DPoP proof: %w", err)
 	}
 
-	return res.Thumbprint, nil
+	return res, nil
 }
