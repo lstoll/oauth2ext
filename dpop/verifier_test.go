@@ -616,6 +616,10 @@ func testLeafCertChain(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate, *x50
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
+		// Client auth only — not TLS server auth. Matches many real issuing
+		// templates and would fail x509.Verify with default KeyUsages unless we
+		// pass ExtKeyUsageAny (see crypto/x509.VerifyOptions.KeyUsages).
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTpl, caCert, &leafPriv.PublicKey, caPriv)
 	if err != nil {
