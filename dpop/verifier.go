@@ -25,7 +25,8 @@ type Verifier struct {
 	// TrustedRoots, when non-nil, requires a non-empty x5c JWT header. The leaf
 	// certificate must chain to one of these roots (per x509.Verify). The JWT
 	// signature is verified using the leaf certificate's public key. When nil,
-	// verification uses the embedded jwk header only (RFC 9449 default).
+	// verification uses the embedded jwk header only (RFC 9449 default). Any
+	// key usage will be considered valid.
 	TrustedRoots *x509.CertPool
 
 	now time.Time
@@ -316,6 +317,7 @@ func parseAndVerifyCertChain(roots *x509.CertPool, x5c []any) ([]*x509.Certifica
 	opts := x509.VerifyOptions{
 		Intermediates: x509.NewCertPool(),
 		Roots:         roots,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 	}
 	for _, intermediate := range intermediates {
 		opts.Intermediates.AddCert(intermediate)
