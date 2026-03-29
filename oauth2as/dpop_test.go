@@ -13,7 +13,6 @@ import (
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/dpop"
-	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
 	"lds.li/oauth2ext/oidc"
@@ -181,8 +180,8 @@ func TestDPoPTokenFlow(t *testing.T) {
 
 		// Calculate expected thumbprint by verifying the proof
 		validator, err := dpop.NewValidator(&dpop.ValidatorOpts{
-			ExpectedHTM:      th.Ptr(http.MethodPost),
-			ExpectedHTU:      th.Ptr(issuer + "/token"),
+			ExpectedHTM:      new(http.MethodPost),
+			ExpectedHTU:      new(issuer + "/token"),
 			IgnoreThumbprint: true,
 			AllowUnsetHTMHTU: true,
 		})

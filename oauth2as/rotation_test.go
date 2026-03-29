@@ -236,7 +236,7 @@ func TestConcurrentRefreshAttempts(t *testing.T) {
 	}
 	results := make(chan result, 2)
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		go func() {
 			t, e := o2.TokenSource(ctx, &oauth2.Token{
 				RefreshToken: rt1,
@@ -249,7 +249,7 @@ func TestConcurrentRefreshAttempts(t *testing.T) {
 	// Collect results
 	var successes int
 	var failures int
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		r := <-results
 		if r.err == nil {
 			successes++
@@ -481,7 +481,7 @@ func TestEncryptedMetadataWithRotation(t *testing.T) {
 	}
 
 	// Perform multiple refreshes to verify metadata survives rotation
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		tok.Expiry = time.Now().Add(-1 * time.Hour)
 		tok, err = o2.TokenSource(ctx, tok).Token()
 		if err != nil {

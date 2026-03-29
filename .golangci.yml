@@ -8,6 +8,7 @@ linters:
     - misspell
     - revive
     - unparam
+    - modernize
   exclusions:
     generated: lax
     rules:

@@ -5,7 +5,6 @@ import (
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
-	"lds.li/oauth2ext/internal/th"
 )
 
 type Validator[Claims Claimable] interface {
@@ -49,7 +48,7 @@ func (v *Verifier[Claims]) VerifyAndDecode(ctx context.Context, compact string, 
 	var empty Claims
 
 	vo := validator.ValidatorOpts()
-	vo.ExpectedIssuer = th.Ptr(v.provider.Issuer())
+	vo.ExpectedIssuer = new(v.provider.Issuer())
 	tinkValidator, err := jwt.NewValidator(vo)
 	if err != nil {
 		return empty, err

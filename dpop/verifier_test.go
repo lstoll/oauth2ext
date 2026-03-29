@@ -143,7 +143,7 @@ func TestDPoPVerifier_RejectsMissingJWK(t *testing.T) {
 
 	now := time.Now()
 	opts := &jwt.RawJWTOptions{
-		TypeHeader:        stringPtr("dpop+jwt"),
+		TypeHeader:        new("dpop+jwt"),
 		WithoutExpiration: true,
 		IssuedAt:          &now,
 	}
@@ -188,7 +188,7 @@ func TestDPoPVerifier_RejectsExpiredToken(t *testing.T) {
 	// Issue token 20 minutes ago (default validity is 10 minutes)
 	issuedAt := time.Now().Add(-20 * time.Minute)
 	opts := &jwt.RawJWTOptions{
-		TypeHeader:        stringPtr("dpop+jwt"),
+		TypeHeader:        new("dpop+jwt"),
 		WithoutExpiration: true,
 		IssuedAt:          &issuedAt,
 		CustomClaims: map[string]any{
@@ -258,10 +258,6 @@ func TestJWKThumbprint_Calculation(t *testing.T) {
 	}
 
 	t.Logf("JWK thumbprint: %s", thumbprint)
-}
-
-func stringPtr(s string) *string {
-	return &s
 }
 
 func TestDPoPVerifier_HTM_HTU_Validation(t *testing.T) {
@@ -820,7 +816,7 @@ func TestDPoPVerifier_TrustedRoots_JWKMismatchesLeaf(t *testing.T) {
 
 	now := time.Now()
 	rawJWT, err := jwt.NewRawJWT(&jwt.RawJWTOptions{
-		TypeHeader:        stringPtr("dpop+jwt"),
+		TypeHeader:        new("dpop+jwt"),
 		WithoutExpiration: true,
 		IssuedAt:          &now,
 	})

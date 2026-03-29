@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
-	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
 )
 
@@ -100,7 +99,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 func (s *Server) verifyAccessToken(compact string) (*jwt.VerifiedJWT, error) {
 	valid, err := jwt.NewValidator(&jwt.ValidatorOpts{
 		ExpectedIssuer:     &s.config.Issuer,
-		ExpectedTypeHeader: th.Ptr("at+jwt"),
+		ExpectedTypeHeader: new("at+jwt"),
 		IgnoreAudiences:    true,
 	})
 	if err != nil {

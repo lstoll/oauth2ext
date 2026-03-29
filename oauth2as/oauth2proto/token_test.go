@@ -162,7 +162,7 @@ func TestWriteTokenResponse(t *testing.T) {
 	for _, tc := range []struct {
 		Name string
 		Resp *TokenResponse
-		Want map[string]interface{}
+		Want map[string]any
 	}{
 		{
 			Name: "valid response",
@@ -172,11 +172,11 @@ func TestWriteTokenResponse(t *testing.T) {
 				ExpiresIn:    1 * time.Minute,
 				RefreshToken: "refresh",
 				Scopes:       []string{"openid"},
-				ExtraParams: map[string]interface{}{
+				ExtraParams: map[string]any{
 					"id_token": "beer",
 				},
 			},
-			Want: map[string]interface{}{
+			Want: map[string]any{
 				"access_token":  "access",
 				"expires_in":    float64(60),
 				"id_token":      "beer",
@@ -195,7 +195,7 @@ func TestWriteTokenResponse(t *testing.T) {
 				t.Errorf("want OK status, got %d", w.Result().StatusCode)
 			}
 
-			got := map[string]interface{}{}
+			got := map[string]any{}
 			if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
