@@ -10,18 +10,17 @@ import (
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
-	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/provider"
 )
 
 func TestIDClaims(t *testing.T) {
 	rawOpts := &RawIDOptions{
-		Issuer:    th.Ptr("https://example.com"),
-		ClientID:  th.Ptr("https://example.com"),
-		Subject:   th.Ptr("https://example.com"),
-		IssuedAt:  th.Ptr(time.Now()),
-		ExpiresAt: th.Ptr(time.Now().Add(1 * time.Hour)),
-		NotBefore: th.Ptr(time.Now()),
+		Issuer:    new("https://example.com"),
+		ClientID:  new("https://example.com"),
+		Subject:   new("https://example.com"),
+		IssuedAt:  new(time.Now()),
+		ExpiresAt: new(time.Now().Add(1 * time.Hour)),
+		NotBefore: new(time.Now()),
 		AMR:       []string{"amr1", "amr2"},
 	}
 
@@ -60,9 +59,9 @@ func TestIDTokenValidator(t *testing.T) {
 		opts := &jwt.RawJWTOptions{
 			Issuer:    &iss,
 			Audience:  &aud,
-			Subject:   th.Ptr("test-subject"),
+			Subject:   new("test-subject"),
 			IssuedAt:  &now,
-			ExpiresAt: th.Ptr(now.Add(time.Hour)),
+			ExpiresAt: new(now.Add(time.Hour)),
 		}
 		if opts.CustomClaims == nil {
 			opts.CustomClaims = make(map[string]any)

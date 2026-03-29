@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
-	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/oauth2as/internal"
 	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
@@ -274,7 +273,7 @@ func TestCodeToken(t *testing.T) {
 			t.Fatalf("failed to decode id_token header: %v", err)
 		}
 
-		var headerMap map[string]interface{}
+		var headerMap map[string]any
 		if err := json.Unmarshal(header, &headerMap); err != nil {
 			t.Fatalf("failed to unmarshal id_token header: %v", err)
 		}
@@ -478,7 +477,7 @@ func TestRefreshToken(t *testing.T) {
 
 func TestUserinfo(t *testing.T) {
 	echoHandler := func(w io.Writer, uireq *UserinfoRequest) error {
-		o := map[string]interface{}{
+		o := map[string]any{
 			"gotsub": uireq.Subject,
 		}
 
@@ -490,7 +489,7 @@ func TestUserinfo(t *testing.T) {
 	}
 
 	signAccessToken := func(cl *jwt.RawJWTOptions) string {
-		cl.TypeHeader = th.Ptr("at+jwt")
+		cl.TypeHeader = new("at+jwt")
 
 		signer, _ := testSignerVerifier(t)
 
@@ -518,19 +517,19 @@ func TestUserinfo(t *testing.T) {
 		// WantErr signifies that we expect an error
 		WantErr bool
 		// WantJSON is what we want the endpoint to return
-		WantJSON map[string]interface{}
+		WantJSON map[string]any
 	}{
 		{
 			Name: "Simple output, valid session",
 			Setup: func(t *testing.T) (accessToken string) {
 				return signAccessToken(&jwt.RawJWTOptions{
 					Issuer:    &issuer,
-					Subject:   th.Ptr("sub"),
-					ExpiresAt: th.Ptr(time.Now().Add(1 * time.Minute)),
+					Subject:   new("sub"),
+					ExpiresAt: new(time.Now().Add(1 * time.Minute)),
 				})
 			},
 			Handler: echoHandler,
-			WantJSON: map[string]interface{}{
+			WantJSON: map[string]any{
 				"gotsub": "sub",
 			},
 		},
@@ -538,9 +537,9 @@ func TestUserinfo(t *testing.T) {
 			Name: "Token for other issuer",
 			Setup: func(t *testing.T) (accessToken string) {
 				return signAccessToken(&jwt.RawJWTOptions{
-					Issuer:    th.Ptr("http://other"),
-					Subject:   th.Ptr("sub"),
-					ExpiresAt: th.Ptr(time.Now().Add(1 * time.Minute)),
+					Issuer:    new("http://other"),
+					Subject:   new("sub"),
+					ExpiresAt: new(time.Now().Add(1 * time.Minute)),
 				})
 			},
 			Handler: echoHandler,
@@ -551,8 +550,8 @@ func TestUserinfo(t *testing.T) {
 			Setup: func(t *testing.T) (accessToken string) {
 				return signAccessToken(&jwt.RawJWTOptions{
 					Issuer:    &issuer,
-					Subject:   th.Ptr("sub"),
-					ExpiresAt: th.Ptr(time.Now().Add(-1 * time.Minute)),
+					Subject:   new("sub"),
+					ExpiresAt: new(time.Now().Add(-1 * time.Minute)),
 				})
 			},
 			Handler: echoHandler,

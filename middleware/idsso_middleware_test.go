@@ -146,8 +146,8 @@ func (s *mockOIDCServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	clOpts := *s.claimOptions
 	clOpts.Issuer = &s.baseURL
 	clOpts.Audience = &clientID
-	clOpts.ExpiresAt = ptr(time.Now().Add(time.Minute))
-	clOpts.IssuedAt = ptr(time.Now())
+	clOpts.ExpiresAt = new(time.Now().Add(time.Minute))
+	clOpts.IssuedAt = new(time.Now())
 
 	cl, err := jwt.NewRawJWT(&clOpts)
 	if err != nil {
@@ -197,7 +197,7 @@ func TestMiddleware_HappyPath(t *testing.T) {
 	oidcServer.validClientSecret = "valid-client-secret"
 	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
 	oidcServer.claimOptions = &jwt.RawJWTOptions{
-		Subject: ptr("valid-subject"),
+		Subject: new("valid-subject"),
 	}
 
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
@@ -245,16 +245,14 @@ func TestMiddleware_HappyPath(t *testing.T) {
 		errC      = make(chan error, flowIters)
 	)
 	for i := 1; i <= flowIters; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			resp, err := client.Get(httpServer.URL)
 			if err != nil {
 				errC <- err
 			}
 			respC <- resp
-		}()
+		})
 	}
 	wg.Wait()
 	close(errC)
@@ -288,7 +286,7 @@ func TestContext(t *testing.T) {
 	oidcServer.validClientSecret = "valid-client-secret"
 	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
 	oidcServer.claimOptions = &jwt.RawJWTOptions{
-		Subject: ptr("valid-subject"),
+		Subject: new("valid-subject"),
 	}
 
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
@@ -352,8 +350,4 @@ func checkResponse(t *testing.T, resp *http.Response) (body []byte) {
 	}
 
 	return body
-}
-
-func ptr[T any](v T) *T {
-	return &v
 }

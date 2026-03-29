@@ -16,7 +16,6 @@ import (
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/signature/subtle"
-	"lds.li/oauth2ext/internal/th"
 )
 
 // Signer is used to sign DPoP proofs
@@ -87,7 +86,7 @@ func leafCertMatchesSigner(leaf *x509.Certificate, pub crypto.PublicKey) bool {
 
 // SignAndEncode signs the JWT as a DPoP proof, and returns the compact JWT.
 func (e *Signer) SignAndEncode(raw *jwt.RawJWTOptions) (string, error) {
-	raw.TypeHeader = th.Ptr("dpop+jwt")
+	raw.TypeHeader = new("dpop+jwt")
 	rawJWT, err := jwt.NewRawJWT(raw)
 	if err != nil {
 		return "", fmt.Errorf("creating raw JWT: %w", err)

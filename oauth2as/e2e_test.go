@@ -237,7 +237,7 @@ func TestE2E(t *testing.T) {
 
 			t.Logf("initial userinfo response: %#v", uir)
 
-			for i := 0; i < 5; i++ {
+			for i := range 5 {
 				t.Logf("refresh iter: %d", i)
 				currRT := tok.RefreshToken
 

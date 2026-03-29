@@ -15,7 +15,6 @@ import (
 
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/dpop"
-	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
 	"lds.li/oauth2ext/oidc"
@@ -545,8 +544,8 @@ func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (*jwt.R
 	// fixed values
 	rjwtopts.Issuer = &s.config.Issuer
 	rjwtopts.Audience = &grant.ClientID
-	rjwtopts.IssuedAt = th.Ptr(s.now())
-	rjwtopts.ExpiresAt = th.Ptr(idExp)
+	rjwtopts.IssuedAt = new(s.now())
+	rjwtopts.ExpiresAt = new(idExp)
 	rjwtopts.CustomClaims["auth_time"] = grant.GrantedAt.Unix()
 
 	// defaulted values
@@ -584,12 +583,12 @@ func (s *Server) buildAccessTokenClaims(grantID string, grant *StoredGrant, tres
 	}
 
 	// fixed values
-	rjwtopts.TypeHeader = th.Ptr("at+jwt")
+	rjwtopts.TypeHeader = new("at+jwt")
 
 	rjwtopts.Issuer = &s.config.Issuer
-	rjwtopts.IssuedAt = th.Ptr(s.now())
-	rjwtopts.ExpiresAt = th.Ptr(atExp)
-	rjwtopts.JWTID = th.Ptr(newUUIDv4())
+	rjwtopts.IssuedAt = new(s.now())
+	rjwtopts.ExpiresAt = new(atExp)
+	rjwtopts.JWTID = new(newUUIDv4())
 	rjwtopts.CustomClaims["client_id"] = grant.ClientID
 	rjwtopts.CustomClaims[claimGrantID] = grantID
 
@@ -651,8 +650,8 @@ func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbpri
 	}
 
 	opts := &dpop.ValidatorOpts{
-		ExpectedHTM:      th.Ptr(req.Method),
-		ExpectedHTU:      th.Ptr(fmt.Sprintf("%s://%s%s", issURL.Scheme, issURL.Host, req.URL.Path)),
+		ExpectedHTM:      new(req.Method),
+		ExpectedHTU:      new(fmt.Sprintf("%s://%s%s", issURL.Scheme, issURL.Host, req.URL.Path)),
 		AllowUnsetHTMHTU: true, // Allow requests without HTM/HTU if the client doesn't require them
 	}
 	if expectedThumbprint == nil {

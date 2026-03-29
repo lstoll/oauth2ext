@@ -16,7 +16,7 @@ func TestRegisterWithProvider(t *testing.T) {
 	tests := []struct {
 		name           string
 		request        *ClientRegistrationRequest
-		serverResponse interface{}
+		serverResponse any
 		statusCode     int
 		wantErr        bool
 		wantErrorCode  string

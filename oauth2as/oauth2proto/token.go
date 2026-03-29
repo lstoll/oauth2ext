@@ -96,7 +96,7 @@ type TokenResponse struct {
 	ExpiresIn    time.Duration
 	RefreshToken string
 	Scopes       []string
-	ExtraParams  map[string]interface{}
+	ExtraParams  map[string]any
 }
 
 // WriteTokenResponse sends a response for the token endpoint.
@@ -107,7 +107,7 @@ func WriteTokenResponse(w http.ResponseWriter, resp *TokenResponse) error {
 
 	respJSON := resp.ExtraParams
 	if respJSON == nil {
-		respJSON = make(map[string]interface{})
+		respJSON = make(map[string]any)
 	}
 
 	respJSON["access_token"] = resp.AccessToken

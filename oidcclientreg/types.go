@@ -80,7 +80,7 @@ type ClientRegistrationRequest struct {
 	// it does not enable key rotation (which jwks_uri does, as described in Section 10 of
 	// OpenID Connect Core 1.0 [OpenID.Core]). The jwks_uri and jwks parameters MUST NOT be
 	// used together.
-	Jwks interface{} `json:"jwks,omitempty"`
+	Jwks any `json:"jwks,omitempty"`
 
 	// SectorIdentifierURI is OPTIONAL. URL using the https scheme to be used in calculating Pseudonymous Identifiers
 	// by the OP. The URL references a file with a single JSON array of redirect_uri values.

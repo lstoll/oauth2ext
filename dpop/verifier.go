@@ -11,7 +11,6 @@ import (
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 	"google.golang.org/protobuf/types/known/structpb"
-	"lds.li/oauth2ext/internal/th"
 )
 
 // DefaultValidityAfterIssue is the default validity after the issue time for a
@@ -104,7 +103,7 @@ func (d *Verifier) VerifyAndDecode(compact string, validator *Validator) (*Proof
 	}
 
 	tinkValidator, err := jwt.NewValidator(&jwt.ValidatorOpts{
-		ExpectedTypeHeader:     th.Ptr("dpop+jwt"),
+		ExpectedTypeHeader:     new("dpop+jwt"),
 		AllowMissingExpiration: true,
 	})
 	if err != nil {

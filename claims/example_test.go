@@ -12,7 +12,6 @@ import (
 	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/internal"
-	"lds.li/oauth2ext/internal/th"
 	"lds.li/oauth2ext/provider"
 )
 
@@ -33,15 +32,15 @@ func ExampleVerifier_VerifyAndDecode() {
 	}
 
 	validator := NewIDTokenValidator(&IDTokenValidatorOpts{
-		ClientID: th.Ptr("client-id"),
+		ClientID: new("client-id"),
 	})
 
 	rawJWT, err := jwt.NewRawJWT(&jwt.RawJWTOptions{
-		Issuer:    th.Ptr(server.URL),
-		Audience:  th.Ptr("client-id"),
-		Subject:   th.Ptr("subject"),
-		IssuedAt:  th.Ptr(time.Now()),
-		ExpiresAt: th.Ptr(time.Now().Add(time.Hour)),
+		Issuer:    new(server.URL),
+		Audience:  new("client-id"),
+		Subject:   new("subject"),
+		IssuedAt:  new(time.Now()),
+		ExpiresAt: new(time.Now().Add(time.Hour)),
 	})
 	if err != nil {
 		log.Fatalf("failed to create raw JWT: %v", err)

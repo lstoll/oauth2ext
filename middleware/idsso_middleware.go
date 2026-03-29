@@ -339,7 +339,7 @@ func (h *IDSSOHandler[IDClaims]) getOAuth2Config() (oauth2.Config, error) {
 
 type contextData struct {
 	token    *oauth2.Token
-	idclaims interface{}
+	idclaims any
 }
 
 // IDClaimsFromContext returns the validated OIDC ID claims from the given

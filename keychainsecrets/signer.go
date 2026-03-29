@@ -35,7 +35,10 @@ func NewSEPSigner(label string, opts ...SepSignerOpt) (crypto.Signer, error) {
 		}
 
 		// Identity doesn't exist, create it
-		_, err = keychain.CreateCTKIdentity(label, keychain.CTKKeyTypeP256)
+		_, err = keychain.CreateCTKIdentity(keychain.CreateCTKIdentityInput{
+			Label:   label,
+			KeyType: keychain.CTKKeyTypeP256,
+		})
 		if err != nil {
 			return nil, err
 		}
