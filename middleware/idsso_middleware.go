@@ -54,6 +54,11 @@ type IDSSOHandler[IDClaims any] struct {
 	// here if the return to URL was not tracked or login was triggered from a
 	// non-GET method request.
 	BaseURL string
+	// AllowUnauthenticated, if true, lets requests without a session reach the
+	// wrapped handler without ID claims in context. OAuth callbacks and
+	// ServeLogin still run the auth code flow. Authorization remains the app's
+	// responsibility.
+	AllowUnauthenticated bool
 }
 
 // NewIDSSOHandlerFromDiscovery constructs a handler by discovering the
@@ -153,8 +158,13 @@ func (h *IDSSOHandler[IDClaims]) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
+		if h.AllowUnauthenticated {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Not authenticated. Kick off an auth flow.
-		redirectURL, err := h.startAuthentication(r, session)
+		redirectURL, err := h.prepareLogin(r, session, "")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -167,6 +177,71 @@ func (h *IDSSOHandler[IDClaims]) Wrap(next http.Handler) http.Handler {
 
 		http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 	})
+}
+
+// ServeLogin starts the OIDC authorization code flow and redirects to the IdP.
+// returnTo must be a path on this application (for example "/dashboard" or
+// "/items?id=1"). If returnTo is empty, GET requests use the current request
+// path and query; other methods leave the post-login destination to BaseURL or
+// "/" when the callback completes.
+func (h *IDSSOHandler[IDClaims]) ServeLogin(w http.ResponseWriter, r *http.Request, returnTo string) {
+	if h.SessionStore == nil {
+		slog.ErrorContext(r.Context(), "Uninitialized session store", baseLogAttr)
+		http.Error(w, "Uninitialized session store", http.StatusInternalServerError)
+		return
+	}
+	if h.Verifier == nil {
+		slog.ErrorContext(r.Context(), "Uninitialized verifier", baseLogAttr)
+		http.Error(w, "Uninitialized verifier", http.StatusInternalServerError)
+		return
+	}
+	session, err := h.SessionStore.GetOIDCSession(r)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Failed to get session", baseLogAttr, errAttr(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	redirectURL, err := h.prepareLogin(r, session, returnTo)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := h.SessionStore.SaveOIDCSession(w, r, session); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
+}
+
+// ServeLogout clears the OIDC session (tokens and in-flight login state),
+// persists the updated session, and redirects the client. The returnTo
+// parameter follows the same rules as ServeLogin: it must be a path on this
+// application when non-empty; if empty, GET requests use the current request
+// path and query; other methods redirect to BaseURL or "/" after logout.
+func (h *IDSSOHandler[IDClaims]) ServeLogout(w http.ResponseWriter, r *http.Request, returnTo string) {
+	if h.SessionStore == nil {
+		slog.ErrorContext(r.Context(), "Uninitialized session store", baseLogAttr)
+		http.Error(w, "Uninitialized session store", http.StatusInternalServerError)
+		return
+	}
+	if h.Verifier == nil {
+		slog.ErrorContext(r.Context(), "Uninitialized verifier", baseLogAttr)
+		http.Error(w, "Uninitialized verifier", http.StatusInternalServerError)
+		return
+	}
+	session, err := h.SessionStore.GetOIDCSession(r)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "Failed to get session", baseLogAttr, errAttr(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	session.Token = nil
+	session.Logins = nil
+	if err := h.SessionStore.SaveOIDCSession(w, r, session); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, resolveReturnTo(returnToFromRequest(r, returnTo), h.BaseURL), http.StatusSeeOther)
 }
 
 // authenticateExisting returns (token, idClaims, nil) if the user is
@@ -295,15 +370,29 @@ func (h *IDSSOHandler[IDClaims]) authenticateCallback(r *http.Request, session *
 	return returnTo, nil
 }
 
-func (h *IDSSOHandler[IDClaims]) startAuthentication(r *http.Request, session *SessionData) (string, error) {
+// returnToFromRequest resolves the in-app redirect target stored for the OAuth
+// callback. If the result is empty, authenticateCallback and ServeLogout apply
+// BaseURL or "/".
+func returnToFromRequest(r *http.Request, explicitReturnTo string) string {
+	switch {
+	case explicitReturnTo != "":
+		return sanitizeReturnTo(explicitReturnTo)
+	case r.Method == http.MethodGet:
+		return sanitizeReturnTo(r.URL.RequestURI())
+	default:
+		return ""
+	}
+}
+
+func (h *IDSSOHandler[IDClaims]) prepareLogin(r *http.Request, session *SessionData, explicitReturnTo string) (string, error) {
 	session.Token = nil
 
 	var (
 		state         = rand.Text()
 		nonce         = rand.Text()
 		pkceChallenge string
-		returnTo      string
 	)
+	returnTo := returnToFromRequest(r, explicitReturnTo)
 
 	opts := append(slices.Clone(h.AuthCodeOptions), oauth2.SetAuthURLParam("nonce", nonce))
 	if h.Provider != nil && slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
@@ -311,9 +400,6 @@ func (h *IDSSOHandler[IDClaims]) startAuthentication(r *http.Request, session *S
 		opts = append(opts, oauth2.S256ChallengeOption(pkceChallenge))
 	}
 
-	if r.Method == http.MethodGet {
-		returnTo = sanitizeReturnTo(r.URL.RequestURI())
-	}
 	session.Logins = append(session.Logins, SessionDataLogin{
 		State:         state,
 		Nonce:         nonce,
