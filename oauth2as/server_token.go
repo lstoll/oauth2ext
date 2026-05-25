@@ -313,6 +313,10 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 	}
 
+	if err := s.validateTokenClient(ctx, treq, loadedGrant.grant.ClientID); err != nil {
+		return nil, err
+	}
+
 	// Handle grace period for rotated tokens
 	if loadedGrant.refreshToken.ReplacedByTokenID != "" {
 		// Strict Option 2: Revoke the new one, and issue a third.

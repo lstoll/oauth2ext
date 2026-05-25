@@ -434,6 +434,23 @@ func TestRefreshToken(t *testing.T) {
 		}
 	})
 
+	t.Run("Invalid client secret should fail", func(t *testing.T) {
+		o := newOIDC()
+		refreshToken := newRefreshGrant(t, o.config.Storage)
+
+		treq := &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeRefreshToken,
+			RefreshToken: refreshToken,
+			ClientID:     clientID,
+			ClientSecret: "invalid-secret",
+		}
+
+		_, err := o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
+		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeUnauthorizedClient {
+			t.Errorf("want unauthorized_client error, got: %v", err)
+		}
+	})
+
 	t.Run("Refresh token with handler errors", func(t *testing.T) {
 		o := newOIDC()
 		refreshToken := newRefreshGrant(t, o.config.Storage)
