@@ -104,7 +104,7 @@ func (c *Cookiestore) GetOIDCSession(r *http.Request) (*SessionData, error) {
 				State:         state,
 				Nonce:         v.Get("no"),
 				PKCEChallenge: v.Get("pc"), // pkce_challenge
-				ReturnTo:      v.Get("rt"), // return_to
+				ReturnTo:      sanitizeReturnTo(v.Get("rt")), // return_to
 				Expires:       int(expires),
 			})
 		}
