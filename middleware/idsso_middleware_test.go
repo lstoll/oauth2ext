@@ -524,6 +524,48 @@ func TestMiddleware_AllowUnauthenticated(t *testing.T) {
 	}
 }
 
+func TestMiddleware_AJAXUnauth401(t *testing.T) {
+	oidcServer, oidcHTTPServer := startMockOIDCServer(t)
+
+	httpServer := httptest.NewTLSServer(nil)
+	t.Cleanup(httpServer.Close)
+
+	oidcServer.validClientID = "valid-client-id"
+	oidcServer.validClientSecret = "valid-client-secret"
+	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
+	oidcServer.claims = map[string]any{
+		"sub": "valid-subject",
+	}
+
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
+	handler, err := NewFromDiscovery(ctx, &memSessStore{}, oidcServer.baseURL, oidcServer.validClientID, oidcServer.validClientSecret, oidcServer.validRedirectURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.AJAXUnauth401 = true
+
+	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(context.WithValue(r.Context(), oauth2.HTTPClient, oidcHTTPServer.Client()))
+		handler.Wrap(protected).ServeHTTP(w, r)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "application/json")
+	rr := httptest.NewRecorder()
+	wrapped.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+	if got := rr.Header().Get("Location"); got != "" {
+		t.Fatalf("Location = %q, want empty", got)
+	}
+}
+
 func TestServeLogin_storesReturnToAndRedirects(t *testing.T) {
 	oidcServer, oidcHTTPServer := startMockOIDCServer(t)
 	store := &memSessStore{}

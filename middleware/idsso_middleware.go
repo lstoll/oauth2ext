@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -59,6 +60,9 @@ type IDSSOHandler[IDClaims any] struct {
 	// ServeLogin still run the auth code flow. Authorization remains the app's
 	// responsibility.
 	AllowUnauthenticated bool
+	// AJAXUnauth401, if true, will return a 401 Unauthorized response for AJAX
+	// requests instead of redirecting to the login page.
+	AJAXUnauth401 bool
 }
 
 // NewIDSSOHandlerFromDiscovery constructs a handler by discovering the
@@ -160,6 +164,10 @@ func (h *IDSSOHandler[IDClaims]) Wrap(next http.Handler) http.Handler {
 
 		if h.AllowUnauthenticated {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if h.AJAXUnauth401 && isAJAXRequest(r) {
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
 
@@ -420,6 +428,13 @@ func (h *IDSSOHandler[IDClaims]) getOAuth2Config() (oauth2.Config, error) {
 		return oauth2.Config{}, fmt.Errorf("no OAuth2Config provided")
 	}
 	return *h.OAuth2Config, nil
+}
+
+func isAJAXRequest(r *http.Request) bool {
+	if strings.EqualFold(r.Header.Get("X-Requested-With"), "XMLHttpRequest") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json")
 }
 
 type contextData struct {
