@@ -74,8 +74,10 @@ type StoredGrant struct {
 	// AdditionalState contains internal protocol state managed by this library
 	// (e.g., DPoP thumbprints, certificate bindings). This field allows the
 	// library to evolve its internal state schema without breaking the Storage
-	// interface contract. Storage implementations MUST preserve this field but
-	// SHOULD NOT inspect or modify its contents.
+	// interface contract. Storage implementations MUST preserve the JSON
+	// semantics of this field but need not preserve byte-exact encoding (e.g.
+	// a jsonb column may normalize whitespace and key order). Implementations
+	// SHOULD NOT inspect or modify the meaning of its contents.
 	//
 	// Applications should use the Metadata/EncryptedMetadata fields for their
 	// own data.
