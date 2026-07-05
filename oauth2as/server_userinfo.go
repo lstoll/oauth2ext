@@ -1,11 +1,14 @@
 package oauth2as
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 
 	"lds.li/oauth2ext/jwt"
@@ -19,6 +22,18 @@ type UserinfoHandler func(ctx context.Context, uireq *UserinfoRequest) (*Userinf
 type UserinfoRequest struct {
 	// Subject is the sub of the user this request is for.
 	Subject string
+	// GrantID is the ID of the grant associated with the access token, when
+	// present in the token's grid claim.
+	GrantID string
+	// Metadata is unencrypted application metadata from the grant, when the
+	// grant could be loaded from storage.
+	Metadata []byte
+	// GrantedScopes are the scopes granted on the associated grant.
+	GrantedScopes []string
+	// ACR is the Authentication Context Class Reference from the grant.
+	ACR string
+	// AMR lists the Authentication Methods References from the grant.
+	AMR []string
 }
 
 // UserinfoResponse contains information to response to the userinfo response.
@@ -71,6 +86,35 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 	// If we make it to here, we have been presented a valid token for a valid session. Run the handler.
 	uireq := &UserinfoRequest{
 		Subject: atSub,
+	}
+
+	if atJWT.HasString(claimGrantID) {
+		grantID, err := atJWT.String(claimGrantID)
+		if err != nil {
+			slog.ErrorContext(req.Context(), "invalid access token grant ID claim", "error", err)
+			be := &oauth2proto.BearerError{Code: oauth2proto.BearerErrorCodeInvalidRequest, Description: "invalid access token"}
+			herr := &oauth2proto.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), Cause: err}
+			_ = oauth2proto.WriteError(w, req, herr)
+			return
+		}
+
+		grant, err := s.config.Storage.GetGrant(req.Context(), grantID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				slog.WarnContext(req.Context(), "grant not found for access token", "grantID", grantID)
+			} else {
+				slog.ErrorContext(req.Context(), "failed to load grant for userinfo", "grantID", grantID, "error", err)
+				herr := &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error loading grant"}
+				_ = oauth2proto.WriteError(w, req, herr)
+				return
+			}
+		} else {
+			uireq.GrantID = grantID
+			uireq.Metadata = bytes.Clone(grant.Metadata)
+			uireq.GrantedScopes = slices.Clone(grant.GrantedScopes)
+			uireq.ACR = grant.ACR
+			uireq.AMR = slices.Clone(grant.AMR)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

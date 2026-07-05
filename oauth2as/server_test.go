@@ -645,6 +645,99 @@ func TestUserinfo(t *testing.T) {
 	}
 }
 
+func TestUserinfoGrantContext(t *testing.T) {
+	const issuer = "http://iss"
+
+	s := NewMemStorage()
+	grant := &StoredGrant{
+		UserID:        "sub",
+		ClientID:      "client-id",
+		GrantedScopes: []string{"openid", "profile"},
+		GrantedAt:     time.Now(),
+		ExpiresAt:     time.Now().Add(time.Hour),
+		Metadata:      []byte(`{"federation":"abc"}`),
+		ACR:           "urn:mace:incommon:iap:silver",
+		AMR:           []string{"pwd"},
+	}
+	grantID, err := s.CreateGrant(context.Background(), grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, verifier := testSignerVerifier(t)
+	input, err := marshalSigningInput("at+jwt", map[string]any{
+		"iss":        issuer,
+		"sub":        "sub",
+		"iat":        time.Now().Unix(),
+		"exp":        time.Now().Add(time.Minute).Unix(),
+		claimGrantID: grantID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessToken, err := signer.SignJWT(t.Context(), jwt.ES256, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotReq *UserinfoRequest
+	oidc, err := NewServer(Config{
+		Issuer:   issuer,
+		Storage:  s,
+		Signer:   signer,
+		Verifier: verifier,
+		UserinfoHandler: func(_ context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error) {
+			gotReq = uireq
+			return &UserinfoResponse{Identity: map[string]any{"sub": uireq.Subject}}, nil
+		},
+		TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
+			return &TokenResponse{}, nil
+		},
+		Clients: staticClientSource{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+	req.Header.Set("authorization", "Bearer "+accessToken)
+	oidc.UserinfoHandler(rec, req)
+
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("want status 200, got %d", rec.Result().StatusCode)
+	}
+	if gotReq == nil {
+		t.Fatal("userinfo handler was not called")
+	}
+	if gotReq.GrantID != grantID {
+		t.Errorf("GrantID: want %q, got %q", grantID, gotReq.GrantID)
+	}
+	if string(gotReq.Metadata) != `{"federation":"abc"}` {
+		t.Errorf("Metadata: got %q", gotReq.Metadata)
+	}
+	if !slices.Equal(gotReq.GrantedScopes, []string{"openid", "profile"}) {
+		t.Errorf("GrantedScopes: got %v", gotReq.GrantedScopes)
+	}
+	if gotReq.ACR != "urn:mace:incommon:iap:silver" {
+		t.Errorf("ACR: got %q", gotReq.ACR)
+	}
+	if !slices.Equal(gotReq.AMR, []string{"pwd"}) {
+		t.Errorf("AMR: got %v", gotReq.AMR)
+	}
+
+	gotReq.Metadata[0] = 'X'
+	gotReq.GrantedScopes[0] = "changed"
+	gotReq.AMR[0] = "changed"
+	stored, err := s.GetGrant(t.Context(), grantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored.Metadata) != `{"federation":"abc"}` || !slices.Equal(stored.GrantedScopes, []string{"openid", "profile"}) || !slices.Equal(stored.AMR, []string{"pwd"}) {
+		t.Fatalf("userinfo handler mutated stored grant: %#v", stored)
+	}
+}
+
 var (
 	signer     *LocalJWTSigner
 	signerOnce sync.Once
