@@ -28,6 +28,8 @@ func TestBuildTokenClaims(t *testing.T) {
 		ClientID:        "client-id",
 		GrantedScopes:   []string{"openid", "profile"},
 		GrantedAt:       now.Add(-time.Minute),
+		ACR:             "urn:example:mfa",
+		AMR:             []string{"pwd", "otp"},
 		AdditionalState: additionalState,
 		Request:         &AuthRequest{Nonce: "request-nonce"},
 	}
@@ -36,8 +38,6 @@ func TestBuildTokenClaims(t *testing.T) {
 	response := &TokenResponse{
 		IDTokenClaims: &IDTokenClaims{
 			Subject:    "pairwise-subject",
-			ACR:        "urn:example:mfa",
-			AMR:        []string{"pwd", "otp"},
 			Additional: idAdditional,
 		},
 		AccessTokenClaims: &AccessTokenClaims{
@@ -69,6 +69,10 @@ func TestBuildTokenClaims(t *testing.T) {
 	}
 	if idClaims["auth_time"] != float64(grant.GrantedAt.Unix()) {
 		t.Errorf("unexpected auth_time: %#v", idClaims["auth_time"])
+	}
+	amr, ok := idClaims["amr"].([]any)
+	if !ok || len(amr) != 2 || amr[0] != "pwd" || amr[1] != "otp" {
+		t.Errorf("unexpected amr: %#v", idClaims["amr"])
 	}
 
 	accessInput, expiresAt, err := server.buildAccessTokenClaims("grant-id", grant, response)

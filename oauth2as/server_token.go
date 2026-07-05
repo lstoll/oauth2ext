@@ -37,8 +37,6 @@ type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, er
 // constructs the token envelope and binding claims.
 type IDTokenClaims struct {
 	Subject    string
-	ACR        string
-	AMR        []string
 	Additional map[string]any
 }
 
@@ -67,6 +65,10 @@ type TokenRequest struct {
 	// DecryptedMetadata is the decrypted metadata that was associated with the
 	// grant.
 	DecryptedMetadata []byte
+	// ACR is the Authentication Context Class Reference satisfied for this grant.
+	ACR string
+	// AMR lists the Authentication Methods References for this grant.
+	AMR []string
 
 	// IsRefresh indicates if this is a refresh token request.
 	IsRefresh bool
@@ -258,6 +260,8 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 		GrantedScopes:     loadedGrant.grant.GrantedScopes,
 		Metadata:          loadedGrant.grant.Metadata,
 		DecryptedMetadata: loadedGrant.decryptedMetadata,
+		ACR:               loadedGrant.grant.ACR,
+		AMR:               slices.Clone(loadedGrant.grant.AMR),
 		IsRefresh:         false,
 		DPoPBound:         isDPoPBound,
 		DPoPProof:         dpopProof,
@@ -387,6 +391,8 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		GrantedScopes:     loadedGrant.grant.GrantedScopes,
 		Metadata:          loadedGrant.grant.Metadata,
 		DecryptedMetadata: loadedGrant.decryptedMetadata,
+		ACR:               loadedGrant.grant.ACR,
+		AMR:               slices.Clone(loadedGrant.grant.AMR),
 		IsRefresh:         true,
 		DPoPBound:         isDPoPBound,
 		DPoPProof:         dpopProof,
@@ -540,11 +546,11 @@ func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (JWTSig
 	if grant.Request != nil && grant.Request.Nonce != "" {
 		claims["nonce"] = grant.Request.Nonce
 	}
-	if application != nil && application.ACR != "" {
-		claims["acr"] = application.ACR
+	if grant.ACR != "" {
+		claims["acr"] = grant.ACR
 	}
-	if application != nil && len(application.AMR) > 0 {
-		claims["amr"] = slices.Clone(application.AMR)
+	if len(grant.AMR) > 0 {
+		claims["amr"] = slices.Clone(grant.AMR)
 	}
 	return marshalSigningInput("", claims)
 }
