@@ -28,6 +28,8 @@ type AuthRequest struct {
 	// CodeChallenge is the PKCE code challenge. If it is provided, it will be
 	// S256 format.
 	CodeChallenge string
+	// Nonce is the OIDC nonce value from the authorization request.
+	Nonce string
 
 	// Raw is the full, unprocessed set of values passed to this request.
 	Raw url.Values
@@ -52,6 +54,7 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 	state := req.FormValue("state")
 	codeChallenge := req.FormValue("code_challenge")
 	codeChallengeMethod := req.FormValue("code_challenge_method")
+	nonce := req.FormValue("nonce")
 
 	var rt ResponseType
 	switch rts {
@@ -101,6 +104,7 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 		ResponseType:  rt,
 		Raw:           req.Form,
 		CodeChallenge: codeChallenge,
+		Nonce:         nonce,
 	}, nil
 }
 

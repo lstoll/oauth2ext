@@ -27,7 +27,7 @@ type AuthRequest struct {
 	CodeChallenge string `json:"codeChallenge,omitzero"`
 	// ACRValues is the list of ACR values that the client is requesting.
 	ACRValues []string `json:"acrValues,omitzero"`
-	// Nonce binds an ID token to this authorization request.
+	// Nonce is the OIDC nonce from the authorization request.
 	Nonce string `json:"nonce,omitzero"`
 
 	// Raw is the raw URL values that were passed in the request.
@@ -86,7 +86,7 @@ func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
 		Scopes:        authreq.Scopes,
 		CodeChallenge: authreq.CodeChallenge,
 		ACRValues:     acrValues,
-		Nonce:         authreq.Raw.Get("nonce"),
+		Nonce:         authreq.Nonce,
 	}, nil
 }
 
