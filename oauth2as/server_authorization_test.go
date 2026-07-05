@@ -44,7 +44,7 @@ func TestParseAuthRequest(t *testing.T) {
 	}{
 		{
 			name:        "Valid auth request with all parameters",
-			queryParams: "response_type=code&client_id=test-client&redirect_uri=https://client.example.com/callback&state=test-state&scope=openid%20profile&code_challenge=test-challenge&code_challenge_method=S256&acr_values=1%202",
+			queryParams: "response_type=code&client_id=test-client&redirect_uri=https://client.example.com/callback&state=test-state&scope=openid%20profile&code_challenge=test-challenge&code_challenge_method=S256&acr_values=1%202&nonce=test-nonce",
 			expectError: false,
 			expected: &AuthRequest{
 				ClientID:      "test-client",
@@ -53,6 +53,7 @@ func TestParseAuthRequest(t *testing.T) {
 				Scopes:        []string{"openid", "profile"},
 				CodeChallenge: "test-challenge",
 				ACRValues:     []string{"1", "2"},
+				Nonce:         "test-nonce",
 			},
 		},
 		{
@@ -169,6 +170,9 @@ func TestParseAuthRequest(t *testing.T) {
 			}
 			if tc.expected.CodeChallenge != result.CodeChallenge {
 				t.Errorf("expected CodeChallenge %s, got %s", tc.expected.CodeChallenge, result.CodeChallenge)
+			}
+			if tc.expected.Nonce != result.Nonce {
+				t.Errorf("expected Nonce %s, got %s", tc.expected.Nonce, result.Nonce)
 			}
 
 			// Compare slices
