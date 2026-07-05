@@ -3,6 +3,7 @@ package oauth2as
 import (
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"sync"
 	"testing"
@@ -11,6 +12,72 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
+
+// storedGrantCmpOpts returns cmp options for comparing StoredGrant values,
+// including semantic (not byte-exact) comparison of AdditionalState.
+func storedGrantCmpOpts() cmp.Options {
+	return cmp.Options{
+		cmpopts.EquateEmpty(),
+		cmp.FilterPath(func(p cmp.Path) bool {
+			sf, ok := p.Index(-1).(cmp.StructField)
+			return ok && sf.Name() == "AdditionalState"
+		}, cmp.Transformer("AdditionalStateJSON", func(b json.RawMessage) any {
+			if len(b) == 0 {
+				return nil
+			}
+			v := jsontext.Value(b).Clone()
+			if err := v.Canonicalize(); err != nil {
+				return string(b)
+			}
+			return string(v)
+		})),
+	}
+}
+
+// jsonNormalizingStorage wraps a Storage and re-encodes AdditionalState on
+// every write, simulating backends (e.g. Postgres jsonb) that normalize JSON.
+type jsonNormalizingStorage struct {
+	Storage
+}
+
+func (s *jsonNormalizingStorage) normalizeGrant(grant *StoredGrant) error {
+	if len(grant.AdditionalState) == 0 {
+		return nil
+	}
+	normalized := jsontext.Value(grant.AdditionalState).Clone()
+	if err := normalized.Canonicalize(); err != nil {
+		return err
+	}
+	grant.AdditionalState = normalized
+	return nil
+}
+
+func (s *jsonNormalizingStorage) CreateGrant(ctx context.Context, grant *StoredGrant) (string, error) {
+	grantCopy := *grant
+	if err := s.normalizeGrant(&grantCopy); err != nil {
+		return "", err
+	}
+	return s.Storage.CreateGrant(ctx, &grantCopy)
+}
+
+func (s *jsonNormalizingStorage) UpdateGrant(ctx context.Context, id string, grant *StoredGrant) error {
+	grantCopy := *grant
+	if err := s.normalizeGrant(&grantCopy); err != nil {
+		return err
+	}
+	return s.Storage.UpdateGrant(ctx, id, &grantCopy)
+}
+
+func (s *jsonNormalizingStorage) GetGrant(ctx context.Context, id string) (*StoredGrant, error) {
+	grant, err := s.Storage.GetGrant(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.normalizeGrant(grant); err != nil {
+		return nil, err
+	}
+	return grant, nil
+}
 
 // TestStorage runs a comprehensive test suite against a Storage implementation.
 // Implementations can call this from their own packages to verify compliance.
@@ -53,8 +120,41 @@ func TestStorage(t *testing.T, factory func(t *testing.T) Storage) {
 			t.Fatalf("GetGrant: %v", err)
 		}
 
-		if diff := cmp.Diff(want, got, cmpopts.EquateEmpty()); diff != "" {
+		if diff := cmp.Diff(want, got, storedGrantCmpOpts()); diff != "" {
 			t.Errorf("grant roundtrip mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("CreateGrant_roundtrip_jsonNormalized", func(t *testing.T) {
+		s := &jsonNormalizingStorage{Storage: factory(t)}
+		want := &StoredGrant{
+			UserID:        "user-1",
+			ClientID:      "client-1",
+			GrantedScopes: []string{"openid", "profile"},
+			Request: &AuthRequest{
+				ClientID:    "client-1",
+				RedirectURI: "https://redirect",
+				State:       "s1",
+				Scopes:      []string{"openid"},
+			},
+			GrantedAt:       time.Now().Truncate(time.Millisecond),
+			ExpiresAt:       time.Now().Add(time.Hour).Truncate(time.Millisecond),
+			AdditionalState: json.RawMessage(`{"dpopThumbprint":"tp1","large":9007199254740993}`),
+			Version:         0,
+		}
+
+		id, err := s.CreateGrant(ctx, want)
+		if err != nil {
+			t.Fatalf("CreateGrant: %v", err)
+		}
+
+		got, err := s.GetGrant(ctx, id)
+		if err != nil {
+			t.Fatalf("GetGrant: %v", err)
+		}
+
+		if diff := cmp.Diff(want, got, storedGrantCmpOpts()); diff != "" {
+			t.Errorf("grant roundtrip mismatch with JSON-normalizing storage (-want +got):\n%s", diff)
 		}
 	})
 
