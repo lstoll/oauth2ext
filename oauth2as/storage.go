@@ -96,7 +96,10 @@ type StoredGrant struct {
 	// Version is the version of the stored grant, used for optimistic locking.
 	Version int64 `json:"version,omitzero"`
 
-	// TODO: Add ACR (Authentication Context Class Reference) and AMR (Authentication Methods References) fields
+	// ACR is the Authentication Context Class Reference satisfied for this grant.
+	ACR string `json:"acr,omitzero"`
+	// AMR lists the Authentication Methods References for this grant.
+	AMR []string `json:"amr,omitzero"`
 }
 
 type storedAdditionalState struct {

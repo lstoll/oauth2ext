@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -110,6 +111,10 @@ type AuthGrant struct {
 	// ExpiresAt is the time at which the grant will expire. If zero, the
 	// default grant validity will be used to calculate this.
 	ExpiresAt time.Time
+	// ACR is the Authentication Context Class Reference satisfied for this grant.
+	ACR string
+	// AMR lists the Authentication Methods References for this grant.
+	AMR []string
 }
 
 func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI string, _ error) {
@@ -133,6 +138,8 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		GrantedAt:     s.now(),
 		ExpiresAt:     expiresAt, // Grant has absolute lifetime
 		Metadata:      grant.Metadata,
+		ACR:           grant.ACR,
+		AMR:           slices.Clone(grant.AMR),
 	}
 
 	loadedGrant := &loadedAuthCodeGrant{
