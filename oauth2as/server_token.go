@@ -518,6 +518,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 		RefreshToken: refreshToken,
 		TokenType:    tokenType,
 		ExpiresIn:    acExp.Sub(s.now()),
+		Scopes:       slices.Clone(grant.GrantedScopes),
 		ExtraParams:  extraParams,
 	}, rtID, nil
 }
