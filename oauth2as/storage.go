@@ -68,6 +68,9 @@ type StoredGrant struct {
 	Request *AuthRequest `json:"request,omitzero"`
 	// GrantedAt is the time at which the grant was granted.
 	GrantedAt time.Time `json:"grantedAt,omitzero"`
+	// AuthenticatedAt is when the End-User last actively authenticated. Emitted
+	// as the auth_time claim in ID tokens.
+	AuthenticatedAt time.Time `json:"authenticatedAt,omitzero"`
 	// ExpiresAt is the time at which the grant will expire.
 	ExpiresAt time.Time `json:"expiresAt,omitzero"`
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
@@ -34,6 +35,10 @@ type UserinfoRequest struct {
 	ACR string
 	// AMR lists the Authentication Methods References from the grant.
 	AMR []string
+	// AuthenticatedAt is when the End-User last actively authenticated.
+	AuthenticatedAt time.Time
+	// MaxAge is the max_age from the original authorization request, if any.
+	MaxAge *int
 }
 
 // UserinfoResponse contains information to response to the userinfo response.
@@ -111,12 +116,14 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	uireq := &UserinfoRequest{
-		Subject:       atSub,
-		GrantID:       grantID,
-		Metadata:      bytes.Clone(grant.Metadata),
-		GrantedScopes: slices.Clone(grant.GrantedScopes),
-		ACR:           grant.ACR,
-		AMR:           slices.Clone(grant.AMR),
+		Subject:         atSub,
+		GrantID:         grantID,
+		Metadata:        bytes.Clone(grant.Metadata),
+		GrantedScopes:   slices.Clone(grant.GrantedScopes),
+		ACR:             grant.ACR,
+		AMR:             slices.Clone(grant.AMR),
+		AuthenticatedAt: authTimeFromGrant(grant),
+		MaxAge:          maxAgeFromGrant(grant),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

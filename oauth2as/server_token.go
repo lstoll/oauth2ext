@@ -69,6 +69,10 @@ type TokenRequest struct {
 	ACR string
 	// AMR lists the Authentication Methods References for this grant.
 	AMR []string
+	// AuthenticatedAt is when the End-User last actively authenticated.
+	AuthenticatedAt time.Time
+	// MaxAge is the max_age from the original authorization request, if any.
+	MaxAge *int
 
 	// IsRefresh indicates if this is a refresh token request.
 	IsRefresh bool
@@ -262,6 +266,8 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 		DecryptedMetadata: loadedGrant.decryptedMetadata,
 		ACR:               loadedGrant.grant.ACR,
 		AMR:               slices.Clone(loadedGrant.grant.AMR),
+		AuthenticatedAt:   authTimeFromGrant(loadedGrant.grant),
+		MaxAge:            maxAgeFromGrant(loadedGrant.grant),
 		IsRefresh:         false,
 		DPoPBound:         isDPoPBound,
 		DPoPProof:         dpopProof,
@@ -393,6 +399,8 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		DecryptedMetadata: loadedGrant.decryptedMetadata,
 		ACR:               loadedGrant.grant.ACR,
 		AMR:               slices.Clone(loadedGrant.grant.AMR),
+		AuthenticatedAt:   authTimeFromGrant(loadedGrant.grant),
+		MaxAge:            maxAgeFromGrant(loadedGrant.grant),
 		IsRefresh:         true,
 		DPoPBound:         isDPoPBound,
 		DPoPProof:         dpopProof,
@@ -545,7 +553,7 @@ func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (JWTSig
 	claims["aud"] = grant.ClientID
 	claims["iat"] = s.now().Unix()
 	claims["exp"] = idExp.Unix()
-	claims["auth_time"] = grant.GrantedAt.Unix()
+	claims["auth_time"] = authTimeFromGrant(grant).Unix()
 	if grant.Request != nil && grant.Request.Nonce != "" {
 		claims["nonce"] = grant.Request.Nonce
 	}

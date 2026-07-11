@@ -30,6 +30,11 @@ type AuthRequest struct {
 	ACRValues []string `json:"acrValues,omitzero"`
 	// Nonce is the OIDC nonce from the authorization request.
 	Nonce string `json:"nonce,omitzero"`
+	// MaxAge is the OIDC max_age parameter. Nil means the parameter was omitted.
+	// A pointer to 0 means re-authentication is required. Integrators should
+	// compare [AuthTimeExceeded] against their session authentication time
+	// before calling [Server.GrantAuth].
+	MaxAge *int `json:"maxAge,omitzero"`
 
 	// Raw is the raw URL values that were passed in the request.
 	Raw url.Values `json:"raw,omitzero"`
@@ -109,6 +114,7 @@ func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
 		CodeChallenge: authreq.CodeChallenge,
 		ACRValues:     acrValues,
 		Nonce:         authreq.Nonce,
+		MaxAge:        authreq.MaxAge,
 		Raw:           authreq.Raw,
 	}, nil
 }
@@ -122,6 +128,10 @@ type AuthGrant struct {
 	// UserID is the user ID that was granted access. This is used to form the subject
 	// claim, and is provided on subsequent actions.
 	UserID string
+	// AuthenticatedAt is when the End-User last actively authenticated. If zero,
+	// [Server.GrantAuth] uses the current time. This value is emitted as the
+	// auth_time claim in ID tokens.
+	AuthenticatedAt time.Time
 	// Metadata is arbitrary metadata that can be stored with the grant. Can be
 	// used for auditing or tracking other information that is associated with
 	// the grant. This is not sensitive, and can be accessed at any time.
@@ -147,21 +157,31 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		return "", fmt.Errorf("auth request is required")
 	}
 
+	now := s.now()
 	expiresAt := grant.ExpiresAt
 	if expiresAt.IsZero() {
-		expiresAt = s.now().Add(s.config.GrantValidity)
+		expiresAt = now.Add(s.config.GrantValidity)
+	}
+
+	authenticatedAt := grant.AuthenticatedAt
+	if authenticatedAt.IsZero() {
+		authenticatedAt = now
+	}
+	if authenticatedAt.After(now) {
+		return "", fmt.Errorf("authentication time must not be in the future")
 	}
 
 	sg := &StoredGrant{
-		UserID:        grant.UserID,
-		ClientID:      grant.Request.ClientID,
-		GrantedScopes: grant.GrantedScopes,
-		Request:       grant.Request,
-		GrantedAt:     s.now(),
-		ExpiresAt:     expiresAt, // Grant has absolute lifetime
-		Metadata:      grant.Metadata,
-		ACR:           grant.ACR,
-		AMR:           slices.Clone(grant.AMR),
+		UserID:          grant.UserID,
+		ClientID:        grant.Request.ClientID,
+		GrantedScopes:   grant.GrantedScopes,
+		Request:         grant.Request,
+		GrantedAt:       now,
+		AuthenticatedAt: authenticatedAt,
+		ExpiresAt:       expiresAt, // Grant has absolute lifetime
+		Metadata:        grant.Metadata,
+		ACR:             grant.ACR,
+		AMR:             slices.Clone(grant.AMR),
 	}
 
 	loadedGrant := &loadedAuthCodeGrant{
@@ -169,7 +189,7 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		decryptedMetadata: grant.EncryptedMetadata,
 	}
 
-	_, authCodeString, err := s.putGrantWithAuthCode(ctx, loadedGrant, s.now().Add(s.config.CodeValidityTime))
+	_, authCodeString, err := s.putGrantWithAuthCode(ctx, loadedGrant, now.Add(s.config.CodeValidityTime))
 	if err != nil {
 		return "", fmt.Errorf("failed to put grant with auth code: %w", err)
 	}

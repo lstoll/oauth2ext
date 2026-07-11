@@ -28,6 +28,7 @@ func TestBuildTokenClaims(t *testing.T) {
 		ClientID:        "client-id",
 		GrantedScopes:   []string{"openid", "profile"},
 		GrantedAt:       now.Add(-time.Minute),
+		AuthenticatedAt: now.Add(-30 * time.Second),
 		ACR:             "urn:example:mfa",
 		AMR:             []string{"pwd", "otp"},
 		AdditionalState: additionalState,
@@ -67,7 +68,7 @@ func TestBuildTokenClaims(t *testing.T) {
 			t.Errorf("ID claim %s: want %q, got %#v", name, want, got)
 		}
 	}
-	if idClaims["auth_time"] != float64(grant.GrantedAt.Unix()) {
+	if idClaims["auth_time"] != float64(grant.AuthenticatedAt.Unix()) {
 		t.Errorf("unexpected auth_time: %#v", idClaims["auth_time"])
 	}
 	amr, ok := idClaims["amr"].([]any)
