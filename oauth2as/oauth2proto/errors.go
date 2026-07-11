@@ -19,6 +19,14 @@ import (
 func WriteError(w http.ResponseWriter, req *http.Request, err error) error {
 	switch err := err.(type) {
 	case *AuthError:
+		if err.RedirectURI == "" {
+			msg := err.Description
+			if msg == "" {
+				msg = string(err.Code)
+			}
+			http.Error(w, msg, http.StatusBadRequest)
+			return nil
+		}
 		redir, perr := url.Parse(err.RedirectURI)
 		if perr != nil {
 			return fmt.Errorf("failed to parse redirect URI %q: %w", err.RedirectURI, perr)

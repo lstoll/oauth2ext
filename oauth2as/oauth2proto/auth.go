@@ -67,7 +67,6 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 			State:       state,
 			Code:        AuthErrorCodeInvalidRequest,
 			Description: `response_type must be "code" or "token"`,
-			RedirectURI: ruri,
 		}
 	}
 
@@ -76,7 +75,6 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 			State:       state,
 			Code:        AuthErrorCodeInvalidRequest,
 			Description: "client_id must be specified",
-			RedirectURI: ruri,
 		}
 	}
 
@@ -85,7 +83,6 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 			State:       state,
 			Code:        AuthErrorCodeInvalidRequest,
 			Description: fmt.Sprintf(`only code_challenge type "%s" supported`, CodeChallengeMethodS256),
-			RedirectURI: ruri,
 		}
 
 	}

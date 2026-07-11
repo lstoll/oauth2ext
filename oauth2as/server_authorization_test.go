@@ -2,11 +2,15 @@ package oauth2as
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"lds.li/oauth2ext/oauth2as/oauth2proto"
 )
 
 func TestParseAuthRequest(t *testing.T) {
@@ -39,6 +43,8 @@ func TestParseAuthRequest(t *testing.T) {
 		name        string
 		queryParams string
 		expectError bool
+		wantAuthErr bool
+		wantHTTPErr bool
 		errorMsg    string
 		expected    *AuthRequest
 	}{
@@ -83,37 +89,43 @@ func TestParseAuthRequest(t *testing.T) {
 			name:        "Invalid client ID",
 			queryParams: "response_type=code&client_id=invalid-client&redirect_uri=https://client.example.com/callback",
 			expectError: true,
+			wantHTTPErr: true,
 			errorMsg:    "client ID invalid-client is not valid",
 		},
 		{
 			name:        "Invalid redirect URI",
 			queryParams: "response_type=code&client_id=test-client&redirect_uri=https://attacker.example.com/callback",
 			expectError: true,
-			errorMsg:    "redirect URI https://attacker.example.com/callback is not valid for client ID test-client",
+			wantHTTPErr: true,
+			errorMsg:    "redirect URI https://attacker.example.com/callback is not valid",
 		},
 		{
 			name:        "Multiple redirect URIs but none provided",
 			queryParams: "response_type=code&client_id=test-client",
 			expectError: true,
-			errorMsg:    "client ID test-client has multiple redirect URIs, but none were provided",
+			wantHTTPErr: true,
+			errorMsg:    "client ID test-client has multiple redirect URIs",
 		},
 		{
 			name:        "Unsupported response type",
-			queryParams: "response_type=token&client_id=test-client&redirect_uri=https://client.example.com/callback",
+			queryParams: "response_type=token&client_id=test-client&redirect_uri=https://client.example.com/callback&state=rt-state",
 			expectError: true,
+			wantAuthErr: true,
 			errorMsg:    "response type token is not supported",
 		},
 		{
 			name:        "Missing response_type",
 			queryParams: "client_id=test-client&redirect_uri=https://client.example.com/callback",
 			expectError: true,
-			errorMsg:    "failed to parse auth request",
+			wantAuthErr: true,
+			errorMsg:    `response_type must be "code" or "token"`,
 		},
 		{
 			name:        "Missing client_id",
 			queryParams: "response_type=code&redirect_uri=https://client.example.com/callback",
 			expectError: true,
-			errorMsg:    "failed to parse auth request",
+			wantAuthErr: true,
+			errorMsg:    "client_id must be specified",
 		},
 		{
 			name:        "Public client with valid redirect",
@@ -144,6 +156,16 @@ func TestParseAuthRequest(t *testing.T) {
 				}
 				if tc.errorMsg != "" && !strings.Contains(err.Error(), tc.errorMsg) {
 					t.Errorf("expected error containing '%s', got '%s'", tc.errorMsg, err.Error())
+				}
+				if tc.wantAuthErr {
+					if _, ok := errors.AsType[*oauth2proto.AuthError](err); !ok {
+						t.Errorf("expected *oauth2proto.AuthError, got %T", err)
+					}
+				}
+				if tc.wantHTTPErr {
+					if _, ok := errors.AsType[*oauth2proto.HTTPError](err); !ok {
+						t.Errorf("expected *oauth2proto.HTTPError, got %T", err)
+					}
 				}
 				return
 			}
@@ -196,6 +218,54 @@ func TestParseAuthRequest(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParseAuthRequestWriteError(t *testing.T) {
+	server := &Server{
+		config: Config{
+			Clients: staticClientSource{
+				{
+					ID:           "test-client",
+					Secrets:      []string{"test-secret"},
+					RedirectURLs: []string{"https://client.example.com/callback"},
+				},
+			},
+		},
+		now: time.Now,
+	}
+
+	req, err := http.NewRequest("GET", "/auth?response_type=token&client_id=test-client&redirect_uri=https://client.example.com/callback&state=rt-state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = server.ParseAuthRequest(req)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	rec := httptest.NewRecorder()
+	if err := oauth2proto.WriteError(rec, req, err); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("want redirect status 302, got %d", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "https://client.example.com/callback") {
+		t.Fatalf("want redirect to callback, got %q", loc)
+	}
+	parsed, err := url.Parse(loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("error") != string(oauth2proto.AuthErrorCodeUnsupportedResponseType) {
+		t.Fatalf("want unsupported_response_type, got %q", parsed.Query().Get("error"))
+	}
+	if parsed.Query().Get("state") != "rt-state" {
+		t.Fatalf("want state rt-state, got %q", parsed.Query().Get("state"))
 	}
 }
 
