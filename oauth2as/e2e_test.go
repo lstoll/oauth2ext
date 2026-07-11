@@ -173,7 +173,7 @@ func TestE2E(t *testing.T) {
 				ClientSecret: clientSecret,
 				Endpoint:     provider.Endpoint(),
 				RedirectURL:  cliSvr.URL,
-				Scopes:       []string{oidc.ScopeOfflineAccess},
+				Scopes:       []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
 			}
 
 			var acopts []oauth2.AuthCodeOption
