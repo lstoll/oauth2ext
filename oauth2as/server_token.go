@@ -483,13 +483,8 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 		}
 	}
 
-	// TODO: Conditionally issue ID tokens only when openid scope is granted
-
-	idc, err := s.buildIDClaims(loadedGrant.Grant(), tresp)
-	if err != nil {
-		return nil, "", fmt.Errorf("building id token claims: %w", err)
-	}
-	ac, acExp, err := s.buildAccessTokenClaims(loadedGrant.GrantID(), loadedGrant.Grant(), tresp)
+	grant := loadedGrant.Grant()
+	ac, acExp, err := s.buildAccessTokenClaims(loadedGrant.GrantID(), grant, tresp)
 	if err != nil {
 		return nil, "", fmt.Errorf("building access token claims: %w", err)
 	}
@@ -499,9 +494,18 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 	if err != nil {
 		return nil, "", fmt.Errorf("signing access token with algorithm %s: %w", accessTokenAlgorithm, err)
 	}
-	idSigned, err := s.config.Signer.SignJWT(ctx, idTokenAlgorithm, idc)
-	if err != nil {
-		return nil, "", fmt.Errorf("signing ID token with algorithm %s: %w", idTokenAlgorithm, err)
+
+	var extraParams map[string]any
+	if slices.Contains(grant.GrantedScopes, oidc.ScopeOpenID) {
+		idc, err := s.buildIDClaims(grant, tresp)
+		if err != nil {
+			return nil, "", fmt.Errorf("building ID token claims: %w", err)
+		}
+		idSigned, err := s.config.Signer.SignJWT(ctx, idTokenAlgorithm, idc)
+		if err != nil {
+			return nil, "", fmt.Errorf("signing ID token with algorithm %s: %w", idTokenAlgorithm, err)
+		}
+		extraParams = map[string]any{"id_token": idSigned}
 	}
 
 	tokenType := "bearer"
@@ -514,9 +518,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 		RefreshToken: refreshToken,
 		TokenType:    tokenType,
 		ExpiresIn:    acExp.Sub(s.now()),
-		ExtraParams: map[string]any{
-			"id_token": idSigned,
-		},
+		ExtraParams:  extraParams,
 	}, rtID, nil
 }
 

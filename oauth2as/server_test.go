@@ -112,6 +112,9 @@ func TestCodeToken(t *testing.T) {
 		if tresp.AccessToken == "" {
 			t.Error("token request should have returned an access token, but got none")
 		}
+		if _, ok := tresp.ExtraParams["id_token"]; ok {
+			t.Error("token response included an ID token without the openid scope")
+		}
 	})
 
 	t.Run("Redeeming an already redeemed code should fail", func(t *testing.T) {
@@ -218,14 +221,14 @@ func TestCodeToken(t *testing.T) {
 		grant := &StoredGrant{
 			UserID:        "testsub",
 			ClientID:      rs256ClientID,
-			GrantedScopes: []string{oidc.ScopeOfflineAccess},
+			GrantedScopes: []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
 			GrantedAt:     time.Now(),
 			ExpiresAt:     time.Now().Add(1 * time.Minute),
 			Request: &AuthRequest{
 				ClientID:    rs256ClientID,
 				RedirectURI: rs256ClientRedirect,
 				State:       "",
-				Scopes:      []string{oidc.ScopeOfflineAccess},
+				Scopes:      []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
 			},
 		}
 
