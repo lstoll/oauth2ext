@@ -10,6 +10,7 @@ import (
 type clientOpts struct {
 	skipPKCE                bool
 	idTokenSigningAlgorithm jwt.Algorithm
+	public                  bool
 }
 
 // ClientOpt is a flag that can be set on a given client, to adjust various
@@ -28,6 +29,14 @@ func ClientOptSkipPKCE() ClientOpt {
 func ClientOptIDTokenSigningAlgorithm(algorithm jwt.Algorithm) ClientOpt {
 	return func(opts *clientOpts) {
 		opts.idTokenSigningAlgorithm = algorithm
+	}
+}
+
+// ClientOptPublic marks a client as public. Public clients authenticate the
+// authorization-code exchange with PKCE instead of a client secret.
+func ClientOptPublic() ClientOpt {
+	return func(opts *clientOpts) {
+		opts.public = true
 	}
 }
 
