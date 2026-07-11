@@ -533,14 +533,16 @@ func TestUserinfo(t *testing.T) {
 		return nil
 	}
 
-	signAccessToken := func(tokenIssuer string, expiresAt time.Time) string {
+	signAccessToken := func(tokenIssuer string, expiresAt time.Time, additional map[string]any) string {
 		signer, _ := testSignerVerifier(t)
-		payload, err := jsonv2.Marshal(map[string]any{
+		claims := map[string]any{
 			"iss": tokenIssuer,
 			"sub": "sub",
 			"iat": time.Now().Unix(),
 			"exp": expiresAt.Unix(),
-		})
+		}
+		maps.Copy(claims, additional)
+		payload, err := jsonv2.Marshal(claims)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -558,7 +560,7 @@ func TestUserinfo(t *testing.T) {
 		Name string
 		// Setup should return both a session to be persisted, and an access
 		// token
-		Setup   func(t *testing.T) (accessToken string)
+		Setup   func(t *testing.T, storage *MemStorage) (accessToken string)
 		Handler func(w io.Writer, uireq *UserinfoRequest) error
 		// WantErr signifies that we expect an error
 		WantErr bool
@@ -567,8 +569,15 @@ func TestUserinfo(t *testing.T) {
 	}{
 		{
 			Name: "Simple output, valid session",
-			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(issuer, time.Now().Add(time.Minute))
+			Setup: func(t *testing.T, storage *MemStorage) (accessToken string) {
+				grantID, err := storage.CreateGrant(t.Context(), &StoredGrant{
+					UserID: "sub", ClientID: "client-id", GrantedScopes: []string{oidc.ScopeOpenID},
+					GrantedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return signAccessToken(issuer, time.Now().Add(time.Minute), map[string]any{claimGrantID: grantID, "client_id": "client-id"})
 			},
 			Handler: echoHandler,
 			WantJSON: map[string]any{
@@ -577,23 +586,23 @@ func TestUserinfo(t *testing.T) {
 		},
 		{
 			Name: "Token for other issuer",
-			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken("http://other", time.Now().Add(time.Minute))
+			Setup: func(t *testing.T, _ *MemStorage) (accessToken string) {
+				return signAccessToken("http://other", time.Now().Add(time.Minute), nil)
 			},
 			Handler: echoHandler,
 			WantErr: true,
 		},
 		{
 			Name: "Expired access token",
-			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(issuer, time.Now().Add(-time.Minute))
+			Setup: func(t *testing.T, _ *MemStorage) (accessToken string) {
+				return signAccessToken(issuer, time.Now().Add(-time.Minute), nil)
 			},
 			Handler: echoHandler,
 			WantErr: true,
 		},
 		{
 			Name: "No access token",
-			Setup: func(t *testing.T) (accessToken string) {
+			Setup: func(t *testing.T, _ *MemStorage) (accessToken string) {
 				return ""
 			},
 			Handler: echoHandler,
@@ -631,7 +640,7 @@ func TestUserinfo(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			at := tc.Setup(t)
+			at := tc.Setup(t, s)
 
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("GET", "/userinfo", nil)
@@ -766,13 +775,58 @@ func TestUserinfoRequiresOpenIDScope(t *testing.T) {
 	}
 }
 
+func TestUserinfoFailsClosedOnGrantContext(t *testing.T) {
+	const issuer = "http://iss"
+	storage := NewMemStorage()
+	grantID, err := storage.CreateGrant(t.Context(), &StoredGrant{
+		UserID: "sub", ClientID: "client-id", GrantedScopes: []string{oidc.ScopeOpenID},
+		GrantedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, verifier := testSignerVerifier(t)
+	server, err := NewServer(Config{
+		Issuer: issuer, Storage: storage, Signer: signer, Verifier: verifier,
+		UserinfoHandler: func(context.Context, *UserinfoRequest) (*UserinfoResponse, error) {
+			t.Fatal("userinfo handler called with invalid grant context")
+			return nil, nil
+		},
+		TokenHandler: func(context.Context, *TokenRequest) (*TokenResponse, error) { return &TokenResponse{}, nil },
+		Clients:      staticClientSource{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, grantID, clientID string
+	}{
+		{name: "missing grant claim", clientID: "client-id"},
+		{name: "unknown grant", grantID: "unknown", clientID: "client-id"},
+		{name: "wrong client", grantID: grantID, clientID: "other-client"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+			request.Header.Set("authorization", "Bearer "+signTestAccessToken(t, signer, issuer, test.grantID, test.clientID))
+			server.UserinfoHandler(recorder, request)
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("status: got %d, want %d", recorder.Code, http.StatusUnauthorized)
+			}
+		})
+	}
+}
+
 func signTestAccessToken(t *testing.T, signer JWTSigner, issuer, grantID, clientID string) string {
 	t.Helper()
-	input, err := marshalSigningInput("at+jwt", map[string]any{
+	claims := map[string]any{
 		"iss": issuer, "sub": "sub", "client_id": clientID,
 		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix(),
-		claimGrantID: grantID,
-	})
+	}
+	if grantID != "" {
+		claims[claimGrantID] = grantID
+	}
+	input, err := marshalSigningInput("at+jwt", claims)
 	if err != nil {
 		t.Fatal(err)
 	}
