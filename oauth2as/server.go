@@ -208,6 +208,18 @@ func (s *Server) validateTokenClient(ctx context.Context, req *oauth2proto.Token
 		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
 	}
 
+	opts, err := s.config.Clients.ClientOpts(ctx, req.ClientID)
+	if err != nil {
+		return &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get client options", Cause: err}
+	}
+	var co clientOpts
+	for _, opt := range opts {
+		opt(&co)
+	}
+	if co.public {
+		return nil
+	}
+
 	secrets, err := s.config.Clients.ClientSecrets(ctx, req.ClientID)
 	if err != nil {
 		return &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get client secrets", Cause: err}

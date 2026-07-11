@@ -80,7 +80,6 @@ func TestE2E(t *testing.T) {
 					Secrets:      []string{clientSecret},
 					RedirectURLs: []string{cliSvr.URL},
 					Public:       tc.WithPKCE,
-					Opts:         []oauth2as.ClientOpt{oauth2as.ClientOptSkipPKCE()},
 				},
 			}
 			if !tc.WithPKCE {
@@ -324,7 +323,11 @@ func (c staticClientSource) RedirectURIs(ctx context.Context, clientID string) (
 func (c staticClientSource) ClientOpts(ctx context.Context, clientID string) ([]oauth2as.ClientOpt, error) {
 	for _, sc := range c {
 		if sc.ID == clientID {
-			return sc.Opts, nil
+			opts := slices.Clone(sc.Opts)
+			if sc.Public {
+				opts = append(opts, oauth2as.ClientOptPublic())
+			}
+			return opts, nil
 		}
 	}
 	return nil, fmt.Errorf("client not found")

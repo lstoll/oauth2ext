@@ -738,6 +738,14 @@ func TestUserinfoGrantContext(t *testing.T) {
 	}
 }
 
+func TestValidateTokenClientAllowsPublicClientWithoutSecret(t *testing.T) {
+	server := &Server{config: Config{Clients: staticClientSource{{ID: "public", Public: true}}}}
+	err := server.validateTokenClient(t.Context(), &oauth2proto.TokenRequest{ClientID: "public"}, "public")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 var (
 	signer     *LocalJWTSigner
 	signerOnce sync.Once
@@ -883,7 +891,11 @@ func (c staticClientSource) RedirectURIs(ctx context.Context, clientID string) (
 func (c staticClientSource) ClientOpts(ctx context.Context, clientID string) ([]ClientOpt, error) {
 	for _, sc := range c {
 		if sc.ID == clientID {
-			return sc.Opts, nil
+			opts := slices.Clone(sc.Opts)
+			if sc.Public {
+				opts = append(opts, ClientOptPublic())
+			}
+			return opts, nil
 		}
 	}
 	return nil, fmt.Errorf("client not found")
