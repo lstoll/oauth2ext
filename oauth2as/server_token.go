@@ -212,9 +212,9 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch client opts: %w", err)
 	}
-	copts := &clientOpts{}
-	for _, opt := range optsForClient {
-		opt(copts)
+	copts, err := applyClientOpts(optsForClient)
+	if err != nil {
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "invalid client configuration", Cause: err}
 	}
 
 	// Reject if PKCE is required but no code verifier was provided
@@ -371,9 +371,9 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch client opts: %w", err)
 	}
-	copts := &clientOpts{}
-	for _, opt := range optsForClient {
-		opt(copts)
+	copts, err := applyClientOpts(optsForClient)
+	if err != nil {
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "invalid client configuration", Cause: err}
 	}
 
 	idTokenAlgorithm := s.defaultIDTokenSigningAlgorithm()
