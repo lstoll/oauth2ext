@@ -61,6 +61,18 @@ func TestWriteError(t *testing.T) {
 			},
 		},
 		{
+			Name: "Auth error without redirect URI returns bad request",
+			Err:  &AuthError{State: "state", Code: AuthErrorCodeInvalidRequest, Description: "client_id must be specified"},
+			Cmp: func(t *testing.T, rec *httptest.ResponseRecorder) {
+				if rec.Code != http.StatusBadRequest {
+					t.Errorf("want 400, got %d", rec.Code)
+				}
+				if !containsInsensitive(rec.Body.String(), "client_id must be specified") {
+					t.Errorf("want error description in body, got: %s", rec.Body.String())
+				}
+			},
+		},
+		{
 			Name: "Auth error should redirect to the given callback passing details",
 			Err:  &AuthError{State: "state", Code: AuthErrorCodeAccessDenied, Description: "access denied", RedirectURI: "https://callback"},
 			Cmp: func(t *testing.T, rec *httptest.ResponseRecorder) {

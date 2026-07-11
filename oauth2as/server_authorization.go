@@ -36,43 +36,64 @@ type AuthRequest struct {
 }
 
 func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
-	// Note: Error handling deviates from the spec - errors are returned directly
-	// rather than redirected to the client's redirect_uri.
-	// TODO - consider if we should fix this.
 	authreq, err := oauth2proto.ParseAuthRequest(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse auth request: %w", err)
+		return nil, err
 	}
 
 	cidok, err := s.config.Clients.IsValidClientID(req.Context(), authreq.ClientID)
 	if err != nil {
-		return nil, fmt.Errorf("error checking client ID %s: %w", authreq.ClientID, err)
+		return nil, &oauth2proto.HTTPError{
+			Code:     http.StatusInternalServerError,
+			Cause:    err,
+			CauseMsg: fmt.Sprintf("error checking client ID %s", authreq.ClientID),
+		}
 	}
 	if !cidok {
-		return nil, fmt.Errorf("client ID %s is not valid", authreq.ClientID)
+		return nil, &oauth2proto.HTTPError{
+			Code:     http.StatusBadRequest,
+			Message:  "unknown client",
+			CauseMsg: fmt.Sprintf("client ID %s is not valid", authreq.ClientID),
+		}
 	}
 
 	redirs, err := s.config.Clients.RedirectURIs(req.Context(), authreq.ClientID)
 	if err != nil {
-		return nil, fmt.Errorf("error getting redirect URIs for client ID %s: %w", authreq.ClientID, err)
+		return nil, &oauth2proto.HTTPError{
+			Code:     http.StatusInternalServerError,
+			Cause:    err,
+			CauseMsg: fmt.Sprintf("error getting redirect URIs for client ID %s", authreq.ClientID),
+		}
 	}
 
-	// Validate and resolve the redirect URI
 	validatedRedirectURI, err := validateAndResolveRedirectURI(authreq.RedirectURI, redirs, authreq.ClientID)
 	if err != nil {
-		return nil, err
+		return nil, &oauth2proto.HTTPError{
+			Code:     http.StatusBadRequest,
+			Message:  "invalid redirect URI",
+			CauseMsg: err.Error(),
+		}
 	}
 	authreq.RedirectURI = validatedRedirectURI
 
 	redir, err := url.Parse(authreq.RedirectURI)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse redirect URI %s: %w", authreq.RedirectURI, err)
+		return nil, &oauth2proto.HTTPError{
+			Code:     http.StatusInternalServerError,
+			Cause:    err,
+			CauseMsg: fmt.Sprintf("failed to parse redirect URI %s", authreq.RedirectURI),
+		}
 	}
 
 	switch authreq.ResponseType {
 	case oauth2proto.ResponseTypeCode:
 	default:
-		return nil, fmt.Errorf("response type %s is not supported", authreq.ResponseType)
+		return nil, &oauth2proto.AuthError{
+			State:       authreq.State,
+			Code:        oauth2proto.AuthErrorCodeUnsupportedResponseType,
+			Description: fmt.Sprintf("response type %s is not supported", authreq.ResponseType),
+			RedirectURI: redir.String(),
+		}
 	}
 
 	var acrValues []string
@@ -88,6 +109,7 @@ func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
 		CodeChallenge: authreq.CodeChallenge,
 		ACRValues:     acrValues,
 		Nonce:         authreq.Nonce,
+		Raw:           authreq.Raw,
 	}, nil
 }
 
