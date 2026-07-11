@@ -212,9 +212,9 @@ func (s *Server) validateTokenClient(ctx context.Context, req *oauth2proto.Token
 	if err != nil {
 		return &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get client options", Cause: err}
 	}
-	var co clientOpts
-	for _, opt := range opts {
-		opt(&co)
+	co, err := applyClientOpts(opts)
+	if err != nil {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "invalid client configuration", Cause: err}
 	}
 	if co.public {
 		return nil
