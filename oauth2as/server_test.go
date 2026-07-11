@@ -115,6 +115,9 @@ func TestCodeToken(t *testing.T) {
 		if _, ok := tresp.ExtraParams["id_token"]; ok {
 			t.Error("token response included an ID token without the openid scope")
 		}
+		if !slices.Equal(tresp.Scopes, []string{oidc.ScopeOfflineAccess}) {
+			t.Errorf("token response scopes: got %v", tresp.Scopes)
+		}
 	})
 
 	t.Run("Redeeming an already redeemed code should fail", func(t *testing.T) {
