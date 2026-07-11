@@ -13,12 +13,14 @@ import (
 
 	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
+	"lds.li/oauth2ext/oidc"
 )
 
 type UserinfoHandler func(ctx context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error)
 
 // UserinfoRequest contains information about this request to the UserInfo
-// endpoint
+// endpoint. The handler is responsible for returning only claims permitted by
+// GrantedScopes.
 type UserinfoRequest struct {
 	// Subject is the sub of the user this request is for.
 	Subject string
@@ -109,6 +111,19 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 		} else {
+			tokenClientID, clientIDErr := atJWT.String("client_id")
+			if clientIDErr != nil || tokenClientID != grant.ClientID {
+				be := &oauth2proto.BearerError{Code: oauth2proto.BearerErrorCodeInvalidToken, Description: "invalid access token"}
+				herr := &oauth2proto.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), Cause: clientIDErr, CauseMsg: "access token client_id mismatch"}
+				_ = oauth2proto.WriteError(w, req, herr)
+				return
+			}
+			if !slices.Contains(grant.GrantedScopes, oidc.ScopeOpenID) {
+				be := &oauth2proto.BearerError{Code: oauth2proto.BearerErrorCodeInsufficientScope, Description: "openid scope required"}
+				herr := &oauth2proto.HTTPError{Code: http.StatusForbidden, WWWAuthenticate: be.String(), CauseMsg: "openid scope required"}
+				_ = oauth2proto.WriteError(w, req, herr)
+				return
+			}
 			uireq.GrantID = grantID
 			uireq.Metadata = bytes.Clone(grant.Metadata)
 			uireq.GrantedScopes = slices.Clone(grant.GrantedScopes)
@@ -119,7 +134,6 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	// TODO: Return an error if UserinfoHandler is not configured
 	uiresp, err := s.config.UserinfoHandler(req.Context(), uireq)
 	if err != nil {
 		herr := &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error in user handler"}
@@ -127,7 +141,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if uiresp.Identity == nil {
-		herr := &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "userinfo has no identity"}
+		herr := &oauth2proto.HTTPError{Code: http.StatusInternalServerError, CauseMsg: "userinfo has no identity"}
 		_ = oauth2proto.WriteError(w, req, herr)
 		return
 	}

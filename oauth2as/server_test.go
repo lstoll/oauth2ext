@@ -671,20 +671,7 @@ func TestUserinfoGrantContext(t *testing.T) {
 	}
 
 	signer, verifier := testSignerVerifier(t)
-	input, err := marshalSigningInput("at+jwt", map[string]any{
-		"iss":        issuer,
-		"sub":        "sub",
-		"iat":        time.Now().Unix(),
-		"exp":        time.Now().Add(time.Minute).Unix(),
-		claimGrantID: grantID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	accessToken, err := signer.SignJWT(t.Context(), jwt.ES256, input)
-	if err != nil {
-		t.Fatal(err)
-	}
+	accessToken := signTestAccessToken(t, signer, issuer, grantID, "client-id")
 
 	var gotReq *UserinfoRequest
 	oidc, err := NewServer(Config{
@@ -742,6 +729,58 @@ func TestUserinfoGrantContext(t *testing.T) {
 	if string(stored.Metadata) != `{"federation":"abc"}` || !slices.Equal(stored.GrantedScopes, []string{"openid", "profile"}) || !slices.Equal(stored.AMR, []string{"pwd"}) {
 		t.Fatalf("userinfo handler mutated stored grant: %#v", stored)
 	}
+}
+
+func TestUserinfoRequiresOpenIDScope(t *testing.T) {
+	const issuer = "http://iss"
+	storage := NewMemStorage()
+	grantID, err := storage.CreateGrant(t.Context(), &StoredGrant{
+		UserID:        "sub",
+		ClientID:      "client-id",
+		GrantedScopes: []string{"profile"},
+		GrantedAt:     time.Now(),
+		ExpiresAt:     time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, verifier := testSignerVerifier(t)
+	server, err := NewServer(Config{
+		Issuer: issuer, Storage: storage, Signer: signer, Verifier: verifier,
+		UserinfoHandler: func(context.Context, *UserinfoRequest) (*UserinfoResponse, error) {
+			t.Fatal("userinfo handler called without openid scope")
+			return nil, nil
+		},
+		TokenHandler: func(context.Context, *TokenRequest) (*TokenResponse, error) { return &TokenResponse{}, nil },
+		Clients:      staticClientSource{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+	request.Header.Set("authorization", "Bearer "+signTestAccessToken(t, signer, issuer, grantID, "client-id"))
+	server.UserinfoHandler(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status: got %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func signTestAccessToken(t *testing.T, signer JWTSigner, issuer, grantID, clientID string) string {
+	t.Helper()
+	input, err := marshalSigningInput("at+jwt", map[string]any{
+		"iss": issuer, "sub": "sub", "client_id": clientID,
+		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix(),
+		claimGrantID: grantID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := signer.SignJWT(t.Context(), jwt.ES256, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compact
 }
 
 func TestValidateTokenClientAllowsPublicClientWithoutSecret(t *testing.T) {
