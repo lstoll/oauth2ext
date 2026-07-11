@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
 )
 
@@ -50,7 +51,7 @@ func TestParseAuthRequest(t *testing.T) {
 	}{
 		{
 			name:        "Valid auth request with all parameters",
-			queryParams: "response_type=code&client_id=test-client&redirect_uri=https://client.example.com/callback&state=test-state&scope=openid%20profile&code_challenge=test-challenge&code_challenge_method=S256&acr_values=1%202&nonce=test-nonce",
+			queryParams: "response_type=code&client_id=test-client&redirect_uri=https://client.example.com/callback&state=test-state&scope=openid%20profile&code_challenge=test-challenge&code_challenge_method=S256&acr_values=1%202&nonce=test-nonce&max_age=3600",
 			expectError: false,
 			expected: &AuthRequest{
 				ClientID:      "test-client",
@@ -60,6 +61,7 @@ func TestParseAuthRequest(t *testing.T) {
 				CodeChallenge: "test-challenge",
 				ACRValues:     []string{"1", "2"},
 				Nonce:         "test-nonce",
+				MaxAge:        new(3600),
 			},
 		},
 		{
@@ -196,6 +198,11 @@ func TestParseAuthRequest(t *testing.T) {
 			if tc.expected.Nonce != result.Nonce {
 				t.Errorf("expected Nonce %s, got %s", tc.expected.Nonce, result.Nonce)
 			}
+			if (tc.expected.MaxAge == nil) != (result.MaxAge == nil) {
+				t.Errorf("expected MaxAge presence %v, got %v", tc.expected.MaxAge != nil, result.MaxAge != nil)
+			} else if tc.expected.MaxAge != nil && result.MaxAge != nil && *tc.expected.MaxAge != *result.MaxAge {
+				t.Errorf("expected MaxAge %d, got %d", *tc.expected.MaxAge, *result.MaxAge)
+			}
 
 			// Compare slices
 			if len(tc.expected.Scopes) != len(result.Scopes) {
@@ -315,8 +322,9 @@ func TestGrantAuth(t *testing.T) {
 					State:       "test-state",
 					Scopes:      []string{"openid", "profile", "email"},
 				},
-				GrantedScopes: []string{"openid", "profile", "email"},
-				UserID:        "user123",
+				GrantedScopes:   []string{"openid", "profile", "email"},
+				UserID:          "user123",
+				AuthenticatedAt: time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
 			},
 			expectError: false,
 			checkResult: func(t *testing.T, redirectURI string) {
@@ -544,6 +552,74 @@ func TestGrantAuth(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGrantAuthStoresAuthenticatedAt(t *testing.T) {
+	storage := NewMemStorage()
+	server := &Server{
+		config: Config{
+			Storage: storage,
+			Clients: staticClientSource{
+				{
+					ID:           "test-client",
+					Secrets:      []string{"test-secret"},
+					RedirectURLs: []string{"https://client.example.com/callback"},
+				},
+			},
+			CodeValidityTime: 10 * time.Minute,
+		},
+		now: time.Now,
+	}
+
+	authenticatedAt := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	redirectURI, err := server.GrantAuth(context.Background(), &AuthGrant{
+		Request: &AuthRequest{
+			ClientID:    "test-client",
+			RedirectURI: "https://client.example.com/callback",
+			State:       "state",
+			Scopes:      []string{"openid"},
+		},
+		GrantedScopes:   []string{"openid"},
+		UserID:          "user123",
+		AuthenticatedAt: authenticatedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := url.Parse(redirectURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := parsed.Query().Get("code")
+	if code == "" {
+		t.Fatal("expected code in redirect")
+	}
+
+	pt, err := token.ParseUserToken(code, tokenUsageAuthCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, grant, err := storage.GetAuthCodeAndGrant(context.Background(), pt.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !grant.AuthenticatedAt.Equal(authenticatedAt) {
+		t.Fatalf("AuthenticatedAt: got %v, want %v", grant.AuthenticatedAt, authenticatedAt)
+	}
+}
+
+func TestGrantAuthRejectsFutureAuthenticationTime(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	server := &Server{config: Config{GrantValidity: time.Hour}, now: func() time.Time { return now }}
+	_, err := server.GrantAuth(t.Context(), &AuthGrant{
+		Request:         &AuthRequest{ClientID: "client"},
+		UserID:          "subject",
+		AuthenticatedAt: now.Add(time.Second),
+	})
+	if err == nil {
+		t.Fatal("future authentication time was accepted")
 	}
 }
 

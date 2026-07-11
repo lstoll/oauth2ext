@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +31,9 @@ type AuthRequest struct {
 	CodeChallenge string
 	// Nonce is the OIDC nonce value from the authorization request.
 	Nonce string
+	// MaxAge is the OIDC max_age parameter. Nil means the parameter was omitted.
+	// A pointer to 0 means re-authentication is required.
+	MaxAge *int
 
 	// Raw is the full, unprocessed set of values passed to this request.
 	Raw url.Values
@@ -55,6 +59,7 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 	codeChallenge := req.FormValue("code_challenge")
 	codeChallengeMethod := req.FormValue("code_challenge_method")
 	nonce := req.FormValue("nonce")
+	maxAgeRaw := req.FormValue("max_age")
 
 	var rt ResponseType
 	switch rts {
@@ -93,6 +98,19 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 		scopes = strings.Split(trimmedScope, " ")
 	}
 
+	var maxAge *int
+	if req.Form.Has("max_age") {
+		ma, err := strconv.Atoi(maxAgeRaw)
+		if err != nil || ma < 0 {
+			return nil, &AuthError{
+				State:       state,
+				Code:        AuthErrorCodeInvalidRequest,
+				Description: "max_age must be a non-negative integer",
+			}
+		}
+		maxAge = &ma
+	}
+
 	return &AuthRequest{
 		ClientID:      cid,
 		RedirectURI:   ruri,
@@ -102,6 +120,7 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 		Raw:           req.Form,
 		CodeChallenge: codeChallenge,
 		Nonce:         nonce,
+		MaxAge:        maxAge,
 	}, nil
 }
 
