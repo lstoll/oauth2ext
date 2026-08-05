@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -22,6 +24,19 @@ import (
 	"lds.li/oauth2ext/oidc"
 )
 
+type rejectingIDTokenVerifier struct {
+	calls int
+}
+
+func (v *rejectingIDTokenVerifier) Verify(context.Context, string, claims.IDTokenValidationInput) (struct{}, error) {
+	return struct{}{}, errors.New("rejected")
+}
+
+func (v *rejectingIDTokenVerifier) VerifyTokenResponse(context.Context, *oauth2.Token, claims.IDTokenValidationInput) (struct{}, error) {
+	v.calls++
+	return struct{}{}, errors.New("rejected")
+}
+
 // mockOIDCServer mocks out just enough of an OIDC server for tests. It accepts
 // validClientID, validClientSecret and validRedirectURL as parameters, and
 // returns an ID token with claims upon success.
@@ -31,6 +46,7 @@ type mockOIDCServer struct {
 	validClientSecret string
 	validRedirectURL  string
 	claimOptions      *jwt.RawJWTOptions
+	nonces            sync.Map
 
 	signer *internal.TestSigner
 
@@ -110,7 +126,9 @@ func (s *mockOIDCServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	state := r.URL.Query().Get("state")
-	redirectURL := fmt.Sprintf("%s?code=%s&state=%s", s.validRedirectURL, url.QueryEscape("valid-code"), url.QueryEscape(state))
+	code := "valid-code:" + state
+	s.nonces.Store(code, r.URL.Query().Get("nonce"))
+	redirectURL := fmt.Sprintf("%s?code=%s&state=%s", s.validRedirectURL, url.QueryEscape(code), url.QueryEscape(state))
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
@@ -125,7 +143,8 @@ func (s *mockOIDCServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	code := r.FormValue("code")
-	if code != "valid-code" {
+	nonceValue, ok := s.nonces.LoadAndDelete(code)
+	if !ok {
 		http.Error(w, "invalid code", http.StatusUnauthorized)
 		return
 	}
@@ -148,6 +167,11 @@ func (s *mockOIDCServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	clOpts.Audience = &clientID
 	clOpts.ExpiresAt = new(time.Now().Add(time.Minute))
 	clOpts.IssuedAt = new(time.Now())
+	clOpts.CustomClaims = maps.Clone(clOpts.CustomClaims)
+	if clOpts.CustomClaims == nil {
+		clOpts.CustomClaims = make(map[string]any)
+	}
+	clOpts.CustomClaims["nonce"] = nonceValue.(string)
 
 	cl, err := jwt.NewRawJWT(&clOpts)
 	if err != nil {
@@ -197,7 +221,8 @@ func TestMiddleware_HappyPath(t *testing.T) {
 	oidcServer.validClientSecret = "valid-client-secret"
 	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
 	oidcServer.claimOptions = &jwt.RawJWTOptions{
-		Subject: new("valid-subject"),
+		Subject:    new("valid-subject"),
+		TypeHeader: new("JWT"),
 	}
 
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
@@ -272,6 +297,29 @@ func TestMiddleware_HappyPath(t *testing.T) {
 	}
 }
 
+func TestAuthenticateExistingDoesNotRetryVerificationFailure(t *testing.T) {
+	verifier := new(rejectingIDTokenVerifier)
+	h := &IDSSOHandler[struct{}]{
+		Verifier: verifier,
+		OAuth2Config: &oauth2.Config{
+			ClientID: "client-id",
+		},
+	}
+	session := &SessionData{Token: &oidc.TokenWithID{Token: &oauth2.Token{
+		AccessToken:  "access-token",
+		RefreshToken: "refresh-token",
+		Expiry:       time.Now().Add(time.Hour),
+	}}}
+
+	token, _ := h.authenticateExisting(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), session)
+	if token != nil {
+		t.Fatal("verification failure returned a token")
+	}
+	if verifier.calls != 1 {
+		t.Fatalf("verification calls: got %d, want 1", verifier.calls)
+	}
+}
+
 func TestContext(t *testing.T) {
 	var (
 		gotIDClaims *claims.VerifiedID
@@ -286,7 +334,8 @@ func TestContext(t *testing.T) {
 	oidcServer.validClientSecret = "valid-client-secret"
 	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
 	oidcServer.claimOptions = &jwt.RawJWTOptions{
-		Subject: new("valid-subject"),
+		Subject:    new("valid-subject"),
+		TypeHeader: new("JWT"),
 	}
 
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())

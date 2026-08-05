@@ -1,46 +1,56 @@
 package provider
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
-	"io"
+	"mime"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
-	"github.com/tink-crypto/tink-go/v2/keyset"
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/internal"
+	"lds.li/oauth2ext/jwt"
 )
 
 const DefaultCacheDuration = 10 * time.Minute
 
 type Provider struct {
+	// Metadata is the discovery metadata for the provider. It will be of type
+	// [*OIDCProviderMetadata].
 	Metadata      Metadata
 	HTTPClient    *http.Client
 	CacheDuration time.Duration
 
-	cacheMu          sync.Mutex
+	refreshMu        sync.Mutex
+	cacheMu          sync.RWMutex
 	cacheLastFetched time.Time
 	cachedJWKS       []byte
-	cachedHandle     *keyset.Handle
+	cachedKeySet     *jwt.KeySet
 
 	oidcDiscoveryURL string
+	discoveryIssuer  string
 }
 
-var _ jwt.Verifier = (*Provider)(nil)
-
 func (p *Provider) Issuer() string {
-	return p.Metadata.issuer()
+	md, _ := p.snapshot()
+	if md == nil {
+		return ""
+	}
+	return md.issuer()
 }
 
 // Endpoint returns the OAuth2 endpoint configuration for this provider.
 func (p *Provider) Endpoint() oauth2.Endpoint {
+	md, _ := p.snapshot()
+	if md == nil {
+		return oauth2.Endpoint{}
+	}
 	return oauth2.Endpoint{
-		AuthURL:  p.Metadata.authorizationEndpoint(),
-		TokenURL: p.Metadata.tokenEndpoint(),
+		AuthURL:  md.authorizationEndpoint(),
+		TokenURL: md.tokenEndpoint(),
 	}
 }
 
@@ -48,26 +58,41 @@ func (p *Provider) Endpoint() oauth2.Endpoint {
 // supported by this provider. If PKCE is not supported, an empty slice is
 // returned.
 func (p *Provider) CodeChallengeMethodsSupported() []CodeChallengeMethod {
-	return p.Metadata.codeChallengeMethodsSupported()
+	md, _ := p.snapshot()
+	if md == nil {
+		return nil
+	}
+	return append([]CodeChallengeMethod(nil), md.codeChallengeMethodsSupported()...)
 }
 
 // RegistrationSupported returns true if the provider supports client
 // registration.
 func (p *Provider) RegistrationSupported() bool {
-	return p.Metadata.registrationSupported()
+	md, _ := p.snapshot()
+	return md != nil && md.registrationSupported()
 }
 
 // RegistrationEndpoint returns the registration endpoint for this provider. If
 // registration is not supported, an empty string is returned.
 func (p *Provider) RegistrationEndpoint() string {
-	return p.Metadata.registrationEndpoint()
+	md, _ := p.snapshot()
+	if md == nil {
+		return ""
+	}
+	return md.registrationEndpoint()
 }
 
-// IDTokenSigningAlgValuesSupported returns the list of algorithms supported for
-// signing ID tokens. If ID tokens are not supported, an empty slice is
-// returned.
-func (p *Provider) IDTokenSigningAlgValuesSupported() []string {
-	return p.Metadata.idTokenSigningAlgValuesSupported()
+// IDTokenSigningAlgorithms returns the supported ID token signing algorithms
+// that this package can verify.
+func (p *Provider) IDTokenSigningAlgorithms(ctx context.Context) ([]jwt.Algorithm, error) {
+	if err := p.refreshIfNeeded(ctx); err != nil {
+		return nil, err
+	}
+	md, _ := p.snapshot()
+	if md == nil {
+		return nil, fmt.Errorf("provider metadata is required")
+	}
+	return algorithmsFromMetadata(md.idTokenSigningAlgValuesSupported()), nil
 }
 
 // JWKS returns the raw JWKS for this provider.
@@ -75,20 +100,65 @@ func (p *Provider) JWKS(ctx context.Context) ([]byte, error) {
 	if err := p.refreshIfNeeded(ctx); err != nil {
 		return nil, err
 	}
-	return p.cachedJWKS, nil
+	_, state := p.snapshot()
+	return bytes.Clone(state.jwks), nil
+}
+
+// VerifyJWT verifies a compact JWT against the provider JWKS and policy.
+func (p *Provider) VerifyJWT(ctx context.Context, compact string, policy jwt.ValidationPolicy) (*jwt.VerifiedJWT, error) {
+	if len(policy.AllowedAlgorithms) == 0 {
+		return nil, fmt.Errorf("JWT policy must specify allowed signing algorithms")
+	}
+	if err := p.refreshIfNeeded(ctx); err != nil {
+		return nil, err
+	}
+	md, state := p.snapshot()
+	if md == nil || state.keySet == nil {
+		return nil, fmt.Errorf("provider has no verification keys")
+	}
+	policy.ExpectedIssuer = md.issuer()
+	policy.IgnoreIssuer = false
+	return state.keySet.VerifyJWT(compact, policy)
+}
+
+func algorithmsFromMetadata(algs []string) []jwt.Algorithm {
+	out := make([]jwt.Algorithm, 0, len(algs))
+	for _, value := range algs {
+		alg := jwt.Algorithm(value)
+		switch alg {
+		case jwt.RS256, jwt.RS384, jwt.RS512,
+			jwt.PS256, jwt.PS384, jwt.PS512,
+			jwt.ES256, jwt.ES384, jwt.ES512,
+			jwt.EdDSA:
+			out = append(out, alg)
+		}
+	}
+	return out
+}
+
+type cachedState struct {
+	jwks   []byte
+	keySet *jwt.KeySet
+}
+
+func (p *Provider) snapshot() (Metadata, cachedState) {
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+	return p.Metadata, cachedState{jwks: p.cachedJWKS, keySet: p.cachedKeySet}
 }
 
 // Userinfo will use the token source to query the userinfo endpoint of the
 // provider. It will unmarshal the response in to the provided into.
 func (p *Provider) Userinfo(ctx context.Context, tokenSource oauth2.TokenSource, into any) error {
-	if p.Metadata.userinfoEndpoint() == "" {
+	md, _ := p.snapshot()
+	if md == nil || md.userinfoEndpoint() == "" {
 		return fmt.Errorf("provider does not support userinfo endpoint")
 	}
 
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, internal.HTTPClientFromContext(ctx, p.HTTPClient))
 
 	client := oauth2.NewClient(ctx, tokenSource)
-	res, err := client.Get(p.Metadata.userinfoEndpoint())
+	res, err := client.Get(md.userinfoEndpoint())
 	if err != nil {
 		return fmt.Errorf("getting userinfo: %w", err)
 	}
@@ -98,57 +168,19 @@ func (p *Provider) Userinfo(ctx context.Context, tokenSource oauth2.TokenSource,
 		return fmt.Errorf("userinfo request failed with code %d", res.StatusCode)
 	}
 
-	if res.Header.Get("Content-Type") != "application/json" {
+	mediaType, _, err := mime.ParseMediaType(res.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
 		return fmt.Errorf("userinfo response has unexpected content type: %s", res.Header.Get("Content-Type"))
 	}
 
-	body, err := io.ReadAll(res.Body)
+	body, err := readBounded(res.Body, maxProviderResponseBytes)
 	if err != nil {
 		return fmt.Errorf("reading userinfo response: %w", err)
 	}
 
-	if err := json.Unmarshal(body, into); err != nil {
+	if err := jsonv2.Unmarshal(body, into); err != nil {
 		return fmt.Errorf("unmarshalling userinfo response: %w", err)
 	}
 
 	return nil
-}
-
-// VerifyAndDecode implements the tink [jwt.Verifier] interface. This provides
-// low-level verification of a JWT token against the provider's JWKS. For
-// verifying ID or Access tokens, the [lds.li/oauth2ext/claims] package should
-// be used.
-//
-// Note: This method may trigger network calls to refresh the JWKS if needed.
-// Using the [Provider.VerifyAndDecodeContext] method is recommended.
-func (p *Provider) VerifyAndDecode(compact string, validator *jwt.Validator) (*jwt.VerifiedJWT, error) {
-	return p.VerifyAndDecodeContext(context.Background(), compact, validator)
-}
-
-// VerifyAndDecodeContext provides low-level verification of a JWT token against
-// the provider's JWKS. For verifying ID or Access tokens, the
-// [lds.li/oauth2ext/claims] package should be used. This
-func (p *Provider) VerifyAndDecodeContext(ctx context.Context, compact string, validator *jwt.Validator) (*jwt.VerifiedJWT, error) {
-	if err := p.refreshIfNeeded(ctx); err != nil {
-		return nil, err
-	}
-	verif, err := jwt.NewVerifier(p.cachedHandle)
-	if err != nil {
-		return nil, fmt.Errorf("creating verifier: %w", err)
-	}
-	jwt, err := verif.VerifyAndDecode(compact, validator)
-	if err != nil {
-		return nil, err
-	}
-	// perform an additional check, we should only ever pass tokens from the
-	// current issuer.
-	iss, err := jwt.Issuer()
-	if err != nil {
-		return nil, fmt.Errorf("getting issuer: %w", err)
-	}
-	if iss != p.Metadata.issuer() {
-		return nil, fmt.Errorf("invalid issuer: got %q, want %q", iss, p.Metadata.issuer())
-	}
-
-	return jwt, nil
 }

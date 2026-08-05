@@ -17,10 +17,6 @@ import (
 
 const loginStateExpiresAfter = 5 * time.Minute
 
-// DefaultKeyRefreshIterval is the default interval we try and refresh signing
-// keys from the issuer.
-const DefaultKeyRefreshIterval = 1 * time.Hour
-
 var baseLogAttr = slog.String("component", "oidc-middleware")
 
 func errAttr(err error) slog.Attr { return slog.String("err", err.Error()) }
@@ -39,10 +35,9 @@ type SessionStore interface {
 // IDSSOHandler wraps another http.Handler, protecting it with web-based OIDC ID
 // SSO. The handler is for a single client ID. IDClaims is the type of decoded
 // ID token claims (e.g. *claims.VerifiedID).
-type IDSSOHandler[IDClaims claims.Claimable] struct {
-	Verifier *claims.Verifier[IDClaims]
-	// Validator validates ID tokens for this handler's client ID. Required.
-	Validator claims.Validator[IDClaims]
+type IDSSOHandler[IDClaims any] struct {
+	// Verifier validates ID tokens and projects application claims. Required.
+	Verifier claims.IDTokenResponseVerifier[IDClaims]
 	// Provider is used for PKCE (CodeChallengeMethodsSupported). Set by
 	// NewIDSSOHandlerFromDiscovery when using discovery.
 	Provider *provider.Provider
@@ -70,9 +65,11 @@ func NewIDSSOHandlerFromDiscovery(ctx context.Context, sessStore SessionStore, i
 		return nil, fmt.Errorf("discovering provider: %w", err)
 	}
 
-	verifier, err := claims.NewVerifier[*claims.VerifiedID](prov)
+	verifier, err := claims.NewIDTokenVerifier(prov, claims.IDTokenVerifierOpts{
+		ClientID: &clientID,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("creating verifier: %w", err)
+		return nil, fmt.Errorf("creating ID token verifier: %w", err)
 	}
 
 	if sessStore == nil {
@@ -88,7 +85,6 @@ func NewIDSSOHandlerFromDiscovery(ctx context.Context, sessStore SessionStore, i
 	}
 	h := &IDSSOHandler[*claims.VerifiedID]{
 		Verifier:     verifier,
-		Validator:    claims.NewIDTokenValidator(&claims.IDTokenValidatorOpts{ClientID: &cfg.ClientID}),
 		Provider:     prov,
 		OAuth2Config: cfg,
 		SessionStore: sessStore,
@@ -112,9 +108,9 @@ func (h *IDSSOHandler[IDClaims]) Wrap(next http.Handler) http.Handler {
 			http.Error(w, "Uninitialized session store", http.StatusInternalServerError)
 			return
 		}
-		if h.Validator == nil {
-			slog.ErrorContext(r.Context(), "Uninitialized validator", baseLogAttr)
-			http.Error(w, "Uninitialized validator", http.StatusInternalServerError)
+		if h.Verifier == nil {
+			slog.ErrorContext(r.Context(), "Uninitialized verifier", baseLogAttr)
+			http.Error(w, "Uninitialized verifier", http.StatusInternalServerError)
 			return
 		}
 		session, err := h.SessionStore.GetOIDCSession(r)
@@ -182,7 +178,7 @@ func (h *IDSSOHandler[IDClaims]) Wrap(next http.Handler) http.Handler {
 func (h *IDSSOHandler[IDClaims]) authenticateExisting(r *http.Request, session *SessionData) (*oauth2.Token, IDClaims) {
 	ctx := r.Context()
 
-	if session.Token == nil {
+	if session.Token == nil || session.Token.Token == nil {
 		var zero IDClaims
 		return nil, zero
 	}
@@ -193,11 +189,10 @@ func (h *IDSSOHandler[IDClaims]) authenticateExisting(r *http.Request, session *
 		return nil, zero
 	}
 
-	// We always verify, as in the cookie store case the integrity of the data
-	// is not trusted.
-	idClaims, err := h.Verifier.VerifyAndDecodeToken(ctx, *session.Token.Token, h.Validator)
-	if err != nil {
-		// Attempt to refresh the token
+	// Refresh based on OAuth token validity, not as recovery from an ID-token or
+	// application-claims verification failure. Cookie sessions intentionally
+	// contain only an ID token, so an absent access token is verified directly.
+	if session.Token.AccessToken != "" && !session.Token.Valid() {
 		if session.Token.RefreshToken == "" {
 			var zero IDClaims
 			return nil, zero
@@ -208,11 +203,16 @@ func (h *IDSSOHandler[IDClaims]) authenticateExisting(r *http.Request, session *
 			return nil, zero
 		}
 		session.Token = &oidc.TokenWithID{Token: token}
-		idClaims, err = h.Verifier.VerifyAndDecodeToken(ctx, *token, h.Validator)
-		if err != nil {
-			var zero IDClaims
-			return nil, zero
-		}
+	}
+
+	// Always verify the ID token because cookie-backed session contents are not
+	// trusted and server-side stores may also contain stale or corrupted data.
+	idClaims, err := h.Verifier.VerifyTokenResponse(ctx, session.Token.Token, claims.IDTokenValidationInput{
+		IgnoreNonce: true,
+	})
+	if err != nil {
+		var zero IDClaims
+		return nil, zero
 	}
 
 	// Create a new token with refresh token stripped. We ultimately don't want
@@ -277,7 +277,10 @@ func (h *IDSSOHandler[IDClaims]) authenticateCallback(r *http.Request, session *
 		return "", err
 	}
 
-	if _, err := h.Verifier.VerifyAndDecodeToken(ctx, *token, h.Validator); err != nil {
+	if _, err := h.Verifier.VerifyTokenResponse(ctx, token, claims.IDTokenValidationInput{
+		ExpectedNonce:     &foundLogin.Nonce,
+		AuthorizationCode: &code,
+	}); err != nil {
 		return "", fmt.Errorf("verifying id_token failed: %w", err)
 	}
 
@@ -303,11 +306,12 @@ func (h *IDSSOHandler[IDClaims]) startAuthentication(r *http.Request, session *S
 
 	var (
 		state         = rand.Text()
+		nonce         = rand.Text()
 		pkceChallenge string
 		returnTo      string
 	)
 
-	opts := h.AuthCodeOptions
+	opts := append(slices.Clone(h.AuthCodeOptions), oauth2.SetAuthURLParam("nonce", nonce))
 	if h.Provider != nil && slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
 		pkceChallenge = oauth2.GenerateVerifier()
 		opts = append(opts, oauth2.S256ChallengeOption(pkceChallenge))
@@ -318,6 +322,7 @@ func (h *IDSSOHandler[IDClaims]) startAuthentication(r *http.Request, session *S
 	}
 	session.Logins = append(session.Logins, SessionDataLogin{
 		State:         state,
+		Nonce:         nonce,
 		PKCEChallenge: pkceChallenge,
 		ReturnTo:      returnTo,
 		Expires:       int(time.Now().Add(loginStateExpiresAfter).Unix()),

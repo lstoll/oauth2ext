@@ -16,6 +16,8 @@ type SessionData struct {
 type SessionDataLogin struct {
 	// State for an in-progress auth flow.
 	State string `json:"oidc_state,omitempty"`
+	// Nonce binds the authentication request to its ID token.
+	Nonce string `json:"nonce,omitempty"`
 	// PKCEChallenge for the in-progress auth flow
 	PKCEChallenge string `json:"pkce_challenge,omitempty"`
 	// ReturnTo is where we should navigate to at the end of the flow
