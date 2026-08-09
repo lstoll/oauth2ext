@@ -650,9 +650,8 @@ func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbpri
 	}
 
 	opts := &dpop.ValidatorOpts{
-		ExpectedHTM:      new(req.Method),
-		ExpectedHTU:      new(fmt.Sprintf("%s://%s%s", issURL.Scheme, issURL.Host, req.URL.Path)),
-		AllowUnsetHTMHTU: true, // Allow requests without HTM/HTU if the client doesn't require them
+		ExpectedHTM: new(req.Method),
+		ExpectedHTU: new(fmt.Sprintf("%s://%s%s", issURL.Scheme, issURL.Host, req.URL.Path)),
 	}
 	if expectedThumbprint == nil {
 		opts.IgnoreThumbprint = true

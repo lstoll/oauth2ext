@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
@@ -68,14 +67,9 @@ func TestDPoPTokenFlow(t *testing.T) {
 	t.Run("Initial token exchange with DPoP", func(t *testing.T) {
 		codeToken := newCodeGrant(t, server.config.Storage)
 
-		now := time.Now()
-		dpopProof, err := dpopSigner.SignAndEncode(&jwt.RawJWTOptions{
-			WithoutExpiration: true,
-			IssuedAt:          &now,
-			CustomClaims: map[string]any{
-				"htm": http.MethodPost,
-				"htu": issuer + "/token",
-			},
+		dpopProof, err := dpopSigner.SignAndEncode(dpop.ProofOptions{
+			HTTPMethod: http.MethodPost,
+			HTTPURI:    issuer + "/token",
 		})
 		if err != nil {
 			t.Fatalf("failed to create DPoP proof: %v", err)
@@ -165,14 +159,9 @@ func TestDPoPTokenFlow(t *testing.T) {
 		}
 		refreshTokenStr := refreshToken.ToUser(refreshTokenID)
 
-		now := time.Now()
-		dpopProof, err := dpopSigner.SignAndEncode(&jwt.RawJWTOptions{
-			WithoutExpiration: true,
-			IssuedAt:          &now,
-			CustomClaims: map[string]any{
-				"htm": http.MethodPost,
-				"htu": issuer + "/token",
-			},
+		dpopProof, err := dpopSigner.SignAndEncode(dpop.ProofOptions{
+			HTTPMethod: http.MethodPost,
+			HTTPURI:    issuer + "/token",
 		})
 		if err != nil {
 			t.Fatalf("failed to create DPoP proof: %v", err)
@@ -183,7 +172,6 @@ func TestDPoPTokenFlow(t *testing.T) {
 			ExpectedHTM:      new(http.MethodPost),
 			ExpectedHTU:      new(issuer + "/token"),
 			IgnoreThumbprint: true,
-			AllowUnsetHTMHTU: true,
 		})
 		if err != nil {
 			t.Fatalf("failed to create validator: %v", err)
@@ -330,14 +318,9 @@ func TestDPoPTokenFlow(t *testing.T) {
 			refreshTokenStr3 := refreshToken3.ToUser(refreshTokenID3)
 
 			// Create DPoP proof with wrong key
-			now := time.Now()
-			wrongProof, err := wrongSigner.SignAndEncode(&jwt.RawJWTOptions{
-				WithoutExpiration: true,
-				IssuedAt:          &now,
-				CustomClaims: map[string]any{
-					"htm": http.MethodPost,
-					"htu": issuer + "/token",
-				},
+			wrongProof, err := wrongSigner.SignAndEncode(dpop.ProofOptions{
+				HTTPMethod: http.MethodPost,
+				HTTPURI:    issuer + "/token",
 			})
 			if err != nil {
 				t.Fatalf("failed to create DPoP proof: %v", err)
