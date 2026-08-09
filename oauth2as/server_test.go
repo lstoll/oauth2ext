@@ -234,8 +234,11 @@ func TestCodeToken(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		newToken := token.New(tokenUsageAuthCode, grantID, grant.UserID)
 		authCodeID := newUUIDv4()
+		newToken, err := token.New(tokenUsageAuthCode, authCodeID, grantID, grant.UserID)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Create token entry for the auth code
 		err = o.config.Storage.CreateAuthCode(context.Background(), authCodeID, &StoredAuthCode{
@@ -247,7 +250,7 @@ func TestCodeToken(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		authCodeStr := newToken.ToUser(authCodeID)
+		authCodeStr := newToken.UserToken()
 
 		treq := &oauth2proto.TokenRequest{
 			GrantType:    oauth2proto.GrantTypeAuthorizationCode,
@@ -666,8 +669,11 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		t.Fatal(err)
 	}
 
-	newToken := token.New(tokenUsageRefresh, grantID, grant.UserID)
 	refreshTokenID := newUUIDv4()
+	newToken, err := token.New(tokenUsageRefresh, refreshTokenID, grantID, grant.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Create token entry for the refresh token
 	err = smgr.CreateRefreshToken(context.Background(), refreshTokenID, &StoredRefreshToken{
@@ -680,7 +686,7 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		t.Fatal(err)
 	}
 
-	return newToken.ToUser(refreshTokenID)
+	return newToken.UserToken()
 }
 
 func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
@@ -704,8 +710,11 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		t.Fatal(err)
 	}
 
-	newToken := token.New(tokenUsageAuthCode, grantID, grant.UserID)
 	authCodeID := newUUIDv4()
+	newToken, err := token.New(tokenUsageAuthCode, authCodeID, grantID, grant.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Create token entry for the auth code
 	err = smgr.CreateAuthCode(context.Background(), authCodeID, &StoredAuthCode{
@@ -718,7 +727,7 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		t.Fatal(err)
 	}
 
-	return newToken.ToUser(authCodeID)
+	return newToken.UserToken()
 }
 
 type staticClient struct {
