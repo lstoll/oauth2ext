@@ -5,16 +5,18 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/dpop"
+	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
 	"lds.li/oauth2ext/oidc"
@@ -30,6 +32,24 @@ var (
 )
 
 type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, error)
+
+// IDTokenClaims contains application-selected identity claims. The server
+// constructs the token envelope and binding claims.
+type IDTokenClaims struct {
+	Subject    string
+	ACR        string
+	AMR        []string
+	Additional map[string]any
+}
+
+// AccessTokenClaims contains application-selected authorization claims. The
+// server constructs the token envelope and binding claims.
+type AccessTokenClaims struct {
+	Subject    string
+	Audiences  []string
+	Scopes     []string
+	Additional map[string]any
+}
 
 // TokenRequest encapsulates the information from the initial request to the token
 // endpoint. This is passed to the handler, to generate an appropriate response.
@@ -61,34 +81,16 @@ type TokenRequest struct {
 // TokenResponse is returned by the token endpoint handler, indicating what it
 // should actually return to the user.
 type TokenResponse struct {
-	// If zero, default expiry times will be used
+	// If zero, the configured default validity is used.
 	IDTokenExpiry     time.Time
 	AccessTokenExpiry time.Time
 
-	// IDClaims are the claims that will be included in the ID token. These will
-	// be serialized to JSON, and then returned in the token. This is optional.
-	// The following claims will always be overridden:
-	// - iss
-	// - iat
-	// - auth_time
-	// - nonce
-	// The following claims will be defaulted if not set:
-	// - sub
-	// - exp
-	// - aud
-	IDClaims *jwt.RawJWTOptions
-	// AccessTokenClaims is the claims that will be included in the access token.
-	// The claims will be serialized to JSON, and then returned in the token.
-	// The following claims will always be overridden:
-	// - iss
-	// - client_id
-	// - iat
-	// - jti
-	// The following claims will be defaulted if not set:
-	// - sub
-	// - exp
-	// - aud
-	AccessTokenClaims *jwt.RawJWTOptions
+	// IDTokenClaims contains application-selected claims. Additional is for
+	// custom claims and must not contain a server-managed or typed claim name.
+	IDTokenClaims *IDTokenClaims
+	// AccessTokenClaims contains application-selected claims. Additional is for
+	// custom claims and must not contain a server-managed or typed claim name.
+	AccessTokenClaims *AccessTokenClaims
 
 	// RefreshTokenValidUntil indicates how long the returned refresh token should
 	// be valid for, if one is issued. If zero, the default will be used.
@@ -218,9 +220,9 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "PKCE required, but code verifier not passed"}
 	}
 
-	var alg *string
-	if copts.signingAlg != "" {
-		alg = &copts.signingAlg
+	idTokenAlgorithm := s.defaultIDTokenSigningAlgorithm()
+	if copts.idTokenSigningAlgorithm != "" {
+		idTokenAlgorithm = copts.idTokenSigningAlgorithm
 	}
 
 	// Verify the code verifier against the session data
@@ -271,7 +273,7 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 		return nil, &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	trresp, _, err := s.buildTokenResponse(ctx, alg, loadedGrant, tresp, isDPoPBound)
+	trresp, _, err := s.buildTokenResponse(ctx, idTokenAlgorithm, loadedGrant, tresp, isDPoPBound)
 	if err != nil && errors.Is(err, ErrConcurrentUpdate) {
 		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "concurrent update detected"}
 	}
@@ -366,9 +368,9 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		opt(copts)
 	}
 
-	var alg *string
-	if copts.signingAlg != "" {
-		alg = &copts.signingAlg
+	idTokenAlgorithm := s.defaultIDTokenSigningAlgorithm()
+	if copts.idTokenSigningAlgorithm != "" {
+		idTokenAlgorithm = copts.idTokenSigningAlgorithm
 	}
 
 	// Check if this grant is DPoP-bound by looking for thumbprint in metadata
@@ -394,7 +396,7 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		return nil, &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "handler returned error", Cause: err}
 	}
 
-	trresp, newRTID, err := s.buildTokenResponse(ctx, alg, loadedGrant, tresp, isDPoPBound)
+	trresp, newRTID, err := s.buildTokenResponse(ctx, idTokenAlgorithm, loadedGrant, tresp, isDPoPBound)
 	if errors.Is(err, ErrConcurrentUpdate) {
 		// expire the grant, there's likely another issuance in flight.
 		if err := s.config.Storage.ExpireGrant(ctx, loadedGrant.grantID); err != nil {
@@ -429,7 +431,7 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 
 // buildTokenResponse creates the oauth token response for code and refresh.
 // It works with both auth code grants and refresh token grants via the grantLoader interface.
-func (s *Server) buildTokenResponse(ctx context.Context, alg *string, loadedGrant grantLoader, tresp *TokenResponse, isDPoPBound bool) (_ *oauth2proto.TokenResponse, refreshTokenID string, _ error) {
+func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Algorithm, loadedGrant grantLoader, tresp *TokenResponse, isDPoPBound bool) (_ *oauth2proto.TokenResponse, refreshTokenID string, _ error) {
 	// Update metadata from the handler response
 	if tresp.Metadata != nil {
 		loadedGrant.Grant().Metadata = tresp.Metadata
@@ -482,32 +484,14 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg *string, loadedGran
 		return nil, "", fmt.Errorf("building access token claims: %w", err)
 	}
 
-	var (
-		idSigned string
-		atSigned string
-	)
-	if alg != nil {
-		algSigner, ok := s.config.Signer.(AlgorithmSigner)
-		if !ok {
-			return nil, "", fmt.Errorf("explicit algorithm requested, but signer does not implement AlgorithmSigner")
-		}
-		idSigned, err = algSigner.SignAndEncodeForAlgorithm(*alg, idc)
-		if err != nil {
-			return nil, "", fmt.Errorf("signing id token with algorithm %s: %w", *alg, err)
-		}
-		atSigned, err = algSigner.SignAndEncodeForAlgorithm(*alg, ac)
-		if err != nil {
-			return nil, "", fmt.Errorf("signing access token with algorithm %s: %w", *alg, err)
-		}
-	} else {
-		idSigned, err = s.config.Signer.SignAndEncode(idc)
-		if err != nil {
-			return nil, "", fmt.Errorf("signing id token: %w", err)
-		}
-		atSigned, err = s.config.Signer.SignAndEncode(ac)
-		if err != nil {
-			return nil, "", fmt.Errorf("signing access token: %w", err)
-		}
+	accessTokenAlgorithm := s.accessTokenSigningAlgorithm()
+	atSigned, err := s.config.Signer.SignJWT(ctx, accessTokenAlgorithm, ac)
+	if err != nil {
+		return nil, "", fmt.Errorf("signing access token with algorithm %s: %w", accessTokenAlgorithm, err)
+	}
+	idSigned, err := s.config.Signer.SignJWT(ctx, idTokenAlgorithm, idc)
+	if err != nil {
+		return nil, "", fmt.Errorf("signing ID token with algorithm %s: %w", idTokenAlgorithm, err)
 	}
 
 	tokenType := "bearer"
@@ -521,101 +505,124 @@ func (s *Server) buildTokenResponse(ctx context.Context, alg *string, loadedGran
 		TokenType:    tokenType,
 		ExpiresIn:    acExp.Sub(s.now()),
 		ExtraParams: map[string]any{
-			"id_token": string(idSigned),
+			"id_token": idSigned,
 		},
 	}, rtID, nil
 }
 
-func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (*jwt.RawJWT, error) {
+func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (JWTSigningInput, error) {
 	idExp := tresp.IDTokenExpiry
 	if idExp.IsZero() {
 		idExp = s.now().Add(s.config.IDTokenValidity)
 	}
-
-	rjwtopts := tresp.IDClaims
-
-	if rjwtopts == nil {
-		rjwtopts = &jwt.RawJWTOptions{}
+	application := tresp.IDTokenClaims
+	claims, err := additionalClaims(nil, idTokenReservedClaims)
+	if application != nil {
+		claims, err = additionalClaims(application.Additional, idTokenReservedClaims)
 	}
-	if rjwtopts.CustomClaims == nil {
-		rjwtopts.CustomClaims = make(map[string]any)
-	}
-
-	// fixed values
-	rjwtopts.Issuer = &s.config.Issuer
-	rjwtopts.Audience = &grant.ClientID
-	rjwtopts.IssuedAt = new(s.now())
-	rjwtopts.ExpiresAt = new(idExp)
-	rjwtopts.CustomClaims["auth_time"] = grant.GrantedAt.Unix()
-
-	// defaulted values
-	if rjwtopts.Subject == nil {
-		rjwtopts.Subject = &grant.UserID
-	}
-	if rjwtopts.Audience == nil && len(rjwtopts.Audiences) == 0 {
-		rjwtopts.Audience = &grant.ClientID
-	}
-
-	// TODO: Add nonce claim to ID token if provided in authorization request
-	// rjwtopts.CustomClaims["nonce"] = grant.Request.Nonce
-
-	rjwt, err := jwt.NewRawJWT(rjwtopts)
 	if err != nil {
-		return nil, fmt.Errorf("creating raw jwt: %w", err)
+		return JWTSigningInput{}, err
 	}
-
-	return rjwt, nil
+	subject := grant.UserID
+	if application != nil && application.Subject != "" {
+		subject = application.Subject
+	}
+	claims["iss"] = s.config.Issuer
+	claims["sub"] = subject
+	claims["aud"] = grant.ClientID
+	claims["iat"] = s.now().Unix()
+	claims["exp"] = idExp.Unix()
+	claims["auth_time"] = grant.GrantedAt.Unix()
+	if grant.Request != nil && grant.Request.Nonce != "" {
+		claims["nonce"] = grant.Request.Nonce
+	}
+	if application != nil && application.ACR != "" {
+		claims["acr"] = application.ACR
+	}
+	if application != nil && len(application.AMR) > 0 {
+		claims["amr"] = slices.Clone(application.AMR)
+	}
+	return marshalSigningInput("", claims)
 }
 
-func (s *Server) buildAccessTokenClaims(grantID string, grant *StoredGrant, tresp *TokenResponse) (_ *jwt.RawJWT, expiresAt time.Time, _ error) {
+func (s *Server) buildAccessTokenClaims(grantID string, grant *StoredGrant, tresp *TokenResponse) (_ JWTSigningInput, expiresAt time.Time, _ error) {
 	atExp := tresp.AccessTokenExpiry
 	if atExp.IsZero() {
 		atExp = s.now().Add(s.config.AccessTokenValidity)
 	}
-
-	rjwtopts := tresp.AccessTokenClaims
-
-	if rjwtopts == nil {
-		rjwtopts = &jwt.RawJWTOptions{}
+	application := tresp.AccessTokenClaims
+	claims, err := additionalClaims(nil, accessTokenReservedClaims)
+	if application != nil {
+		claims, err = additionalClaims(application.Additional, accessTokenReservedClaims)
 	}
-	if rjwtopts.CustomClaims == nil {
-		rjwtopts.CustomClaims = make(map[string]any)
+	if err != nil {
+		return JWTSigningInput{}, time.Time{}, err
 	}
-
-	// fixed values
-	rjwtopts.TypeHeader = new("at+jwt")
-
-	rjwtopts.Issuer = &s.config.Issuer
-	rjwtopts.IssuedAt = new(s.now())
-	rjwtopts.ExpiresAt = new(atExp)
-	rjwtopts.JWTID = new(newUUIDv4())
-	rjwtopts.CustomClaims["client_id"] = grant.ClientID
-	rjwtopts.CustomClaims[claimGrantID] = grantID
+	subject := grant.UserID
+	if application != nil && application.Subject != "" {
+		subject = application.Subject
+	}
+	audiences := []string{grant.ClientID}
+	if application != nil && len(application.Audiences) > 0 {
+		audiences = slices.Clone(application.Audiences)
+	}
+	scopes := slices.Clone(grant.GrantedScopes)
+	if application != nil && len(application.Scopes) > 0 {
+		scopes = slices.Clone(application.Scopes)
+	}
+	claims["iss"] = s.config.Issuer
+	claims["sub"] = subject
+	claims["aud"] = audiences
+	claims["iat"] = s.now().Unix()
+	claims["exp"] = atExp.Unix()
+	claims["jti"] = newUUIDv4()
+	claims["client_id"] = grant.ClientID
+	claims["scope"] = strings.Join(scopes, " ")
+	claims[claimGrantID] = grantID
 
 	var addState storedAdditionalState
 	if len(grant.AdditionalState) > 0 {
 		if err := json.Unmarshal(grant.AdditionalState, &addState); err != nil {
-			return nil, time.Time{}, fmt.Errorf("failed to unmarshal additional state: %w", err)
+			return JWTSigningInput{}, time.Time{}, fmt.Errorf("failed to unmarshal additional state: %w", err)
 		}
 	}
 	if addState.DPoPThumbprint != nil {
-		rjwtopts.CustomClaims["jkt"] = *addState.DPoPThumbprint
+		claims["cnf"] = map[string]any{"jkt": *addState.DPoPThumbprint}
 	}
-
-	// defaulted values
-	if rjwtopts.Subject == nil {
-		rjwtopts.Subject = &grant.UserID
-	}
-	if rjwtopts.Audience == nil && len(rjwtopts.Audiences) == 0 {
-		rjwtopts.Audience = &grant.ClientID
-	}
-
-	rjwt, err := jwt.NewRawJWT(rjwtopts)
+	input, err := marshalSigningInput("at+jwt", claims)
 	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("creating raw jwt: %w", err)
+		return JWTSigningInput{}, time.Time{}, err
 	}
+	return input, atExp, nil
+}
 
-	return rjwt, atExp, nil
+var idTokenReservedClaims = map[string]struct{}{
+	"iss": {}, "sub": {}, "aud": {}, "exp": {}, "iat": {}, "nbf": {}, "jti": {},
+	"auth_time": {}, "nonce": {}, "azp": {}, "acr": {}, "amr": {}, "at_hash": {}, "c_hash": {},
+}
+
+var accessTokenReservedClaims = map[string]struct{}{
+	"iss": {}, "sub": {}, "aud": {}, "exp": {}, "iat": {}, "nbf": {}, "jti": {},
+	"client_id": {}, "scope": {}, "cnf": {}, claimGrantID: {},
+}
+
+func additionalClaims(additional map[string]any, reserved map[string]struct{}) (map[string]any, error) {
+	claims := make(map[string]any, len(additional)+12)
+	for name, value := range additional {
+		if _, isReserved := reserved[name]; isReserved {
+			return nil, fmt.Errorf("claim %q is managed by the authorization server", name)
+		}
+		claims[name] = value
+	}
+	return claims, nil
+}
+
+func marshalSigningInput(typ string, claims map[string]any) (JWTSigningInput, error) {
+	payload, err := jsonv2.Marshal(claims)
+	if err != nil {
+		return JWTSigningInput{}, fmt.Errorf("marshaling JWT claims: %w", err)
+	}
+	return JWTSigningInput{Type: typ, Payload: payload}, nil
 }
 
 func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
