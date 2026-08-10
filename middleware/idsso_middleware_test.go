@@ -17,10 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/claims"
-	"lds.li/oauth2ext/internal"
+	"lds.li/oauth2ext/jwttest"
 	"lds.li/oauth2ext/oidc"
 )
 
@@ -45,16 +44,16 @@ type mockOIDCServer struct {
 	validClientID     string
 	validClientSecret string
 	validRedirectURL  string
-	claimOptions      *jwt.RawJWTOptions
+	claims            map[string]any
 	nonces            sync.Map
 
-	signer *internal.TestSigner
+	signer *jwttest.Signer
 
 	mux *http.ServeMux
 }
 
 func startMockOIDCServer(t *testing.T) (server *mockOIDCServer, httpServer *httptest.Server) {
-	server = newMockOIDCServer()
+	server = newMockOIDCServer(t)
 	httpServer = httptest.NewTLSServer(server)
 	t.Cleanup(httpServer.Close)
 
@@ -63,7 +62,8 @@ func startMockOIDCServer(t *testing.T) (server *mockOIDCServer, httpServer *http
 	return server, httpServer
 }
 
-func newMockOIDCServer() *mockOIDCServer {
+func newMockOIDCServer(t *testing.T) *mockOIDCServer {
+	t.Helper()
 	s := &mockOIDCServer{}
 
 	mux := http.NewServeMux()
@@ -73,7 +73,7 @@ func newMockOIDCServer() *mockOIDCServer {
 	mux.HandleFunc("GET /keys", s.handleKeys)
 	s.mux = mux
 
-	s.signer = internal.NewTestSigner()
+	s.signer = jwttest.NewSigner(t)
 
 	return s
 }
@@ -162,24 +162,17 @@ func (s *mockOIDCServer) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clOpts := *s.claimOptions
-	clOpts.Issuer = &s.baseURL
-	clOpts.Audience = &clientID
-	clOpts.ExpiresAt = new(time.Now().Add(time.Minute))
-	clOpts.IssuedAt = new(time.Now())
-	clOpts.CustomClaims = maps.Clone(clOpts.CustomClaims)
-	if clOpts.CustomClaims == nil {
-		clOpts.CustomClaims = make(map[string]any)
+	claims := maps.Clone(s.claims)
+	if claims == nil {
+		claims = make(map[string]any)
 	}
-	clOpts.CustomClaims["nonce"] = nonceValue.(string)
+	claims["iss"] = s.baseURL
+	claims["aud"] = clientID
+	claims["exp"] = time.Now().Add(time.Minute).Unix()
+	claims["iat"] = time.Now().Unix()
+	claims["nonce"] = nonceValue.(string)
 
-	cl, err := jwt.NewRawJWT(&clOpts)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	rawJWT, err := s.signer.Sign(cl)
+	rawJWT, err := s.signer.SignClaims(claims)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -220,9 +213,8 @@ func TestMiddleware_HappyPath(t *testing.T) {
 	oidcServer.validClientID = "valid-client-id"
 	oidcServer.validClientSecret = "valid-client-secret"
 	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
-	oidcServer.claimOptions = &jwt.RawJWTOptions{
-		Subject:    new("valid-subject"),
-		TypeHeader: new("JWT"),
+	oidcServer.claims = map[string]any{
+		"sub": "valid-subject",
 	}
 
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
@@ -333,9 +325,8 @@ func TestContext(t *testing.T) {
 	oidcServer.validClientID = "valid-client-id"
 	oidcServer.validClientSecret = "valid-client-secret"
 	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
-	oidcServer.claimOptions = &jwt.RawJWTOptions{
-		Subject:    new("valid-subject"),
-		TypeHeader: new("JWT"),
+	oidcServer.claims = map[string]any{
+		"sub": "valid-subject",
 	}
 
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
