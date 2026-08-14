@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,16 +15,24 @@ import (
 )
 
 func TestRefreshTokenConcurrency(t *testing.T) {
-	s := NewMemStorage()
+	s := NewMemoryStorage()
 	signer, verifier := testSignerVerifier(t)
+	const concurrency = 10
+	ready := make(chan struct{})
+	var arrived atomic.Int32
 
 	srv := &Server{
 		config: Config{
-			Issuer:   "https://issuer",
-			Storage:  s,
-			Signer:   signer,
-			Verifier: verifier,
+			Issuer:               "https://issuer",
+			Storage:              s,
+			Signer:               signer,
+			Verifier:             verifier,
+			RefreshTokenValidity: time.Hour,
 			TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
+				if arrived.Add(1) == concurrency {
+					close(ready)
+				}
+				<-ready
 				return &TokenResponse{}, nil
 			},
 			Clients: staticClientSource{
@@ -34,22 +42,20 @@ func TestRefreshTokenConcurrency(t *testing.T) {
 					RedirectURLs: []string{"https://redirect"},
 				},
 			},
-			RefreshTokenRotationGracePeriod: 30 * time.Second,
 		},
 		now:    time.Now,
-		logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		logger: slog.New(slog.DiscardHandler),
 	}
-	srv.config.RefreshTokenRotationGracePeriod = 1 * time.Minute
 
 	userID := "test-user"
-	grant := &StoredGrant{
+	grant := &storedGrant{
 		UserID:        userID,
 		ClientID:      "test-client",
 		GrantedScopes: []string{"openid", "offline_access"},
 		GrantedAt:     time.Now(),
 		ExpiresAt:     time.Now().Add(1 * time.Hour),
 	}
-	gid, err := srv.config.Storage.CreateGrant(context.Background(), grant)
+	gid, err := srv.config.Storage.createGrant(context.Background(), grant)
 	if err != nil {
 		t.Fatalf("failed to create grant: %v", err)
 	}
@@ -59,13 +65,13 @@ func TestRefreshTokenConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to generate refresh token: %v", err)
 	}
-	rt := &StoredRefreshToken{
+	rt := &storedRefreshToken{
 		GrantID:          gid,
 		Token:            tok.Stored(),
 		ValidUntil:       time.Now().Add(1 * time.Hour),
 		StorageExpiresAt: time.Now().Add(1 * time.Hour),
 	}
-	if err := srv.config.Storage.CreateRefreshToken(context.Background(), rtID, rt); err != nil {
+	if err := srv.config.Storage.createRefreshToken(context.Background(), rtID, rt); err != nil {
 		t.Fatalf("failed to create refresh token: %v", err)
 	}
 
@@ -73,7 +79,6 @@ func TestRefreshTokenConcurrency(t *testing.T) {
 
 	// Fire concurrent requests
 	var wg sync.WaitGroup
-	concurrency := 10
 	results := make(chan int, concurrency)
 
 	for range concurrency {
@@ -108,16 +113,20 @@ func TestRefreshTokenConcurrency(t *testing.T) {
 		}
 	}
 
-	// 1 will happen if the first completes before the second starts, and 0 if
-	// they happen truly concurrently.
-	if successCount > 1 {
-		t.Errorf("concurrent updates with the same token should never succeed more than once")
+	if successCount != 1 {
+		t.Errorf("successful exchanges = %d, want exactly one", successCount)
+	}
+	if failureCount != concurrency-1 {
+		t.Errorf("failed exchanges = %d, want %d", failureCount, concurrency-1)
 	}
 
-	// in all cases the grant should be expired due to excessive refresh token
-	// replay
-	postGrant, err := s.GetGrant(t.Context(), gid)
-	if err == nil || postGrant != nil {
-		t.Errorf("grant not expired")
+	// A failed compare-and-swap cannot fork the token family and does not revoke
+	// the one successful exchange.
+	postGrant, err := s.getGrant(t.Context(), gid)
+	if err != nil || postGrant == nil {
+		t.Errorf("grant was unexpectedly revoked: %v", err)
+	}
+	if count := memoryRefreshTokenCount(t, s); count != 1 {
+		t.Fatalf("refresh token records = %d, want one active replacement", count)
 	}
 }

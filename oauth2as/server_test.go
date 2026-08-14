@@ -52,7 +52,7 @@ func TestCodeToken(t *testing.T) {
 	)
 
 	newOIDC := func() *Server {
-		s := NewMemStorage()
+		s := NewMemoryStorage()
 
 		signer, verifier := testSignerVerifier(t)
 
@@ -146,6 +146,37 @@ func TestCodeToken(t *testing.T) {
 		}
 	})
 
+	t.Run("Expired authorization code should fail", func(t *testing.T) {
+		o := newOIDC()
+		codeToken := newCodeGrant(t, o.config.Storage)
+		parsed, err := token.ParseUserToken(codeToken, tokenUsageAuthCode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, err := o.config.Storage.getAuthCode(t.Context(), parsed.ID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		code.ValidUntil = time.Now().Add(-time.Second)
+		if err := o.config.Storage.commit(t.Context(), storageCommit{
+			Checks:    []storageCheck{{Kind: storageKindAuthCode, ID: code.ID, Version: code.storageVersion}},
+			AuthCodes: []storedAuthCode{*code},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = o.codeToken(t.Context(), httptest.NewRequest(http.MethodPost, "/token", nil), &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeAuthorizationCode,
+			Code:         codeToken,
+			RedirectURI:  redirectURI,
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+		})
+		if tokenErr, ok := err.(*oauth2proto.TokenError); !ok || tokenErr.ErrorCode != oauth2proto.TokenErrorCodeInvalidGrant {
+			t.Fatalf("expired code error = %v, want invalid_grant", err)
+		}
+	})
+
 	t.Run("Invalid client secret should fail", func(t *testing.T) {
 		o := newOIDC()
 		codeToken := newCodeGrant(t, o.config.Storage)
@@ -222,8 +253,8 @@ func TestCodeToken(t *testing.T) {
 	t.Run("Should issue different tokens for different algorithms", func(t *testing.T) {
 		o := newOIDC()
 
-		// Create a StoredGrant with the auth code
-		grant := &StoredGrant{
+		// Create a storedGrant with the auth code
+		grant := &storedGrant{
 			UserID:        "testsub",
 			ClientID:      rs256ClientID,
 			GrantedScopes: []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
@@ -237,7 +268,7 @@ func TestCodeToken(t *testing.T) {
 			},
 		}
 
-		grantID, err := o.config.Storage.CreateGrant(context.Background(), grant)
+		grantID, err := o.config.Storage.createGrant(context.Background(), grant)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -249,7 +280,7 @@ func TestCodeToken(t *testing.T) {
 		}
 
 		// Create token entry for the auth code
-		err = o.config.Storage.CreateAuthCode(context.Background(), authCodeID, &StoredAuthCode{
+		err = o.config.Storage.createAuthCode(context.Background(), authCodeID, &storedAuthCode{
 			Code:             newToken.Stored(),
 			GrantID:          grantID,
 			ValidUntil:       time.Now().Add(1 * time.Minute),
@@ -334,7 +365,7 @@ func TestRefreshToken(t *testing.T) {
 	)
 
 	newOIDC := func() *Server {
-		s := NewMemStorage()
+		s := NewMemoryStorage()
 
 		signer, verifier := testSignerVerifier(t)
 
@@ -562,7 +593,7 @@ func TestUserinfo(t *testing.T) {
 		Name string
 		// Setup should return both a session to be persisted, and an access
 		// token
-		Setup   func(t *testing.T, storage *MemStorage) (accessToken string)
+		Setup   func(t *testing.T, storage *Storage) (accessToken string)
 		Handler func(w io.Writer, uireq *UserinfoRequest) error
 		// WantErr signifies that we expect an error
 		WantErr bool
@@ -571,8 +602,8 @@ func TestUserinfo(t *testing.T) {
 	}{
 		{
 			Name: "Simple output, valid session",
-			Setup: func(t *testing.T, storage *MemStorage) (accessToken string) {
-				grantID, err := storage.CreateGrant(t.Context(), &StoredGrant{
+			Setup: func(t *testing.T, storage *Storage) (accessToken string) {
+				grantID, err := storage.createGrant(t.Context(), &storedGrant{
 					UserID: "sub", ClientID: "client-id", GrantedScopes: []string{oidc.ScopeOpenID},
 					GrantedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
 				})
@@ -588,7 +619,7 @@ func TestUserinfo(t *testing.T) {
 		},
 		{
 			Name: "Token for other issuer",
-			Setup: func(t *testing.T, _ *MemStorage) (accessToken string) {
+			Setup: func(t *testing.T, _ *Storage) (accessToken string) {
 				return signAccessToken("http://other", time.Now().Add(time.Minute), nil)
 			},
 			Handler: echoHandler,
@@ -596,7 +627,7 @@ func TestUserinfo(t *testing.T) {
 		},
 		{
 			Name: "Expired access token",
-			Setup: func(t *testing.T, _ *MemStorage) (accessToken string) {
+			Setup: func(t *testing.T, _ *Storage) (accessToken string) {
 				return signAccessToken(issuer, time.Now().Add(-time.Minute), nil)
 			},
 			Handler: echoHandler,
@@ -604,7 +635,7 @@ func TestUserinfo(t *testing.T) {
 		},
 		{
 			Name: "No access token",
-			Setup: func(t *testing.T, _ *MemStorage) (accessToken string) {
+			Setup: func(t *testing.T, _ *Storage) (accessToken string) {
 				return ""
 			},
 			Handler: echoHandler,
@@ -612,7 +643,7 @@ func TestUserinfo(t *testing.T) {
 		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
-			s := NewMemStorage()
+			s := NewMemoryStorage()
 
 			signer, verifier := testSignerVerifier(t)
 
@@ -665,8 +696,8 @@ func TestUserinfo(t *testing.T) {
 func TestUserinfoGrantContext(t *testing.T) {
 	const issuer = "http://iss"
 
-	s := NewMemStorage()
-	grant := &StoredGrant{
+	s := NewMemoryStorage()
+	grant := &storedGrant{
 		UserID:        "sub",
 		ClientID:      "client-id",
 		GrantedScopes: []string{"openid", "profile"},
@@ -676,7 +707,7 @@ func TestUserinfoGrantContext(t *testing.T) {
 		ACR:           "urn:mace:incommon:iap:silver",
 		AMR:           []string{"pwd"},
 	}
-	grantID, err := s.CreateGrant(context.Background(), grant)
+	grantID, err := s.createGrant(context.Background(), grant)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -733,7 +764,7 @@ func TestUserinfoGrantContext(t *testing.T) {
 	gotReq.Metadata[0] = 'X'
 	gotReq.GrantedScopes[0] = "changed"
 	gotReq.AMR[0] = "changed"
-	stored, err := s.GetGrant(t.Context(), grantID)
+	stored, err := s.getGrant(t.Context(), grantID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -744,8 +775,8 @@ func TestUserinfoGrantContext(t *testing.T) {
 
 func TestUserinfoRequiresOpenIDScope(t *testing.T) {
 	const issuer = "http://iss"
-	storage := NewMemStorage()
-	grantID, err := storage.CreateGrant(t.Context(), &StoredGrant{
+	storage := NewMemoryStorage()
+	grantID, err := storage.createGrant(t.Context(), &storedGrant{
 		UserID:        "sub",
 		ClientID:      "client-id",
 		GrantedScopes: []string{"profile"},
@@ -779,8 +810,8 @@ func TestUserinfoRequiresOpenIDScope(t *testing.T) {
 
 func TestUserinfoFailsClosedOnGrantContext(t *testing.T) {
 	const issuer = "http://iss"
-	storage := NewMemStorage()
-	grantID, err := storage.CreateGrant(t.Context(), &StoredGrant{
+	storage := NewMemoryStorage()
+	grantID, err := storage.createGrant(t.Context(), &storedGrant{
 		UserID: "sub", ClientID: "client-id", GrantedScopes: []string{oidc.ScopeOpenID},
 		GrantedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
 	})
@@ -873,9 +904,9 @@ func testSignerVerifier(t *testing.T) (JWTSigner, JWTVerifier) {
 	return signer, signer
 }
 
-func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
-	// Create a StoredGrant with the refresh token
-	grant := &StoredGrant{
+func newRefreshGrant(t *testing.T, smgr *Storage) (refreshToken string) {
+	// Create a storedGrant with the refresh token
+	grant := &storedGrant{
 		UserID:        "testsub",
 		ClientID:      "client-id",
 		GrantedScopes: []string{oidc.ScopeOfflineAccess},
@@ -883,7 +914,7 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		ExpiresAt:     time.Now().Add(6 * time.Hour),
 	}
 
-	grantID, err := smgr.CreateGrant(context.Background(), grant)
+	grantID, err := smgr.createGrant(context.Background(), grant)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -895,7 +926,7 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 	}
 
 	// Create token entry for the refresh token
-	err = smgr.CreateRefreshToken(context.Background(), refreshTokenID, &StoredRefreshToken{
+	err = smgr.createRefreshToken(context.Background(), refreshTokenID, &storedRefreshToken{
 		Token:            newToken.Stored(),
 		GrantID:          grantID,
 		ValidUntil:       time.Now().Add(6 * time.Hour),
@@ -908,9 +939,9 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 	return newToken.UserToken()
 }
 
-func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
-	// Create a StoredGrant with the auth code
-	grant := &StoredGrant{
+func newCodeGrant(t *testing.T, smgr *Storage) (authCode string) {
+	// Create a storedGrant with the auth code
+	grant := &storedGrant{
 		UserID:        "testsub",
 		ClientID:      "client-id",
 		GrantedScopes: []string{oidc.ScopeOfflineAccess},
@@ -924,7 +955,7 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		},
 	}
 
-	grantID, err := smgr.CreateGrant(context.Background(), grant)
+	grantID, err := smgr.createGrant(context.Background(), grant)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -936,7 +967,7 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 	}
 
 	// Create token entry for the auth code
-	err = smgr.CreateAuthCode(context.Background(), authCodeID, &StoredAuthCode{
+	err = smgr.createAuthCode(context.Background(), authCodeID, &storedAuthCode{
 		Code:             newToken.Stored(),
 		GrantID:          grantID,
 		ValidUntil:       time.Now().Add(1 * time.Minute),
