@@ -5,8 +5,6 @@ jobs:
   build:
     name: "Build (Go ${{ matrix.go }} on Windows)"
     runs-on: windows-latest
-    env:
-      GOTOOLCHAIN: local
     strategy:
       matrix:
         go: [stable] # go: [ stable, oldstable ]

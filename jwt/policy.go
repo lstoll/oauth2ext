@@ -2,6 +2,7 @@ package jwt
 
 import (
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -51,10 +52,8 @@ func (p ValidationPolicy) validate() error {
 	if (len(p.ExpectedAudiences) > 0) == p.IgnoreAudiences {
 		return policyChoiceError("ExpectedAudiences", "IgnoreAudiences")
 	}
-	for _, audience := range p.ExpectedAudiences {
-		if audience == "" {
-			return fmt.Errorf("%w: ExpectedAudiences must not contain an empty value", ErrPolicy)
-		}
+	if slices.Contains(p.ExpectedAudiences, "") {
+		return fmt.Errorf("%w: ExpectedAudiences must not contain an empty value", ErrPolicy)
 	}
 	if p.ClockSkew < 0 || p.ClockSkew > MaxClockSkew {
 		return fmt.Errorf("%w: ClockSkew must be between 0 and %s", ErrPolicy, MaxClockSkew)

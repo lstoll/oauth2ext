@@ -265,7 +265,7 @@ func mustTokenHash(t *testing.T, algorithm jwt.Algorithm, value string) string {
 	return hash
 }
 
-func requireIDVerificationError(t *testing.T, err error, detail string) *VerificationError {
+func requireIDVerificationError(t *testing.T, err error, detail string) {
 	t.Helper()
 	verificationErr, ok := errors.AsType[*VerificationError](err)
 	if !ok {
@@ -277,7 +277,6 @@ func requireIDVerificationError(t *testing.T, err error, detail string) *Verific
 	if !strings.Contains(verificationErr.Details(), detail) {
 		t.Fatalf("details: got %q, want text %q", verificationErr.Details(), detail)
 	}
-	return verificationErr
 }
 
 func newMockDiscoveryServer(t *testing.T) (*httptest.Server, *jwttest.Signer) {

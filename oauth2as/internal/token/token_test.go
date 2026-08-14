@@ -12,7 +12,7 @@ var (
 )
 
 func TestTokenRoundTrip(t *testing.T) {
-	original := mustToken(t, testUsage, "token-id", "grant-id", "subject")
+	original := mustToken(t, testUsage, "token-id")
 	userToken := original.UserToken()
 	parts := strings.Split(userToken, ".")
 	if len(parts) != 5 || parts[0] != "o2as" || parts[1] != "r" || parts[2] != "1" {
@@ -48,7 +48,7 @@ func TestTokenRoundTrip(t *testing.T) {
 }
 
 func TestTokenBinding(t *testing.T) {
-	original := mustToken(t, testUsage, "token-id", "grant-id", "subject")
+	original := mustToken(t, testUsage, "token-id")
 	parsed, err := ParseUserToken(original.UserToken(), testUsage)
 	if err != nil {
 		t.Fatal(err)
@@ -92,14 +92,14 @@ func TestTokenBinding(t *testing.T) {
 	if _, err := parsedWithOtherID.Verify(original.Stored(), "grant-id", "subject"); err == nil {
 		t.Fatal("token verified under a different storage record ID")
 	}
-	other := mustToken(t, testUsage, "token-id", "grant-id", "subject")
+	other := mustToken(t, testUsage, "token-id")
 	if original.UserToken() == other.UserToken() || bytes.Equal(original.Stored(), other.Stored()) {
 		t.Fatal("independently generated tokens reused cryptographic material")
 	}
 }
 
 func TestParseUserTokenRejectsMalformedInput(t *testing.T) {
-	token := mustToken(t, testUsage, "token-id", "grant-id", "subject")
+	token := mustToken(t, testUsage, "token-id")
 	valid := token.UserToken()
 	parts := strings.Split(valid, ".")
 	tests := map[string]string{
@@ -129,8 +129,8 @@ func TestGrantKeyWorkflowAndRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := mustToken(t, testUsage, "token-1", "grant-id", "subject")
-	second := mustToken(t, testUsage, "token-2", "grant-id", "subject")
+	first := mustToken(t, testUsage, "token-1")
+	second := mustToken(t, testUsage, "token-2")
 
 	metadata := []byte("sensitive metadata")
 	ciphertext, err := grantKey.EncryptMetadata(metadata, "grant-id")
@@ -241,9 +241,9 @@ func TestNewRejectsInvalidEnvelopeInputs(t *testing.T) {
 	}
 }
 
-func mustToken(t testing.TB, usage Usage, tokenID, grantID, subject string) Token {
+func mustToken(t testing.TB, usage Usage, tokenID string) Token {
 	t.Helper()
-	token, err := New(usage, tokenID, grantID, subject)
+	token, err := New(usage, tokenID, "grant-id", "subject")
 	if err != nil {
 		t.Fatal(err)
 	}

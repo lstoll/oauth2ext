@@ -29,8 +29,7 @@ func NewSEPSigner(label string, opts ...SepSignerOpt) (crypto.Signer, error) {
 		Type:  keychain.IdentityQueryTypeCTK,
 	})
 	if err != nil {
-		var kcErr *keychain.Error
-		if !errors.As(err, &kcErr) || kcErr.Code() != keychain.ErrorCodeItemNotFound {
+		if kcErr, ok := errors.AsType[*keychain.Error](err); !ok || kcErr.Code() != keychain.ErrorCodeItemNotFound {
 			return nil, err
 		}
 
