@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"uuid"
 
 	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/jwt"
@@ -596,7 +597,7 @@ func (s *Server) buildAccessTokenClaims(grantID string, grant *StoredGrant, tres
 	claims["aud"] = audiences
 	claims["iat"] = s.now().Unix()
 	claims["exp"] = atExp.Unix()
-	claims["jti"] = newUUIDv4()
+	claims["jti"] = uuid.NewV4().String()
 	claims["client_id"] = grant.ClientID
 	claims["scope"] = strings.Join(scopes, " ")
 	claims[claimGrantID] = grantID

@@ -3,7 +3,6 @@ package dpop
 import (
 	"crypto"
 	"crypto/ecdsa"
-	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -11,18 +10,18 @@ import (
 	jsonv2 "encoding/json/v2"
 	"fmt"
 	"time"
+	"uuid"
 
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/cryptosigner"
 )
 
-// ProofOptions contains the claims used to create a DPoP proof. IssuedAt and
-// JWTID are generated when omitted.
+// ProofOptions contains the claims used to create a DPoP proof. IssuedAt is
+// generated when omitted.
 type ProofOptions struct {
 	HTTPMethod string
 	HTTPURI    string
 	IssuedAt   time.Time
-	JWTID      string
 	Nonce      string
 	// AccessToken, when set, is hashed into the ath claim.
 	AccessToken string
@@ -120,11 +119,8 @@ func (s *Signer) SignAndEncode(options ProofOptions) (string, error) {
 	if options.IssuedAt.IsZero() {
 		options.IssuedAt = time.Now()
 	}
-	if options.JWTID == "" {
-		options.JWTID = rand.Text()
-	}
 	payload := map[string]any{
-		"jti": options.JWTID,
+		"jti": uuid.NewV4().String(),
 		"htm": options.HTTPMethod,
 		"htu": options.HTTPURI,
 		"iat": float64(options.IssuedAt.Unix()) + float64(options.IssuedAt.Nanosecond())/float64(time.Second),

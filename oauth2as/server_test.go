@@ -22,6 +22,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
 	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as/internal/token"
@@ -241,7 +242,7 @@ func TestCodeToken(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		authCodeID := newUUIDv4()
+		authCodeID := uuid.NewV4().String()
 		newToken, err := token.New(tokenUsageAuthCode, authCodeID, grantID, grant.UserID)
 		if err != nil {
 			t.Fatal(err)
@@ -887,7 +888,7 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		t.Fatal(err)
 	}
 
-	refreshTokenID := newUUIDv4()
+	refreshTokenID := uuid.NewV4().String()
 	newToken, err := token.New(tokenUsageRefresh, refreshTokenID, grantID, grant.UserID)
 	if err != nil {
 		t.Fatal(err)
@@ -928,7 +929,7 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		t.Fatal(err)
 	}
 
-	authCodeID := newUUIDv4()
+	authCodeID := uuid.NewV4().String()
 	newToken, err := token.New(tokenUsageAuthCode, authCodeID, grantID, grant.UserID)
 	if err != nil {
 		t.Fatal(err)
