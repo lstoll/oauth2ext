@@ -12,7 +12,7 @@ type testSigner struct {
 	keySet *KeySet
 }
 
-func requireVerificationError(t *testing.T, err error, code VerificationErrorCode) *VerificationError {
+func requireVerificationError(t *testing.T, err error, code VerificationErrorCode) {
 	t.Helper()
 	verificationErr, ok := errors.AsType[*VerificationError](err)
 	if !ok {
@@ -31,7 +31,6 @@ func requireVerificationError(t *testing.T, err error, code VerificationErrorCod
 	if verificationErr.Details() == "" {
 		t.Fatal("verification error has no diagnostic details")
 	}
-	return verificationErr
 }
 
 func newTestSigner(t *testing.T) *testSigner {

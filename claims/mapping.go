@@ -51,11 +51,11 @@ func AnyIDClaimsRule[Claims any](rules ...IDClaimsRule[Claims]) IDClaimsRule[Cla
 				failures = append(failures, errors.New("claims: nil ID claims rule"))
 				continue
 			}
-			if err := rule(claims); err == nil {
+			err := rule(claims)
+			if err == nil {
 				return nil
-			} else {
-				failures = append(failures, err)
 			}
+			failures = append(failures, err)
 		}
 		return errors.Join(failures...)
 	}

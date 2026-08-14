@@ -3,6 +3,7 @@ package jwt
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"testing"
 	"time"
 )
@@ -19,9 +20,7 @@ func testClaims(issuer, subject string, audiences []string, now time.Time, custo
 	} else if len(audiences) > 1 {
 		out["aud"] = append([]string(nil), audiences...)
 	}
-	for k, v := range custom {
-		out[k] = v
-	}
+	maps.Copy(out, custom)
 	return out
 }
 

@@ -73,21 +73,6 @@ func generateTestKey(t *testing.T) *ecdsa.PrivateKey {
 	return privKey
 }
 
-func signTestPayload(t *testing.T, signer *Signer, claims map[string]any) string {
-	t.Helper()
-	if _, ok := claims["jti"]; !ok {
-		claims["jti"] = "test-jti"
-	}
-	if _, ok := claims["iat"]; !ok {
-		claims["iat"] = time.Now().Unix()
-	}
-	token, err := signer.signPayload(claims, nil, true)
-	if err != nil {
-		t.Fatalf("failed to encode DPoP token: %v", err)
-	}
-	return token
-}
-
 func TestDPoPVerifier_RoundTrip(t *testing.T) {
 	// Generate a test ECDSA key
 	privKey := generateTestKey(t)
@@ -655,13 +640,4 @@ func TestDPoPVerifier_TrustedRoots_JWKMismatchesLeaf(t *testing.T) {
 	if !strings.Contains(err.Error(), "jwk does not match x5c leaf") {
 		t.Errorf("unexpected error: %v", err)
 	}
-}
-
-func mustThumbprint(t *testing.T, jwk map[string]any) string {
-	t.Helper()
-	tp, err := calculateJWKThumbprint(jwk)
-	if err != nil {
-		t.Fatalf("thumbprint: %v", err)
-	}
-	return tp
 }

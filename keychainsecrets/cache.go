@@ -60,12 +60,9 @@ func (k *KeychainCredentialCache) Get(issuer, key string) (*oauth2.Token, error)
 		Account: string(accountB),
 	})
 	if err != nil {
-		var kcErr *keychain.Error
-		if errors.As(err, &kcErr) {
-			if kcErr.Code() == keychain.ErrorCodeItemNotFound {
-				// not found, just return nil
-				return nil, nil
-			}
+		if kcErr, ok := errors.AsType[*keychain.Error](err); ok && kcErr.Code() == keychain.ErrorCodeItemNotFound {
+			// not found, just return nil
+			return nil, nil
 		}
 		return nil, fmt.Errorf("getting generic password attributes: %w", err)
 	}
@@ -124,8 +121,7 @@ func (k *KeychainCredentialCache) Set(issuer, key string, token *oauth2.Token) e
 		Service: service,
 		Account: string(accountB),
 	}); err != nil {
-		var kcErr *keychain.Error
-		if !errors.As(err, &kcErr) || kcErr.Code() != keychain.ErrorCodeItemNotFound {
+		if kcErr, ok := errors.AsType[*keychain.Error](err); !ok || kcErr.Code() != keychain.ErrorCodeItemNotFound {
 			return fmt.Errorf("deleting existing item: %w", err)
 		}
 	}
@@ -163,11 +159,8 @@ func (k *KeychainCredentialCache) Delete(issuer, key string) error {
 		Account: string(accountB),
 	})
 	if err != nil {
-		var kcErr *keychain.Error
-		if errors.As(err, &kcErr) {
-			if kcErr.Code() == keychain.ErrorCodeItemNotFound {
-				return nil
-			}
+		if kcErr, ok := errors.AsType[*keychain.Error](err); ok && kcErr.Code() == keychain.ErrorCodeItemNotFound {
+			return nil
 		}
 		return fmt.Errorf("deleting credential from keychain: %w", err)
 	}
@@ -196,12 +189,9 @@ func (k *KeychainCredentialCache) List() ([]KeychainListItem, error) {
 		Service: service,
 	})
 	if err != nil {
-		var kcErr *keychain.Error
-		if errors.As(err, &kcErr) {
-			if kcErr.Code() == keychain.ErrorCodeItemNotFound {
-				// no items found, just return empty list
-				return nil, nil
-			}
+		if kcErr, ok := errors.AsType[*keychain.Error](err); ok && kcErr.Code() == keychain.ErrorCodeItemNotFound {
+			// no items found, just return empty list
+			return nil, nil
 		}
 		return nil, fmt.Errorf("listing items from keychain: %w", err)
 	}
@@ -233,11 +223,8 @@ func (k *KeychainCredentialCache) DeleteAll() error {
 	if err := keychain.DeleteGenericPassword(keychain.GenericPasswordQuery{
 		Service: service,
 	}); err != nil {
-		var kcErr *keychain.Error
-		if errors.As(err, &kcErr) {
-			if kcErr.Code() == keychain.ErrorCodeItemNotFound {
-				return nil
-			}
+		if kcErr, ok := errors.AsType[*keychain.Error](err); ok && kcErr.Code() == keychain.ErrorCodeItemNotFound {
+			return nil
 		}
 		return fmt.Errorf("deleting all items from keychain for service %q: %w", service, err)
 	}
