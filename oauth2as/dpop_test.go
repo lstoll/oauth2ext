@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+	"uuid"
 
 	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/oauth2as/internal/token"
@@ -144,7 +145,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 			t.Fatalf("failed to create grant: %v", err)
 		}
 
-		refreshTokenID := newUUIDv4()
+		refreshTokenID := uuid.NewV4().String()
 		refreshToken, err := token.New(tokenUsageRefresh, refreshTokenID, grantID, userID)
 		if err != nil {
 			t.Fatalf("failed to generate refresh token: %v", err)
@@ -238,7 +239,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 				t.Fatalf("failed to create grant: %v", err)
 			}
 
-			refreshTokenID2 := newUUIDv4()
+			refreshTokenID2 := uuid.NewV4().String()
 			refreshToken2, err := token.New(tokenUsageRefresh, refreshTokenID2, grantID2, userID)
 			if err != nil {
 				t.Fatalf("failed to generate refresh token: %v", err)
@@ -308,7 +309,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 				t.Fatalf("failed to create grant: %v", err)
 			}
 
-			refreshTokenID3 := newUUIDv4()
+			refreshTokenID3 := uuid.NewV4().String()
 			refreshToken3, err := token.New(tokenUsageRefresh, refreshTokenID3, grantID3, userID)
 			if err != nil {
 				t.Fatalf("failed to generate refresh token: %v", err)

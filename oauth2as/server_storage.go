@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 
 	"lds.li/oauth2ext/oauth2as/internal/token"
 )
@@ -207,7 +208,7 @@ func (s *Server) putGrantWithAuthCode(ctx context.Context, loadedGrant *loadedAu
 
 	// Create the token with its final record ID so all derived material is bound
 	// to the exact storage record.
-	cid := newUUIDv4()
+	cid := uuid.NewV4().String()
 	tok, err := token.New(tokenUsageAuthCode, cid, grid, loadedGrant.grant.UserID)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to generate authorization code: %w", err)
@@ -310,7 +311,7 @@ func (s *Server) putGrantWithRefreshToken(ctx context.Context, loadedGrant *load
 		}
 	}
 
-	tid := newUUIDv4()
+	tid := uuid.NewV4().String()
 	tok, err := token.New(tokenUsageRefresh, tid, grid, loadedGrant.grant.UserID)
 	if err != nil {
 		return "", "", "", fmt.Errorf("failed to generate refresh token: %w", err)

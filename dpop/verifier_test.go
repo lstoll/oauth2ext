@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 )
 
 // Example DPoP token from RFC 9449 Appendix A.1
@@ -91,7 +92,6 @@ func TestDPoPVerifier_RoundTrip(t *testing.T) {
 		HTTPMethod:  "POST",
 		HTTPURI:     "https://server.example.com/token",
 		IssuedAt:    now,
-		JWTID:       "proof-id",
 		Nonce:       "server-nonce",
 		AccessToken: "access-token",
 	}
@@ -122,7 +122,10 @@ func TestDPoPVerifier_RoundTrip(t *testing.T) {
 		t.Fatalf("failed to verify and decode DPoP token: %v", err)
 	}
 
-	if proof.JWTID != "proof-id" || proof.HTTPMethod != opts.HTTPMethod || proof.HTTPURI != opts.HTTPURI {
+	if _, err := uuid.Parse(proof.JWTID); err != nil {
+		t.Fatalf("jti is not a UUID: %q: %v", proof.JWTID, err)
+	}
+	if proof.HTTPMethod != opts.HTTPMethod || proof.HTTPURI != opts.HTTPURI {
 		t.Fatalf("unexpected verified proof: %+v", proof)
 	}
 	if proof.Nonce != opts.Nonce {
