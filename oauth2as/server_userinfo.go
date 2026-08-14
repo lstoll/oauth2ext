@@ -93,7 +93,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", err)
 		return
 	}
-	grant, err := s.config.Storage.GetGrant(req.Context(), grantID)
+	grant, err := s.config.Storage.getGrant(req.Context(), grantID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			slog.WarnContext(req.Context(), "grant not found for access token", "grantID", grantID)
@@ -103,6 +103,10 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		slog.ErrorContext(req.Context(), "failed to load grant for userinfo", "grantID", grantID, "error", err)
 		herr := &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error loading grant"}
 		_ = oauth2proto.WriteError(w, req, herr)
+		return
+	}
+	if !grant.ExpiresAt.After(s.now()) {
+		writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", nil)
 		return
 	}
 	if tokenClientID != grant.ClientID {

@@ -22,7 +22,7 @@ func AuthTimeExceeded(authenticatedAt time.Time, maxAge int, now time.Time) bool
 	return now.Sub(authenticatedAt) > time.Duration(maxAge)*time.Second
 }
 
-func authTimeFromGrant(grant *StoredGrant) time.Time {
+func authTimeFromGrant(grant *storedGrant) time.Time {
 	if grant == nil {
 		return time.Time{}
 	}
@@ -32,7 +32,7 @@ func authTimeFromGrant(grant *StoredGrant) time.Time {
 	return grant.GrantedAt
 }
 
-func maxAgeFromGrant(grant *StoredGrant) *int {
+func maxAgeFromGrant(grant *storedGrant) *int {
 	if grant == nil || grant.Request == nil {
 		return nil
 	}

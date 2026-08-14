@@ -4,8 +4,8 @@ import (
 	"testing"
 )
 
-func TestMemStorage(t *testing.T) {
-	TestStorage(t, func(*testing.T) Storage {
-		return NewMemStorage()
+func TestMemoryStorage(t *testing.T) {
+	testStorage(t, func(*testing.T) *Storage {
+		return NewMemoryStorage()
 	})
 }

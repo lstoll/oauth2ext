@@ -5,6 +5,20 @@ jobs:
   build:
     name: "Build (Go ${{ matrix.go }} on Linux)"
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: oauth2as_test
+          POSTGRES_USER: oauth2as
+          POSTGRES_PASSWORD: oauth2as
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U oauth2as -d oauth2as_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
     strategy:
       matrix:
         go: [stable] # go: [ stable, oldstable ]
@@ -30,6 +44,7 @@ jobs:
         go mod download
         cd tpmsecrets && go mod download && cd -
         cd keychainsecrets && go mod download && cd -
+        cd oauth2as/storee2e && go mod download && cd -
 
     - name: Test (oauth2ext)
       run: go test ./...
@@ -40,6 +55,12 @@ jobs:
 
     - name: Test (keychainsecrets)
       working-directory: ./keychainsecrets
+      run: go test ./...
+
+    - name: Test (oauth2as SQL storage)
+      working-directory: ./oauth2as/storee2e
+      env:
+        OAUTH2EXT_TEST_POSTGRES_URL: postgres://oauth2as:oauth2as@localhost:5432/oauth2as_test?sslmode=disable
       run: go test ./...
 
     - name: Check exported API dependencies

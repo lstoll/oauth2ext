@@ -61,7 +61,7 @@ func TestEncryptedMetadataFlow(t *testing.T) {
 		},
 	}
 
-	s := oauth2as.NewMemStorage()
+	s := oauth2as.NewMemoryStorage()
 
 	oidcSvrMux := http.NewServeMux()
 	oidcSvr := httptest.NewServer(oidcSvrMux)

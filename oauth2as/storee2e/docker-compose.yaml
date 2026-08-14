@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: oauth2as_test
+      POSTGRES_USER: oauth2as
+      POSTGRES_PASSWORD: oauth2as
+    ports:
+      - "5438:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oauth2as -d oauth2as_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
