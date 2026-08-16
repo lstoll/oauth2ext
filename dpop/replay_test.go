@@ -2,6 +2,7 @@ package dpop
 
 import (
 	"context"
+	"crypto"
 	"errors"
 	"sync"
 	"testing"
@@ -22,23 +23,17 @@ func replayValidator(t *testing.T, method string) *Validator {
 	return v
 }
 
-func fixedProof(t *testing.T, signer *Signer, jti string, issuedAt time.Time) string {
+func fixedProof(t *testing.T, key crypto.Signer, jti string, issuedAt time.Time) string {
 	t.Helper()
-	compact, err := signer.signPayload(map[string]any{"jti": jti, "htm": replayMethod, "htu": replayURI, "iat": issuedAt.Unix()}, nil, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return compact
+	return mustSignClaims(t, mustSigner(t, key), map[string]any{
+		"jti": jti, "htm": replayMethod, "htu": replayURI, "iat": issuedAt.Unix(),
+	}, dpopSignOpts())
 }
 
 func TestVerifierReplayProtection(t *testing.T) {
 	key := generateTestKey(t)
-	signer, err := NewSigner(key)
-	if err != nil {
-		t.Fatal(err)
-	}
 	now := time.Now().Truncate(time.Second)
-	compact := fixedProof(t, signer, "same-jti", now)
+	compact := fixedProof(t, key, "same-jti", now)
 	verifier := &Verifier{now: now}
 	validator := replayValidator(t, replayMethod)
 	if _, err := verifier.VerifyAndDecode(compact, validator); err != nil {
@@ -50,7 +45,7 @@ func TestVerifierReplayProtection(t *testing.T) {
 
 	// Failed request-specific validation must not consume a proof.
 	other := replayValidator(t, "GET")
-	compact = fixedProof(t, signer, "not-consumed", now)
+	compact = fixedProof(t, key, "not-consumed", now)
 	if _, err := verifier.VerifyAndDecode(compact, other); err == nil {
 		t.Fatal("wrong htm accepted")
 	}
@@ -62,14 +57,8 @@ func TestVerifierReplayProtection(t *testing.T) {
 func TestVerifierReplayCompositeKeyAndOptOut(t *testing.T) {
 	const jti = "shared-jti"
 	now := time.Now().Truncate(time.Second)
-	first, err := NewSigner(generateTestKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := NewSigner(generateTestKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := generateTestKey(t)
+	second := generateTestKey(t)
 	validator := replayValidator(t, replayMethod)
 	verifier := &Verifier{now: now}
 	if _, err := verifier.VerifyAndDecode(fixedProof(t, first, jti, now), validator); err != nil {
@@ -90,11 +79,8 @@ func TestVerifierReplayCompositeKeyAndOptOut(t *testing.T) {
 
 func TestVerifierReplayConcurrentAndCapacity(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
-	signer, err := NewSigner(generateTestKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	compact := fixedProof(t, signer, "concurrent", now)
+	key := generateTestKey(t)
+	compact := fixedProof(t, key, "concurrent", now)
 	verifier := &Verifier{now: now}
 	validator := replayValidator(t, replayMethod)
 	var wg sync.WaitGroup
@@ -117,10 +103,10 @@ func TestVerifierReplayConcurrentAndCapacity(t *testing.T) {
 	}
 
 	limited := &Verifier{now: now, ReplayCacheMaxEntries: 1}
-	if _, err := limited.VerifyAndDecode(fixedProof(t, signer, "first", now), validator); err != nil {
+	if _, err := limited.VerifyAndDecode(fixedProof(t, key, "first", now), validator); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := limited.VerifyAndDecode(fixedProof(t, signer, "second", now), validator); !errors.Is(err, ErrReplayStoreFull) {
+	if _, err := limited.VerifyAndDecode(fixedProof(t, key, "second", now), validator); !errors.Is(err, ErrReplayStoreFull) {
 		t.Fatalf("capacity error = %v, want ErrReplayStoreFull", err)
 	}
 }
@@ -150,13 +136,10 @@ func (s failingReplayStore) CheckAndRecord(context.Context, string, string, time
 
 func TestVerifierReplayStoreErrorFailsClosed(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
-	signer, err := NewSigner(generateTestKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	key := generateTestKey(t)
 	want := errors.New("store unavailable")
 	verifier := &Verifier{now: now, ReplayStore: failingReplayStore{want}}
-	_, err = verifier.VerifyAndDecode(fixedProof(t, signer, "store-error", now), replayValidator(t, replayMethod))
+	_, err := verifier.VerifyAndDecode(fixedProof(t, key, "store-error", now), replayValidator(t, replayMethod))
 	if !errors.Is(err, want) {
 		t.Fatalf("error = %v, want wrapped store error", err)
 	}
@@ -175,25 +158,19 @@ func (s *recordingReplayStore) CheckAndRecord(_ context.Context, thumbprint, jti
 
 func TestVerifierReplayDeadline(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
-	signer, err := NewSigner(generateTestKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	key := generateTestKey(t)
 	store := &recordingReplayStore{}
 	verifier := &Verifier{now: now, ValidityAfterIssue: 10 * time.Minute, ClockSkew: time.Minute, ReplayStore: store}
 	validator := replayValidator(t, replayMethod)
-	if _, err := verifier.VerifyAndDecode(fixedProof(t, signer, "validity-deadline", now), validator); err != nil {
+	if _, err := verifier.VerifyAndDecode(fixedProof(t, key, "validity-deadline", now), validator); err != nil {
 		t.Fatal(err)
 	}
 	if want := now.Add(11 * time.Minute); !store.until.Equal(want) {
 		t.Fatalf("deadline = %s, want %s", store.until, want)
 	}
-	compact, err := signer.signPayload(map[string]any{
+	compact := mustSignClaims(t, mustSigner(t, key), map[string]any{
 		"jti": "exp-deadline", "htm": replayMethod, "htu": replayURI, "iat": now.Unix(), "exp": now.Add(2 * time.Minute).Unix(),
-	}, nil, true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	}, dpopSignOpts())
 	if _, err := verifier.VerifyAndDecode(compact, validator); err != nil {
 		t.Fatal(err)
 	}

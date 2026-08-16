@@ -24,10 +24,10 @@ func TestRefreshTokenRotationAndGrace(t *testing.T) {
 	signer, jwtVerifier := getTestSigner(t)
 
 	opcfg := oauth2as.Config{
-		Issuer:   "http://localhost",
-		Storage:  s,
-		Signer:   signer,
-		Verifier: jwtVerifier,
+		Issuer:           "http://localhost",
+		Storage:          s,
+		Signer:           signer,
+		VerificationKeys: jwtVerifier,
 		TokenHandler: func(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
 			return &oauth2as.TokenResponse{}, nil
 		},
@@ -155,10 +155,10 @@ func TestConcurrentRefreshAttempts(t *testing.T) {
 	signer, jwtVerifier := getTestSigner(t)
 
 	opcfg := oauth2as.Config{
-		Issuer:   "http://localhost",
-		Storage:  s,
-		Signer:   signer,
-		Verifier: jwtVerifier,
+		Issuer:           "http://localhost",
+		Storage:          s,
+		Signer:           signer,
+		VerificationKeys: jwtVerifier,
 		TokenHandler: func(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
 			return &oauth2as.TokenResponse{}, nil
 		},
@@ -278,10 +278,10 @@ func TestReplacedByTokenIDTracking(t *testing.T) {
 	signer, jwtVerifier := getTestSigner(t)
 
 	opcfg := oauth2as.Config{
-		Issuer:   "http://localhost",
-		Storage:  s,
-		Signer:   signer,
-		Verifier: jwtVerifier,
+		Issuer:           "http://localhost",
+		Storage:          s,
+		Signer:           signer,
+		VerificationKeys: jwtVerifier,
 		TokenHandler: func(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
 			return &oauth2as.TokenResponse{}, nil
 		},
@@ -399,10 +399,10 @@ func TestEncryptedMetadataWithRotation(t *testing.T) {
 	const testMetadata = "secret-upstream-refresh-token"
 
 	opcfg := oauth2as.Config{
-		Issuer:   "http://localhost",
-		Storage:  s,
-		Signer:   signer,
-		Verifier: jwtVerifier,
+		Issuer:           "http://localhost",
+		Storage:          s,
+		Signer:           signer,
+		VerificationKeys: jwtVerifier,
 		TokenHandler: func(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
 			// On initial grant, set encrypted metadata
 			if !req.IsRefresh {

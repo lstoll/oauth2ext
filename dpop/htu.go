@@ -171,8 +171,8 @@ func removeDotSegments(input string) string {
 }
 
 func removeLastSegment(path string) string {
-	if slash := strings.LastIndexByte(path, '/'); slash >= 0 {
-		return path[:slash]
+	if prefix, _, found := strings.CutLast(path, "/"); found {
+		return prefix
 	}
 	return ""
 }

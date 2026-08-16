@@ -12,6 +12,7 @@ import (
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/internal"
 	"lds.li/oauth2ext/jwt"
+	"lds.li/oauth2ext/jwt/remotejwks"
 )
 
 const DefaultCacheDuration = 10 * time.Minute
@@ -22,14 +23,16 @@ type Provider struct {
 	Metadata      Metadata
 	HTTPClient    *http.Client
 	CacheDuration time.Duration
-	// VerificationKeys overrides the key source advertised by discovery. It
-	// must not be modified after the provider is first used.
-	VerificationKeys jwt.KeySetSource
+	// VerificationKeys overrides keys advertised by discovery. Callers keep
+	// this stable handle and call its Replace method when their own refresh
+	// routine reloads; do not assign a new pointer concurrently with use.
+	VerificationKeys *jwt.VerificationKeySet
 
 	refreshMu        sync.Mutex
 	cacheMu          sync.RWMutex
 	cacheLastFetched time.Time
-	keys             jwt.KeySetSource
+	keys             *jwt.VerificationKeySet
+	keyRefresher     *remotejwks.Source
 
 	oidcDiscoveryURL string
 	discoveryIssuer  string
@@ -105,19 +108,16 @@ func (p *Provider) JWKS(ctx context.Context) ([]byte, error) {
 	if keys == nil {
 		return nil, fmt.Errorf("provider has no verification keys")
 	}
-	keySet, err := keys.KeySet(ctx)
-	if err != nil {
-		return nil, err
-	}
-	encoded, err := jsonv2.Marshal(keySet)
+	encoded, err := jsonv2.Marshal(keys)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling provider verification keys: %w", err)
 	}
 	return encoded, nil
 }
 
-// VerifyJWT verifies a compact JWT against the provider JWKS and policy.
-func (p *Provider) VerifyJWT(ctx context.Context, compact string, policy jwt.ValidationPolicy) (*jwt.VerifiedJWT, error) {
+// Verifier returns an immutable verifier bound to the provider's stable key
+// set and the supplied policy. Refreshes atomically update that key set.
+func (p *Provider) Verifier(ctx context.Context, policy jwt.ValidationPolicy) (*jwt.Verifier, error) {
 	if len(policy.AllowedAlgorithms) == 0 {
 		return nil, fmt.Errorf("JWT policy must specify allowed signing algorithms")
 	}
@@ -128,13 +128,9 @@ func (p *Provider) VerifyJWT(ctx context.Context, compact string, policy jwt.Val
 	if md == nil || keys == nil {
 		return nil, fmt.Errorf("provider has no verification keys")
 	}
-	keySet, err := keys.KeySet(ctx)
-	if err != nil {
-		return nil, err
-	}
 	policy.ExpectedIssuer = md.issuer()
 	policy.IgnoreIssuer = false
-	return keySet.VerifyJWT(compact, policy)
+	return jwt.NewVerifier(keys, policy)
 }
 
 func algorithmsFromMetadata(algs []string) []jwt.Algorithm {
@@ -152,13 +148,13 @@ func algorithmsFromMetadata(algs []string) []jwt.Algorithm {
 	return out
 }
 
-func (p *Provider) snapshot() (Metadata, jwt.KeySetSource) {
+func (p *Provider) snapshot() (Metadata, *jwt.VerificationKeySet) {
 	p.cacheMu.RLock()
 	defer p.cacheMu.RUnlock()
-	return p.Metadata, p.keySourceLocked()
+	return p.Metadata, p.keySetLocked()
 }
 
-func (p *Provider) keySourceLocked() jwt.KeySetSource {
+func (p *Provider) keySetLocked() *jwt.VerificationKeySet {
 	if p.VerificationKeys != nil {
 		return p.VerificationKeys
 	}

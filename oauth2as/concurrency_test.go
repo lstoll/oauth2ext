@@ -27,7 +27,7 @@ func TestRefreshTokenConcurrency(t *testing.T) {
 			Issuer:               "https://issuer",
 			Storage:              s,
 			Signer:               signer,
-			Verifier:             verifier,
+			VerificationKeys:     verifier,
 			RefreshTokenValidity: time.Hour,
 			TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 				if arrived.Add(1) == concurrency {

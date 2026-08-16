@@ -16,7 +16,7 @@ import (
 
 // Provider supplies verification keys and ID-token signing metadata.
 type Provider interface {
-	VerifyJWT(ctx context.Context, compact string, policy jwt.ValidationPolicy) (*jwt.VerifiedJWT, error)
+	Verifier(ctx context.Context, policy jwt.ValidationPolicy) (*jwt.Verifier, error)
 	IDTokenSigningAlgorithms(ctx context.Context) ([]jwt.Algorithm, error)
 }
 
@@ -100,13 +100,18 @@ func (v *IDTokenVerifier) Verify(ctx context.Context, compact string, input IDTo
 		AllowedAlgorithms: algorithms,
 		ClockSkew:         jwt.DefaultClockSkew,
 		RequireIssuedAt:   true,
+		Type:              jwt.TypeJWTOrAbsent,
 	}
 	if v.opts.IgnoreClientID {
 		policy.IgnoreAudiences = true
 	} else {
 		policy.ExpectedAudiences = []string{*v.opts.ClientID}
 	}
-	verified, err := v.provider.VerifyJWT(ctx, compact, policy)
+	verifier, err := v.provider.Verifier(ctx, policy)
+	if err != nil {
+		return nil, err
+	}
+	verified, err := verifier.Verify(compact)
 	if err != nil {
 		return nil, err
 	}
