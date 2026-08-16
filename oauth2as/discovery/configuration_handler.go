@@ -71,7 +71,13 @@ func DefaultCoreMetadata(issuer string) *oidc.ProviderMetadata {
 		IDTokenSigningAlgValuesSupported: []string{"ES256"},
 		GrantTypesSupported:              []string{"authorization_code"},
 		CodeChallengeMethodsSupported:    []oidc.CodeChallengeMethod{oidc.CodeChallengeMethodS256},
-		JWKSURI:                          issuer + "/.well-known/jwks.json",
+		TokenEndpointAuthMethodsSupported: []string{
+			"client_secret_basic",
+			"client_secret_post",
+			"private_key_jwt",
+		},
+		TokenEndpointAuthSigningAlgValuesSupported: []string{"ES256", "RS256"},
+		JWKSURI: issuer + "/.well-known/jwks.json",
 	}
 }
 
