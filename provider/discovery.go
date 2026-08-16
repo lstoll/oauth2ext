@@ -18,15 +18,15 @@ import (
 // Option configures a discovered provider.
 type Option func(*Provider) error
 
-// WithVerificationKeys overrides the key source advertised by discovery. The
-// source is used from initial discovery onwards, while discovery metadata and
-// issuer validation still take place.
-func WithVerificationKeys(source jwt.KeySetSource) Option {
+// WithVerificationKeys overrides keys advertised by discovery. The stable set
+// is used from initial discovery onwards, while discovery metadata and issuer
+// validation still take place.
+func WithVerificationKeys(keys *jwt.VerificationKeySet) Option {
 	return func(p *Provider) error {
-		if source == nil {
-			return fmt.Errorf("provider verification key source is required")
+		if keys == nil {
+			return fmt.Errorf("provider verification keys are required")
 		}
-		p.VerificationKeys = source
+		p.VerificationKeys = keys
 		return nil
 	}
 }
@@ -111,32 +111,34 @@ func (p *Provider) refreshIfNeeded(ctx context.Context) error {
 
 	p.cacheMu.RLock()
 	override := p.VerificationKeys
-	keys := p.keys
+	refresher := p.keyRefresher
 	p.cacheMu.RUnlock()
+	var keys *jwt.VerificationKeySet
 	if override != nil {
 		keys = override
 	} else {
 		jwksURI := md.jwksuri()
-		current, ok := keys.(*remotejwks.Source)
-		if !ok || current.URL != jwksURI {
-			keys = &remotejwks.Source{
+		if refresher == nil || refresher.URL != jwksURI {
+			refresher = &remotejwks.Source{
 				URL:           jwksURI,
 				HTTPClient:    p.HTTPClient,
 				CacheDuration: cacheFor,
 			}
 		}
+		var err error
+		keys, err = refresher.Refresh(ctx)
+		if err != nil {
+			return fmt.Errorf("getting provider verification keys: %w", err)
+		}
 	}
 	if keys == nil {
 		return fmt.Errorf("provider has no verification keys")
 	}
-	if _, err := keys.KeySet(ctx); err != nil {
-		return fmt.Errorf("getting provider verification keys: %w", err)
-	}
-
 	p.cacheMu.Lock()
 	p.Metadata = md
 	if p.VerificationKeys == nil {
 		p.keys = keys
+		p.keyRefresher = refresher
 	}
 	p.cacheLastFetched = time.Now()
 	p.cacheMu.Unlock()

@@ -73,7 +73,7 @@ func TestEncryptedMetadataFlow(t *testing.T) {
 		Issuer:               oidcSvr.URL,
 		Storage:              s,
 		Signer:               signer,
-		Verifier:             jwtVerifier,
+		VerificationKeys:     jwtVerifier,
 		RefreshTokenValidity: 1 * time.Hour,
 		GrantValidity:        1 * time.Hour,
 		TokenHandler: func(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
@@ -106,7 +106,7 @@ func TestEncryptedMetadataFlow(t *testing.T) {
 	pmd.UserinfoEndpoint = oidcSvr.URL + "/userinfo"
 	pmd.IDTokenSigningAlgValuesSupported = []string{string("RS256"), string("ES256")}
 
-	ch, err := discovery.NewOIDCConfigurationHandlerWithKeyset(pmd, testSigner)
+	ch, err := discovery.NewOIDCConfigurationHandlerWithVerificationKeys(pmd, jwtVerifier)
 	if err != nil {
 		t.Fatal(err)
 	}

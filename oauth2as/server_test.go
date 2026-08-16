@@ -8,7 +8,6 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
-	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -60,9 +59,9 @@ func TestCodeToken(t *testing.T) {
 			config: Config{
 				Issuer: issuer,
 
-				Storage:  s,
-				Signer:   signer,
-				Verifier: verifier,
+				Storage:          s,
+				Signer:           signer,
+				VerificationKeys: verifier,
 
 				TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
@@ -374,9 +373,9 @@ func TestRefreshToken(t *testing.T) {
 			config: Config{
 				Issuer: issuer,
 
-				Storage:  s,
-				Signer:   signer,
-				Verifier: verifier,
+				Storage:          s,
+				Signer:           signer,
+				VerificationKeys: verifier,
 
 				TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 					return &TokenResponse{}, nil
@@ -575,11 +574,7 @@ func TestUserinfo(t *testing.T) {
 			"exp": expiresAt.Unix(),
 		}
 		maps.Copy(claims, additional)
-		payload, err := jsonv2.Marshal(claims)
-		if err != nil {
-			t.Fatal(err)
-		}
-		compact, err := signer.SignJWT(t.Context(), jwt.ES256, JWTSigningInput{Type: "at+jwt", Payload: payload})
+		compact, err := signer.Sign(t.Context(), claims, jwt.SignOptions{Type: "at+jwt", Algorithms: []jwt.Algorithm{jwt.ES256}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -648,10 +643,10 @@ func TestUserinfo(t *testing.T) {
 			signer, verifier := testSignerVerifier(t)
 
 			config := Config{
-				Issuer:   issuer,
-				Storage:  s,
-				Signer:   signer,
-				Verifier: verifier,
+				Issuer:           issuer,
+				Storage:          s,
+				Signer:           signer,
+				VerificationKeys: verifier,
 				UserinfoHandler: func(_ context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error) {
 					return &UserinfoResponse{
 						Identity: map[string]any{
@@ -717,10 +712,10 @@ func TestUserinfoGrantContext(t *testing.T) {
 
 	var gotReq *UserinfoRequest
 	oidc, err := NewServer(Config{
-		Issuer:   issuer,
-		Storage:  s,
-		Signer:   signer,
-		Verifier: verifier,
+		Issuer:           issuer,
+		Storage:          s,
+		Signer:           signer,
+		VerificationKeys: verifier,
 		UserinfoHandler: func(_ context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error) {
 			gotReq = uireq
 			return &UserinfoResponse{Identity: map[string]any{"sub": uireq.Subject}}, nil
@@ -788,7 +783,7 @@ func TestUserinfoRequiresOpenIDScope(t *testing.T) {
 	}
 	signer, verifier := testSignerVerifier(t)
 	server, err := NewServer(Config{
-		Issuer: issuer, Storage: storage, Signer: signer, Verifier: verifier,
+		Issuer: issuer, Storage: storage, Signer: signer, VerificationKeys: verifier,
 		UserinfoHandler: func(context.Context, *UserinfoRequest) (*UserinfoResponse, error) {
 			t.Fatal("userinfo handler called without openid scope")
 			return nil, nil
@@ -820,7 +815,7 @@ func TestUserinfoFailsClosedOnGrantContext(t *testing.T) {
 	}
 	signer, verifier := testSignerVerifier(t)
 	server, err := NewServer(Config{
-		Issuer: issuer, Storage: storage, Signer: signer, Verifier: verifier,
+		Issuer: issuer, Storage: storage, Signer: signer, VerificationKeys: verifier,
 		UserinfoHandler: func(context.Context, *UserinfoRequest) (*UserinfoResponse, error) {
 			t.Fatal("userinfo handler called with invalid grant context")
 			return nil, nil
@@ -850,7 +845,7 @@ func TestUserinfoFailsClosedOnGrantContext(t *testing.T) {
 	}
 }
 
-func signTestAccessToken(t *testing.T, signer JWTSigner, issuer, grantID, clientID string) string {
+func signTestAccessToken(t *testing.T, signer *jwt.Signer, issuer, grantID, clientID string) string {
 	t.Helper()
 	claims := map[string]any{
 		"iss": issuer, "sub": "sub", "client_id": clientID,
@@ -863,7 +858,7 @@ func signTestAccessToken(t *testing.T, signer JWTSigner, issuer, grantID, client
 	if err != nil {
 		t.Fatal(err)
 	}
-	compact, err := signer.SignJWT(t.Context(), jwt.ES256, input)
+	compact, err := signer.Sign(t.Context(), input.Claims, jwt.SignOptions{Type: input.Type, Algorithms: []jwt.Algorithm{jwt.ES256}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -879,11 +874,12 @@ func TestValidateTokenClientAllowsPublicClientWithoutSecret(t *testing.T) {
 }
 
 var (
-	signer     *LocalJWTSigner
+	signer     *jwt.Signer
+	verifier   *jwt.VerificationKeySet
 	signerOnce sync.Once
 )
 
-func testSignerVerifier(t *testing.T) (JWTSigner, JWTVerifier) {
+func testSignerVerifier(t *testing.T) (*jwt.Signer, *jwt.VerificationKeySet) {
 	signerOnce.Do(func() {
 		ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
@@ -893,15 +889,19 @@ func testSignerVerifier(t *testing.T) (JWTSigner, JWTVerifier) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		signer, err = NewLocalJWTSigner(LocalJWTSignerConfig{SigningKeys: []SigningKey{
-			{Algorithm: jwt.ES256, Key: ecKey},
-			{Algorithm: jwt.RS256, Key: rsaKey},
+		signer, err = jwt.NewSignerFromKeys(jwt.SignerConfig{Keys: []jwt.SigningKey{
+			{Algorithm: jwt.ES256, Signer: ecKey},
+			{Algorithm: jwt.RS256, Signer: rsaKey},
 		}})
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifier, err = jwt.NewVerificationKeySetFromSigner(signer)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
-	return signer, signer
+	return signer, verifier
 }
 
 func newRefreshGrant(t *testing.T, smgr *Storage) (refreshToken string) {

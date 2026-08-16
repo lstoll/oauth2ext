@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"lds.li/oauth2ext/dpop"
+	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as"
 )
 
@@ -75,7 +76,11 @@ func runStorageE2E(t *testing.T, db *sql.DB, dialect oauth2as.SQLDialect, prefix
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer, err := oauth2as.NewLocalJWTSignerForKey(key)
+	signer, err := jwt.NewSigner(key, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	verificationKeys, err := jwt.NewVerificationKeySetFromSigner(signer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +88,7 @@ func runStorageE2E(t *testing.T, db *sql.DB, dialect oauth2as.SQLDialect, prefix
 	if err != nil {
 		t.Fatal(err)
 	}
-	dpopSigner, err := dpop.NewSigner(dpopKey)
+	dpopSigner, err := jwt.NewSigner(dpopKey, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +97,7 @@ func runStorageE2E(t *testing.T, db *sql.DB, dialect oauth2as.SQLDialect, prefix
 		Storage:                         store,
 		Clients:                         clientSource{},
 		Signer:                          signer,
-		Verifier:                        signer,
+		VerificationKeys:                verificationKeys,
 		DPoPVerifier:                    &dpop.Verifier{},
 		Logger:                          slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		RefreshTokenValidity:            time.Hour,
@@ -305,7 +310,7 @@ func tokenForm(grantType, credential string) url.Values {
 	return form
 }
 
-func raceToken(t *testing.T, server *oauth2as.Server, form url.Values, signer *dpop.Signer, name string) map[string]any {
+func raceToken(t *testing.T, server *oauth2as.Server, form url.Values, signer jwt.Signer, name string) map[string]any {
 	t.Helper()
 	type tokenResult struct {
 		status int
@@ -338,7 +343,7 @@ func raceToken(t *testing.T, server *oauth2as.Server, form url.Values, signer *d
 	return winner
 }
 
-func exchange(t *testing.T, server *oauth2as.Server, form url.Values, signer *dpop.Signer) map[string]any {
+func exchange(t *testing.T, server *oauth2as.Server, form url.Values, signer jwt.Signer) map[string]any {
 	t.Helper()
 	status, response := tokenResponse(server, form, signer)
 	if status != http.StatusOK {
@@ -347,10 +352,10 @@ func exchange(t *testing.T, server *oauth2as.Server, form url.Values, signer *dp
 	return response
 }
 
-func tokenResponse(server *oauth2as.Server, form url.Values, signer *dpop.Signer) (int, map[string]any) {
+func tokenResponse(server *oauth2as.Server, form url.Values, signer jwt.Signer) (int, map[string]any) {
 	req := httptest.NewRequest(http.MethodPost, "https://issuer.example/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	proof, err := signer.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodPost, HTTPURI: "https://issuer.example/token"})
+	proof, err := dpop.Sign(req.Context(), signer, dpop.ProofOptions{HTTPMethod: http.MethodPost, HTTPURI: "https://issuer.example/token"})
 	if err != nil {
 		return 0, map[string]any{"proof_error": err.Error()}
 	}

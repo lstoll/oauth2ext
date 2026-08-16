@@ -98,7 +98,7 @@ func TestE2E(t *testing.T) {
 				Issuer:               oidcSvr.URL,
 				Storage:              s,
 				Signer:               signer,
-				Verifier:             jwtVerifier,
+				VerificationKeys:     jwtVerifier,
 				RefreshTokenValidity: 1 * time.Hour,
 				GrantValidity:        1 * time.Hour,
 				TokenHandler: func(_ context.Context, req *oauth2as.TokenRequest) (*oauth2as.TokenResponse, error) {
@@ -129,7 +129,7 @@ func TestE2E(t *testing.T) {
 			pmd.UserinfoEndpoint = oidcSvr.URL + "/userinfo"
 			pmd.IDTokenSigningAlgValuesSupported = []string{string("RS256"), string("ES256")}
 
-			ch, err := discovery.NewOIDCConfigurationHandlerWithKeyset(pmd, testSigner)
+			ch, err := discovery.NewOIDCConfigurationHandlerWithVerificationKeys(pmd, jwtVerifier)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -269,15 +269,21 @@ func TestE2E(t *testing.T) {
 }
 
 var (
-	testSigner     *oauth2as.LocalJWTSigner
-	testSignerOnce sync.Once
+	testSigner           *jwt.Signer
+	testVerificationKeys *jwt.VerificationKeySet
+	testSignerOnce       sync.Once
 )
 
-func getTestSigner(t *testing.T) (oauth2as.JWTSigner, oauth2as.JWTVerifier) {
+func getTestSigner(t *testing.T) (*jwt.Signer, *jwt.VerificationKeySet) {
 	testSignerOnce.Do(func() {
 		testSigner = internal.NewTestSigner(t, jwt.RS256, jwt.ES256)
+		var err error
+		testVerificationKeys, err = jwt.NewVerificationKeySetFromSigner(testSigner)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
-	return testSigner, testSigner
+	return testSigner, testVerificationKeys
 }
 
 type staticClient struct {

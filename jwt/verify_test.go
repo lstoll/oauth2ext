@@ -118,11 +118,8 @@ func TestVerifyRejectsAmbiguousJSON(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			compact, err := signer.signer.Sign(tt.payload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = signer.keySet.VerifyJWT(compact, ValidationPolicy{
+			compact := signer.signRaw(t, tt.payload)
+			_, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
 				IgnoreIssuer:           true,
 				IgnoreAudiences:        true,
 				AllowedAlgorithms:      []Algorithm{ES256},

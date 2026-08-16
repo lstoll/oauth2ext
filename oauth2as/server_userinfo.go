@@ -74,7 +74,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	atJWT, err := s.verifyAccessToken(req.Context(), accessToken)
+	atJWT, err := s.verifyAccessToken(accessToken)
 	if err != nil {
 		slog.ErrorContext(req.Context(), "invalid access token", "error", err)
 		writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", err)
@@ -202,8 +202,8 @@ func writeUserinfoBearerError(w http.ResponseWriter, req *http.Request, code oau
 	_ = oauth2proto.WriteError(w, req, httpError)
 }
 
-func (s *Server) verifyAccessToken(ctx context.Context, compact string) (*jwt.VerifiedJWT, error) {
-	vjwt, err := s.config.Verifier.VerifyJWT(ctx, compact, jwt.ValidationPolicy{
+func (s *Server) verifyAccessToken(compact string) (*jwt.VerifiedJWT, error) {
+	vjwt, err := s.config.VerificationKeys.VerifyJWT(compact, jwt.ValidationPolicy{
 		ExpectedIssuer:    s.config.Issuer,
 		IgnoreAudiences:   true,
 		AllowedAlgorithms: []jwt.Algorithm{s.accessTokenSigningAlgorithm()},

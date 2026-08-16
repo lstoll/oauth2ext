@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"lds.li/oauth2ext/jwt"
 )
 
 // Transport is an [http.RoundTripper] that adds DPoP headers to requests.
 type Transport struct {
-	// Signer is used to sign DPoP proofs
-	Signer *Signer
+	// Signer is used to sign DPoP proofs.
+	Signer *jwt.Signer
 
 	// Base is the underlying transport. If nil, http.DefaultTransport is used.
 	Base http.RoundTripper
@@ -33,7 +35,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if scheme, token, ok := strings.Cut(req.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "DPoP") {
 		options.AccessToken = token
 	}
-	proof, err := t.Signer.SignAndEncode(options)
+	proof, err := Sign(req.Context(), t.Signer, options)
 	if err != nil {
 		return nil, fmt.Errorf("dpop: failed to create proof: %w", err)
 	}

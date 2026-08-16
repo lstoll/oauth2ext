@@ -9,16 +9,8 @@ import (
 
 func TestTransport(t *testing.T) {
 	privKey := generateTestKey(t)
-
-	signer, err := NewSigner(privKey)
-	if err != nil {
-		t.Fatalf("failed to create signer: %v", err)
-	}
-
-	expectedThumbprint, err := signer.Thumbprint()
-	if err != nil {
-		t.Fatalf("failed to calculate thumbprint: %v", err)
-	}
+	signer := mustSigner(t, privKey)
+	expectedThumbprint := signer.KeyID()
 
 	var capturedDPoP string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

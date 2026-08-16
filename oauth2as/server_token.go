@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -504,7 +503,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 	}
 
 	accessTokenAlgorithm := s.accessTokenSigningAlgorithm()
-	atSigned, err := s.config.Signer.SignJWT(ctx, accessTokenAlgorithm, ac)
+	atSigned, err := s.config.Signer.Sign(ctx, ac.Claims, jwt.SignOptions{Type: ac.Type, Algorithms: []jwt.Algorithm{accessTokenAlgorithm}})
 	if err != nil {
 		return nil, fmt.Errorf("signing access token with algorithm %s: %w", accessTokenAlgorithm, err)
 	}
@@ -515,7 +514,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 		if err != nil {
 			return nil, fmt.Errorf("building ID token claims: %w", err)
 		}
-		idSigned, err := s.config.Signer.SignJWT(ctx, idTokenAlgorithm, idc)
+		idSigned, err := s.config.Signer.Sign(ctx, idc.Claims, jwt.SignOptions{Type: idc.Type, Algorithms: []jwt.Algorithm{idTokenAlgorithm}})
 		if err != nil {
 			return nil, fmt.Errorf("signing ID token with algorithm %s: %w", idTokenAlgorithm, err)
 		}
@@ -650,11 +649,7 @@ func additionalClaims(additional map[string]any, reserved map[string]struct{}) (
 }
 
 func marshalSigningInput(typ string, claims map[string]any) (JWTSigningInput, error) {
-	payload, err := jsonv2.Marshal(claims)
-	if err != nil {
-		return JWTSigningInput{}, fmt.Errorf("marshaling JWT claims: %w", err)
-	}
-	return JWTSigningInput{Type: typ, Payload: payload}, nil
+	return JWTSigningInput{Type: typ, Claims: claims}, nil
 }
 
 func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {

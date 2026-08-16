@@ -8,7 +8,7 @@ import (
 )
 
 // VerifiedJWT is an opaque JWT that has passed signature and policy validation.
-// The zero value is invalid; obtain instances only via KeySet.VerifyJWT.
+// The zero value is invalid; obtain instances only via VerificationKeySet.VerifyJWT.
 type VerifiedJWT struct {
 	payload jsontext.Value
 	claims  map[string]any

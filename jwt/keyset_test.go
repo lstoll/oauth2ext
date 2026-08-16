@@ -17,12 +17,12 @@ func TestKeySetJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ks KeySet
+	var ks VerificationKeySet
 	if err := json.Unmarshal(data, &ks); err != nil {
 		t.Fatal(err)
 	}
-	if len(ks.jwks.Keys) != 1 {
-		t.Fatalf("keys: got %d want 1", len(ks.jwks.Keys))
+	if len(ks.state.Load().jwks.Keys) != 1 {
+		t.Fatalf("keys: got %d want 1", len(ks.state.Load().jwks.Keys))
 	}
 }
 
@@ -39,14 +39,14 @@ func TestParseJWKSetRejectsSmallRSAKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = ParseJWKSet(data)
+	_, err = ParseVerificationKeySet(data)
 	if !errors.Is(err, ErrKey) {
 		t.Fatalf("error: got %v, want ErrKey", err)
 	}
 }
 
 func TestParseJWKSetClassifiesMalformedDocument(t *testing.T) {
-	_, err := ParseJWKSet([]byte(`{"keys":`))
+	_, err := ParseVerificationKeySet([]byte(`{"keys":`))
 	if !errors.Is(err, ErrKey) {
 		t.Fatalf("error: got %v, want ErrKey", err)
 	}
@@ -55,12 +55,12 @@ func TestParseJWKSetClassifiesMalformedDocument(t *testing.T) {
 func TestParseJWKSetRejectsDuplicateMembers(t *testing.T) {
 	signer := newTestSigner(t)
 	var document map[string]json.RawMessage
-	if err := json.Unmarshal(signer.signer.JWKS(), &document); err != nil {
+	if err := json.Unmarshal(signer.jwks, &document); err != nil {
 		t.Fatal(err)
 	}
 	keys := document["keys"]
 	data := fmt.Appendf(nil, `{"keys":%s,"keys":%s}`, keys, keys)
-	_, err := ParseJWKSet(data)
+	_, err := ParseVerificationKeySet(data)
 	if !errors.Is(err, ErrKey) {
 		t.Fatalf("error: got %v, want ErrKey", err)
 	}
@@ -69,7 +69,7 @@ func TestParseJWKSetRejectsDuplicateMembers(t *testing.T) {
 func TestParseJWKSetEnforcesKeyOperations(t *testing.T) {
 	signer := newTestSigner(t)
 	var document map[string]any
-	if err := json.Unmarshal(signer.signer.JWKS(), &document); err != nil {
+	if err := json.Unmarshal(signer.jwks, &document); err != nil {
 		t.Fatal(err)
 	}
 	key := document["keys"].([]any)[0].(map[string]any)
@@ -90,7 +90,7 @@ func TestParseJWKSetEnforcesKeyOperations(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = ParseJWKSet(data)
+			_, err = ParseVerificationKeySet(data)
 			if tt.wantError && !errors.Is(err, ErrKey) {
 				t.Fatalf("error: got %v, want ErrKey", err)
 			}

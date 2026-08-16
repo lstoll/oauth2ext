@@ -34,7 +34,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 		t.Fatalf("failed to generate key: %v", err)
 	}
 
-	dpopSigner, err := dpop.NewSigner(privKey)
+	dpopSigner, err := jwt.NewSigner(privKey, "", "")
 	if err != nil {
 		t.Fatalf("failed to create signer: %v", err)
 	}
@@ -46,11 +46,11 @@ func TestDPoPTokenFlow(t *testing.T) {
 
 	server := &Server{
 		config: Config{
-			Issuer:       issuer,
-			Storage:      s,
-			Signer:       signer,
-			Verifier:     verifier,
-			DPoPVerifier: &dpop.Verifier{},
+			Issuer:           issuer,
+			Storage:          s,
+			Signer:           signer,
+			VerificationKeys: verifier,
+			DPoPVerifier:     &dpop.Verifier{},
 			TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
 				capturedTokenRequest = req
 				return &TokenResponse{}, nil
@@ -70,7 +70,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 	t.Run("Initial token exchange with DPoP", func(t *testing.T) {
 		codeToken := newCodeGrant(t, server.config.Storage)
 
-		dpopProof, err := dpopSigner.SignAndEncode(dpop.ProofOptions{
+		dpopProof, err := dpop.Sign(t.Context(), dpopSigner, dpop.ProofOptions{
 			HTTPMethod: http.MethodPost,
 			HTTPURI:    issuer + "/token",
 		})
@@ -175,7 +175,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 		}
 		refreshTokenStr := refreshToken.UserToken()
 
-		dpopProof, err := dpopSigner.SignAndEncode(dpop.ProofOptions{
+		dpopProof, err := dpop.Sign(t.Context(), dpopSigner, dpop.ProofOptions{
 			HTTPMethod: http.MethodPost,
 			HTTPURI:    issuer + "/token",
 		})
@@ -185,10 +185,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 
 		// Derive the key thumbprint directly. Verifying this proof here would
 		// consume it before the request under test.
-		expectedThumbprint, err := dpopSigner.Thumbprint()
-		if err != nil {
-			t.Fatalf("failed to calculate DPoP thumbprint: %v", err)
-		}
+		expectedThumbprint := dpopSigner.KeyID()
 
 		// Update grant with correct thumbprint in metadata
 		addState.DPoPThumbprint = &expectedThumbprint
@@ -290,7 +287,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to generate key: %v", err)
 			}
-			wrongSigner, err := dpop.NewSigner(wrongKey)
+			wrongSigner, err := jwt.NewSigner(wrongKey, "", "")
 			if err != nil {
 				t.Fatalf("failed to create signer: %v", err)
 			}
@@ -332,7 +329,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 			refreshTokenStr3 := refreshToken3.UserToken()
 
 			// Create DPoP proof with wrong key
-			wrongProof, err := wrongSigner.SignAndEncode(dpop.ProofOptions{
+			wrongProof, err := dpop.Sign(t.Context(), wrongSigner, dpop.ProofOptions{
 				HTTPMethod: http.MethodPost,
 				HTTPURI:    issuer + "/token",
 			})
@@ -373,11 +370,11 @@ func TestInvalidAuthorizationCodeDoesNotConsumeDPoPProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proofSigner, err := dpop.NewSigner(key)
+	proofSigner, err := jwt.NewSigner(key, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := proofSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodPost, HTTPURI: issuer + "/token"})
+	proof, err := dpop.Sign(t.Context(), proofSigner, dpop.ProofOptions{HTTPMethod: http.MethodPost, HTTPURI: issuer + "/token"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,11 +402,11 @@ func TestVerifyDPoPProofPreservesEscapedRequestPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proofSigner, err := dpop.NewSigner(key)
+	proofSigner, err := jwt.NewSigner(key, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := proofSigner.SignAndEncode(dpop.ProofOptions{
+	proof, err := dpop.Sign(t.Context(), proofSigner, dpop.ProofOptions{
 		HTTPMethod: http.MethodPost,
 		HTTPURI:    issuer + "/token%2Fsubresource",
 	})
@@ -440,17 +437,14 @@ func TestUserinfoDPoPSenderConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proofSigner, err := dpop.NewSigner(key)
+	proofSigner, err := jwt.NewSigner(key, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	thumbprint, err := proofSigner.Thumbprint()
-	if err != nil {
-		t.Fatal(err)
-	}
+	thumbprint := proofSigner.KeyID()
 	accessToken := signDPoPAccessToken(t, issuerSigner, issuer, grantID, "client", thumbprint)
 	server, err := NewServer(Config{
-		Issuer: issuer, Storage: storage, Signer: issuerSigner, Verifier: verifier, DPoPVerifier: &dpop.Verifier{}, Clients: staticClientSource{},
+		Issuer: issuer, Storage: storage, Signer: issuerSigner, VerificationKeys: verifier, DPoPVerifier: &dpop.Verifier{}, Clients: staticClientSource{},
 		TokenHandler: func(context.Context, *TokenRequest) (*TokenResponse, error) { return &TokenResponse{}, nil },
 		UserinfoHandler: func(context.Context, *UserinfoRequest) (*UserinfoResponse, error) {
 			return &UserinfoResponse{Identity: map[string]string{"sub": "sub"}}, nil
@@ -473,7 +467,7 @@ func TestUserinfoDPoPSenderConstraint(t *testing.T) {
 	if recorder := request("Bearer", ""); recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("bound token with Bearer: got %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
-	proof, err := proofSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo", AccessToken: accessToken})
+	proof, err := dpop.Sign(t.Context(), proofSigner, dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo", AccessToken: accessToken})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,14 +477,14 @@ func TestUserinfoDPoPSenderConstraint(t *testing.T) {
 	if recorder := request("DPoP", proof); recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("replayed DPoP proof: got %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
-	missingATH, err := proofSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo"})
+	missingATH, err := dpop.Sign(t.Context(), proofSigner, dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if recorder := request("DPoP", missingATH); recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("missing ath: got %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
-	wrongATH, err := proofSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo", AccessToken: "different-access-token"})
+	wrongATH, err := dpop.Sign(t.Context(), proofSigner, dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo", AccessToken: "different-access-token"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,11 +495,11 @@ func TestUserinfoDPoPSenderConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongSigner, err := dpop.NewSigner(wrongKey)
+	wrongSigner, err := jwt.NewSigner(wrongKey, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongProof, err := wrongSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo", AccessToken: accessToken})
+	wrongProof, err := dpop.Sign(t.Context(), wrongSigner, dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo", AccessToken: accessToken})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +512,7 @@ func TestUserinfoDPoPSenderConstraint(t *testing.T) {
 	}
 }
 
-func signDPoPAccessToken(t *testing.T, signer JWTSigner, issuer, grantID, clientID, thumbprint string) string {
+func signDPoPAccessToken(t *testing.T, signer *jwt.Signer, issuer, grantID, clientID, thumbprint string) string {
 	t.Helper()
 	input, err := marshalSigningInput("at+jwt", map[string]any{
 		"iss": issuer, "sub": "sub", "client_id": clientID, claimGrantID: grantID,
@@ -527,7 +521,7 @@ func signDPoPAccessToken(t *testing.T, signer JWTSigner, issuer, grantID, client
 	if err != nil {
 		t.Fatal(err)
 	}
-	compact, err := signer.SignJWT(t.Context(), jwt.ES256, input)
+	compact, err := signer.Sign(t.Context(), input.Claims, jwt.SignOptions{Type: input.Type, Algorithms: []jwt.Algorithm{jwt.ES256}})
 	if err != nil {
 		t.Fatal(err)
 	}

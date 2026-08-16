@@ -30,11 +30,11 @@ func TestKeySetFetchesAndCaches(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	ks := &Source{URL: srv.URL, CacheDuration: time.Minute}
-	first, err := ks.KeySet(t.Context())
+	first, err := ks.Refresh(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := ks.KeySet(t.Context())
+	second, err := ks.Refresh(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,11 +58,11 @@ func TestKeySetRefreshesAfterTTL(t *testing.T) {
 		CacheDuration: time.Minute,
 		now:           func() time.Time { return now },
 	}
-	if _, err := ks.KeySet(t.Context()); err != nil {
+	if _, err := ks.Refresh(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Minute)
-	if _, err := ks.KeySet(t.Context()); err != nil {
+	if _, err := ks.Refresh(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if hits.Load() != 2 {
@@ -89,7 +89,7 @@ func TestKeySetSingleflight(t *testing.T) {
 	errCh := make(chan error, 8)
 	for range 8 {
 		wg.Go(func() {
-			_, err := ks.KeySet(t.Context())
+			_, err := ks.Refresh(t.Context())
 			errCh <- err
 		})
 	}
@@ -148,13 +148,13 @@ func TestStaleOnError(t *testing.T) {
 		StaleOnError:  true,
 		now:           func() time.Time { return now },
 	}
-	first, err := ks.KeySet(t.Context())
+	first, err := ks.Refresh(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	fail.Store(true)
 	now = now.Add(time.Minute)
-	got, err := ks.KeySet(t.Context())
+	got, err := ks.Refresh(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,18 +182,18 @@ func TestKeySetRefreshErrorWithoutStale(t *testing.T) {
 		CacheDuration: time.Minute,
 		now:           func() time.Time { return now },
 	}
-	if _, err := ks.KeySet(t.Context()); err != nil {
+	if _, err := ks.Refresh(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	fail.Store(true)
 	now = now.Add(time.Minute)
-	if _, err := ks.KeySet(t.Context()); err == nil {
+	if _, err := ks.Refresh(t.Context()); err == nil {
 		t.Fatal("expected refresh error")
 	}
 }
 
 func TestKeySetRejectsEmptyURL(t *testing.T) {
-	if _, err := (&Source{}).KeySet(t.Context()); err == nil {
+	if _, err := (&Source{}).Refresh(t.Context()); err == nil {
 		t.Fatal("empty URL accepted")
 	}
 }
@@ -204,7 +204,7 @@ func TestKeySetRejectsWrongContentType(t *testing.T) {
 		_, _ = w.Write([]byte(`{"keys":[]}`))
 	}))
 	t.Cleanup(srv.Close)
-	if _, err := (&Source{URL: srv.URL}).KeySet(t.Context()); err == nil {
+	if _, err := (&Source{URL: srv.URL}).Refresh(t.Context()); err == nil {
 		t.Fatal("expected content type error")
 	}
 }
@@ -215,7 +215,7 @@ func TestKeySetRejectsOversizedResponse(t *testing.T) {
 		_, _ = w.Write(bytes.Repeat([]byte{' '}, maxJWKSBytes+1))
 	}))
 	t.Cleanup(srv.Close)
-	_, err := (&Source{URL: srv.URL}).KeySet(t.Context())
+	_, err := (&Source{URL: srv.URL}).Refresh(t.Context())
 	if err == nil || !errors.Is(err, jwt.ErrSizeLimit) {
 		t.Fatalf("error: got %v, want ErrSizeLimit", err)
 	}
@@ -227,7 +227,7 @@ func TestKeySetRejectsInvalidJWKS(t *testing.T) {
 		_, _ = w.Write([]byte(`{"keys":[]}`))
 	}))
 	t.Cleanup(srv.Close)
-	_, err := (&Source{URL: srv.URL}).KeySet(t.Context())
+	_, err := (&Source{URL: srv.URL}).Refresh(t.Context())
 	if err == nil || !errors.Is(err, jwt.ErrKey) {
 		t.Fatalf("error: got %v, want ErrKey", err)
 	}
@@ -239,7 +239,7 @@ func TestKeySetUsesContextHTTPClient(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, srv.Client())
-	if _, err := (&Source{URL: srv.URL}).KeySet(ctx); err != nil {
+	if _, err := (&Source{URL: srv.URL}).Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
 }

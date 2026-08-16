@@ -212,17 +212,12 @@ func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
 	})
 	svr.Config.Handler = mux
 
-	keys, err := jwt.ParseJWKSet(local.JWKS())
+	keys, err := jwt.ParseVerificationKeySet(local.JWKS())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sourceCalls atomic.Int64
-	source := jwt.KeySetSourceFunc(func(context.Context) (*jwt.KeySet, error) {
-		sourceCalls.Add(1)
-		return keys, nil
-	})
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, svr.Client())
-	p, err := DiscoverOIDCProvider(ctx, svr.URL, WithVerificationKeys(source))
+	p, err := DiscoverOIDCProvider(ctx, svr.URL, WithVerificationKeys(keys))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,9 +251,6 @@ func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
 	if got := discoveryRequests.Load(); got < 3 {
 		t.Fatalf("discovery requests = %d, want at least 3", got)
 	}
-	if got := sourceCalls.Load(); got < 3 {
-		t.Fatalf("source calls = %d, want at least 3", got)
-	}
 
 	first, err := p.JWKS(ctx)
 	if err != nil {
@@ -275,7 +267,7 @@ func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
 	}
 }
 
-func TestWithVerificationKeysRejectsNilSource(t *testing.T) {
+func TestWithVerificationKeysRejectsNil(t *testing.T) {
 	if _, err := DiscoverOIDCProvider(t.Context(), "https://issuer.example", WithVerificationKeys(nil)); err == nil {
 		t.Fatal("expected nil verification key source error")
 	}

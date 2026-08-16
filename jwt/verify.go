@@ -31,7 +31,7 @@ func (p *payloadCapture) UnmarshalJSON(data []byte) error {
 }
 
 // VerifyJWT verifies a compact JWT and returns an opaque verified token.
-func (k *KeySet) VerifyJWT(compact string, policy ValidationPolicy) (*VerifiedJWT, error) {
+func (k *VerificationKeySet) VerifyJWT(compact string, policy ValidationPolicy) (*VerifiedJWT, error) {
 	if k == nil {
 		return nil, fmt.Errorf("%w: nil key set", ErrKey)
 	}

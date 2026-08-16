@@ -27,10 +27,10 @@ var validJWKSContentTypes = []string{
 	"application/jwk-set+json",
 }
 
-// Source fetches and TTL-caches a JWKS from URL.
-//
-// Fields must not be modified after the first call to [Source.KeySet] or
-// [Source.JWKS].
+// Source refreshes one stable VerificationKeySet from URL. Call Refresh from
+// the application's chosen reload schedule; it retains TTL, singleflight, and
+// optional stale-on-error behavior for callers that choose to invoke it often.
+// Fields must not be modified after the first call to Refresh or JWKS.
 type Source struct {
 	// URL is the jwks_uri to GET. Required.
 	URL string
@@ -47,14 +47,13 @@ type Source struct {
 	mu          sync.Mutex
 	lastFetched time.Time
 	raw         []byte
-	parsed      *jwt.KeySet
+	parsed      *jwt.VerificationKeySet
 	now         func() time.Time
 }
 
-var _ jwt.KeySetSource = (*Source)(nil)
-
-// KeySet returns the cached key set, fetching it when the TTL has expired.
-func (s *Source) KeySet(ctx context.Context) (*jwt.KeySet, error) {
+// Refresh fetches when needed and returns Source's stable verification-key-set
+// handle. A successful refresh updates that handle atomically.
+func (s *Source) Refresh(ctx context.Context) (*jwt.VerificationKeySet, error) {
 	parsed, _, err := s.get(ctx)
 	return parsed, err
 }
@@ -69,7 +68,7 @@ func (s *Source) JWKS(ctx context.Context) ([]byte, error) {
 	return bytes.Clone(raw), nil
 }
 
-func (s *Source) get(ctx context.Context) (*jwt.KeySet, []byte, error) {
+func (s *Source) get(ctx context.Context) (*jwt.VerificationKeySet, []byte, error) {
 	if s == nil {
 		return nil, nil, fmt.Errorf("jwt/remotejwks: source is required")
 	}
@@ -98,9 +97,13 @@ func (s *Source) get(ctx context.Context) (*jwt.KeySet, []byte, error) {
 		return nil, nil, err
 	}
 	s.raw = raw
-	s.parsed = parsed
+	if s.parsed == nil {
+		s.parsed = parsed
+	} else if err := s.parsed.Replace(parsed); err != nil {
+		return nil, nil, fmt.Errorf("jwt/remotejwks: replacing JWKS from %s: %w", s.URL, err)
+	}
 	s.lastFetched = now
-	return parsed, raw, nil
+	return s.parsed, raw, nil
 }
 
 func (s *Source) freshLocked(now time.Time, cacheFor time.Duration) bool {
@@ -114,7 +117,7 @@ func (s *Source) nowTime() time.Time {
 	return time.Now()
 }
 
-func (s *Source) fetch(ctx context.Context) ([]byte, *jwt.KeySet, error) {
+func (s *Source) fetch(ctx context.Context) ([]byte, *jwt.VerificationKeySet, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.URL, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("jwt/remotejwks: creating request for %s: %w", s.URL, err)
@@ -135,7 +138,7 @@ func (s *Source) fetch(ctx context.Context) ([]byte, *jwt.KeySet, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("jwt/remotejwks: reading JWKS from %s: %w", s.URL, err)
 	}
-	parsed, err := jwt.ParseJWKSet(body)
+	parsed, err := jwt.ParseVerificationKeySet(body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("jwt/remotejwks: parsing JWKS from %s: %w", s.URL, err)
 	}

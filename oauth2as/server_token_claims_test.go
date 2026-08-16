@@ -56,7 +56,11 @@ func TestBuildTokenClaims(t *testing.T) {
 	if idInput.Type != "" {
 		t.Fatalf("ID token typ must be absent, got %q", idInput.Type)
 	}
-	idClaims := decodeClaims(t, idInput.Payload)
+	idPayload, err := jsonv2.Marshal(idInput.Claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idClaims := decodeClaims(t, idPayload)
 	for name, want := range map[string]string{
 		"iss":   "https://issuer.example",
 		"sub":   "pairwise-subject",
@@ -86,7 +90,11 @@ func TestBuildTokenClaims(t *testing.T) {
 	if want := now.Add(30 * time.Minute); !expiresAt.Equal(want) {
 		t.Fatalf("access expiry: want %v, got %v", want, expiresAt)
 	}
-	accessClaims := decodeClaims(t, accessInput.Payload)
+	accessPayload, err := jsonv2.Marshal(accessInput.Claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessClaims := decodeClaims(t, accessPayload)
 	if accessClaims["sub"] != "api-subject" || accessClaims["client_id"] != "client-id" || accessClaims["grid"] != "grant-id" {
 		t.Fatalf("unexpected access token claims: %v", accessClaims)
 	}

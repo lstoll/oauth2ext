@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oidc"
 )
 
@@ -56,15 +57,8 @@ func DefaultCoreMetadata(issuer string) *oidc.ProviderMetadata {
 	}
 }
 
-// Keyset is an interface that can be implemented by a type to provide a set of
-// public keys to serve as the provider's verification keyset.
-type Keyset interface {
-	// GetKeys returns the full set of valid public keys for this provider.
-	JWKS(ctx context.Context) ([]byte, error)
-}
-
 type keysetJWKSSource struct {
-	keyset Keyset
+	keyset *jwt.VerificationKeySet
 }
 
 func (s *keysetJWKSSource) GetJWKS(ctx context.Context) ([]byte, error) {
@@ -77,10 +71,13 @@ type JWKSSource interface {
 	GetJWKS(context.Context) ([]byte, error)
 }
 
-// NewOIDCConfigurationHandlerWithKeyset is the same as
-// NewConfigurationHandlerWithJWKSSource, but it takes a Keyset instead of a
-// JWKSSource.
-func NewOIDCConfigurationHandlerWithKeyset(metadata *oidc.ProviderMetadata, keyset Keyset) (*OIDCConfigurationHandler, error) {
+// NewOIDCConfigurationHandlerWithVerificationKeys is the same as
+// NewOIDCConfigurationHandlerWithJWKSSource, but takes a stable verification
+// key set for direct dynamic publication.
+func NewOIDCConfigurationHandlerWithVerificationKeys(metadata *oidc.ProviderMetadata, keyset *jwt.VerificationKeySet) (*OIDCConfigurationHandler, error) {
+	if keyset == nil {
+		return nil, fmt.Errorf("verification keys are required")
+	}
 	jwksSource := &keysetJWKSSource{keyset: keyset}
 	return NewOIDCConfigurationHandlerWithJWKSSource(metadata, jwksSource)
 }

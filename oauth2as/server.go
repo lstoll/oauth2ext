@@ -36,10 +36,10 @@ type Config struct {
 	Storage *Storage
 	Clients ClientSource
 	// Signer signs ID and access tokens using explicit algorithms.
-	Signer JWTSigner
-	// Verifier is used for verifying tokens issued by this server, for the
-	// userinfo endpoint and other places tokens issued by this server are used.
-	Verifier JWTVerifier
+	Signer *jwt.Signer
+	// VerificationKeys verifies tokens issued by this server and is suitable for direct
+	// publication through discovery. Both are stable reloadable handles.
+	VerificationKeys *jwt.VerificationKeySet
 	// DefaultIDTokenSigningAlgorithm is used unless a trusted per-client option
 	// selects another supported algorithm. Defaults to ES256.
 	DefaultIDTokenSigningAlgorithm jwt.Algorithm
@@ -128,8 +128,8 @@ func NewServer(c Config) (*Server, error) {
 	if c.Signer == nil {
 		return nil, fmt.Errorf("signer is required")
 	}
-	if c.Verifier == nil {
-		return nil, fmt.Errorf("verifier is required")
+	if c.VerificationKeys == nil {
+		return nil, fmt.Errorf("verification keys are required")
 	}
 	if c.DefaultIDTokenSigningAlgorithm == "" {
 		c.DefaultIDTokenSigningAlgorithm = jwt.ES256
@@ -137,10 +137,7 @@ func NewServer(c Config) (*Server, error) {
 	if c.AccessTokenSigningAlgorithm == "" {
 		c.AccessTokenSigningAlgorithm = jwt.ES256
 	}
-	algorithms, err := c.Signer.Algorithms(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("getting signer algorithms: %w", err)
-	}
+	algorithms := c.Signer.Algorithms()
 	if !slices.Contains(algorithms, c.DefaultIDTokenSigningAlgorithm) {
 		return nil, fmt.Errorf("default ID token signing algorithm %q is not supported by signer", c.DefaultIDTokenSigningAlgorithm)
 	}
