@@ -12,6 +12,8 @@ type clientOpts struct {
 	skipPKCE                bool
 	idTokenSigningAlgorithm jwt.Algorithm
 	public                  bool
+	privateKeyJWT           *jwt.VerificationKeySet
+	privateKeyJWTConfigured bool
 }
 
 // ClientOpt is a flag that can be set on a given client, to adjust various
@@ -43,6 +45,16 @@ func ClientOptPublic() ClientOpt {
 	}
 }
 
+// ClientOptPrivateKeyJWT configures private_key_jwt authentication for a
+// client. The key set is a stable handle and may be updated with Replace.
+// It cannot be combined with ClientOptPublic or client-secret authentication.
+func ClientOptPrivateKeyJWT(keys *jwt.VerificationKeySet) ClientOpt {
+	return func(opts *clientOpts) {
+		opts.privateKeyJWT = keys
+		opts.privateKeyJWTConfigured = true
+	}
+}
+
 func applyClientOpts(opts []ClientOpt) (clientOpts, error) {
 	var result clientOpts
 	for _, opt := range opts {
@@ -50,6 +62,12 @@ func applyClientOpts(opts []ClientOpt) (clientOpts, error) {
 	}
 	if result.public && result.skipPKCE {
 		return clientOpts{}, fmt.Errorf("public clients cannot skip PKCE")
+	}
+	if result.public && result.privateKeyJWT != nil {
+		return clientOpts{}, fmt.Errorf("public clients cannot use private_key_jwt")
+	}
+	if result.privateKeyJWTConfigured && result.privateKeyJWT == nil {
+		return clientOpts{}, fmt.Errorf("private_key_jwt requires verification keys")
 	}
 	return result, nil
 }

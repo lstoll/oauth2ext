@@ -172,7 +172,26 @@ func TestParseToken(t *testing.T) {
 			WantErrCode: TokenErrorCodeInvalidRequest,
 		},
 		{
-			Name: "Escaped basic auth creds", // https://tools.ietf.org/html/rfc6749#section-2.3.1
+			Name: "JWT client assertion",
+			Req: queryReq(map[string]string{
+				"code":                  "acode",
+				"redirect_uri":          "https://redirect",
+				"client_id":             "client",
+				"grant_type":            "authorization_code",
+				"client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+				"client_assertion":      "header.payload.sig",
+			}),
+			Want: &TokenRequest{
+				GrantType:           GrantTypeAuthorizationCode,
+				Code:                "acode",
+				RedirectURI:         "https://redirect",
+				ClientID:            "client",
+				ClientAssertionType: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+				ClientAssertion:     "header.payload.sig",
+			},
+		},
+		{
+			Name: "URL-encoded basic auth special characters",
 			Req: func() *http.Request {
 				req := queryReq(map[string]string{
 					"code":         "acode",

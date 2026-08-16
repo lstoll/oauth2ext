@@ -189,8 +189,8 @@ func TestCodeToken(t *testing.T) {
 		}
 
 		_, err := o.codeToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
-		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeUnauthorizedClient {
-			t.Errorf("want unauthorized client error, got: %v", err)
+		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeInvalidClient {
+			t.Errorf("want invalid client error, got: %v", err)
 		}
 	})
 
@@ -209,8 +209,8 @@ func TestCodeToken(t *testing.T) {
 		}
 
 		_, err := o.codeToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
-		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeUnauthorizedClient {
-			t.Errorf("want unauthorized client error, got: %v", err)
+		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeInvalidClient {
+			t.Errorf("want invalid client error, got: %v", err)
 		}
 	})
 
@@ -484,8 +484,8 @@ func TestRefreshToken(t *testing.T) {
 		}
 
 		_, err := o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
-		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeUnauthorizedClient {
-			t.Errorf("want unauthorized_client error, got: %v", err)
+		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeInvalidClient {
+			t.Errorf("want invalid_client error, got: %v", err)
 		}
 	})
 

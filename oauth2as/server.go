@@ -3,12 +3,15 @@ package oauth2as
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
+	"lds.li/oauth2ext/clientjwt"
 	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
@@ -50,6 +53,14 @@ type Config struct {
 	// requests. It is optional for bearer-only deployments. When absent, DPoP
 	// proofs are rejected and DPoP-bound access tokens fail closed at UserInfo.
 	DPoPVerifier *dpop.Verifier
+
+	// TokenURL is the token endpoint URL used as the audience for
+	// private_key_jwt client assertions. It defaults to Issuer + "/token".
+	TokenURL string
+	// ClientAssertionReplayStore provides atomic replay protection for
+	// private_key_jwt assertions. A process-local bounded store is used when
+	// omitted; configure a shared implementation for multiple replicas.
+	ClientAssertionReplayStore ClientAssertionReplayStore
 
 	Logger *slog.Logger
 
@@ -94,6 +105,8 @@ type Server struct {
 	logger *slog.Logger
 
 	now func() time.Time
+
+	clientAssertionReplay ClientAssertionReplayStore
 }
 
 func (s *Server) defaultIDTokenSigningAlgorithm() jwt.Algorithm {
@@ -206,10 +219,14 @@ func NewServer(c Config) (*Server, error) {
 	}
 
 	svr := &Server{
-		config:              c,
-		accessTokenVerifier: accessTokenVerifier,
-		logger:              slog.New(slog.DiscardHandler),
-		now:                 time.Now,
+		config:                c,
+		accessTokenVerifier:   accessTokenVerifier,
+		logger:                slog.New(slog.DiscardHandler),
+		now:                   time.Now,
+		clientAssertionReplay: c.ClientAssertionReplayStore,
+	}
+	if svr.clientAssertionReplay == nil {
+		svr.clientAssertionReplay = newMemoryClientAssertionReplayStore()
 	}
 
 	if c.Logger != nil {
@@ -219,30 +236,54 @@ func NewServer(c Config) (*Server, error) {
 	return svr, nil
 }
 
+func (s *Server) tokenURL() string {
+	if s.config.TokenURL != "" {
+		return s.config.TokenURL
+	}
+	return strings.TrimRight(s.config.Issuer, "/") + "/token"
+}
+
 func (s *Server) validateTokenClient(ctx context.Context, req *oauth2proto.TokenRequest, wantClientID string) error {
 	// check to see if we're working with the same client
-	if wantClientID != req.ClientID {
-		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
+	assertionAttempt := req.ClientAssertion != "" || req.ClientAssertionType != ""
+	if (!assertionAttempt && wantClientID != req.ClientID) || (assertionAttempt && req.ClientID != "" && wantClientID != req.ClientID) {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "", Cause: fmt.Errorf("code redeemed for wrong client")}
+	}
+	clientID := req.ClientID
+	if clientID == "" {
+		clientID = wantClientID
 	}
 
-	opts, err := s.config.Clients.ClientOpts(ctx, req.ClientID)
+	opts, err := s.config.Clients.ClientOpts(ctx, clientID)
 	if err != nil {
 		return &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get client options", Cause: err}
 	}
 	co, err := applyClientOpts(opts)
 	if err != nil {
-		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "invalid client configuration", Cause: err}
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "invalid client configuration", Cause: err}
+	}
+	if co.privateKeyJWT != nil {
+		if !assertionAttempt {
+			return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication"}
+		}
+		return s.validateJWTClient(ctx, req, clientID, co.privateKeyJWT)
+	}
+	if assertionAttempt {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication"}
 	}
 	if co.public {
+		if req.ClientSecret != "" {
+			return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication"}
+		}
 		return nil
 	}
 
-	secrets, err := s.config.Clients.ClientSecrets(ctx, req.ClientID)
+	secrets, err := s.config.Clients.ClientSecrets(ctx, clientID)
 	if err != nil {
 		return &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to get client secrets", Cause: err}
 	}
 	if len(secrets) == 0 {
-		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "Invalid client secret"}
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client secret"}
 	}
 
 	var matchFound int32
@@ -251,11 +292,68 @@ func (s *Server) validateTokenClient(ctx context.Context, req *oauth2proto.Token
 	}
 	if matchFound != 1 {
 		return &oauth2proto.TokenError{
-			ErrorCode:   oauth2proto.TokenErrorCodeUnauthorizedClient,
+			ErrorCode:   oauth2proto.TokenErrorCodeInvalidClient,
 			Description: "Invalid client secret",
 		}
 	}
 
+	return nil
+}
+
+func (s *Server) validateJWTClient(ctx context.Context, req *oauth2proto.TokenRequest, clientID string, keys *jwt.VerificationKeySet) error {
+	if req.ClientAssertion == "" || req.ClientAssertionType == "" {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidRequest, Description: "client_assertion and client_assertion_type are both required"}
+	}
+	if req.ClientAssertionType != clientjwt.AssertionType {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidRequest, Description: "unsupported client_assertion_type"}
+	}
+	if req.ClientSecret != "" {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidRequest, Description: "client_assertion cannot be combined with client_secret"}
+	}
+
+	if keys == nil {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication"}
+	}
+	verifier, err := jwt.NewVerifier(keys, jwt.ValidationPolicy{
+		ExpectedIssuer:    clientID,
+		ExpectedAudiences: []string{s.tokenURL()},
+		AllowedAlgorithms: []jwt.Algorithm{jwt.ES256, jwt.RS256},
+		Type:              jwt.TypeJWTOrAbsent,
+		RequireIssuedAt:   true,
+		ClockSkew:         jwt.DefaultClockSkew,
+	})
+	if err != nil {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication", Cause: err}
+	}
+	verified, err := verifier.Verify(req.ClientAssertion)
+	if err != nil {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication", Cause: err}
+	}
+	sub, err := verified.Subject()
+	if err != nil || sub != clientID {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication", Cause: fmt.Errorf("subject does not match client")}
+	}
+	jti, err := verified.JWTID()
+	if err != nil || len(jti) == 0 || len(jti) > clientAssertionMaxJTI {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication", Cause: fmt.Errorf("jti is required")}
+	}
+	iat, err := verified.IssuedAt()
+	if err != nil {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication", Cause: err}
+	}
+	exp, err := verified.ExpiresAt()
+	if err != nil || !exp.After(iat) || exp.Sub(iat) > clientAssertionMaxLifetime {
+		return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication", Cause: fmt.Errorf("assertion lifetime is invalid")}
+	}
+	if s.clientAssertionReplay == nil {
+		return &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "client assertion replay protection is unavailable", Cause: ErrClientAssertionReplayStore}
+	}
+	if err := s.clientAssertionReplay.Use(ctx, clientID, jti, exp.Add(jwt.DefaultClockSkew)); err != nil {
+		if errors.Is(err, ErrClientAssertionReplay) {
+			return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidClient, Description: "Invalid client authentication", Cause: err}
+		}
+		return &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Message: "internal error", CauseMsg: "failed to record client assertion", Cause: err}
+	}
 	return nil
 }
 

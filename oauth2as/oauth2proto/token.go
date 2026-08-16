@@ -27,6 +27,12 @@ type TokenRequest struct {
 	// CodeVerifier is the PKCE code verifier, if it was submitted with this
 	// request.
 	CodeVerifier string
+	// ClientAssertion is a JWT used for private_key_jwt client authentication.
+	ClientAssertion string
+	// ClientAssertionType is the assertion type. It must be
+	// urn:ietf:params:oauth:client-assertion-type:jwt-bearer when
+	// ClientAssertion is set.
+	ClientAssertionType string
 }
 
 // ParseTokenRequest parses the information from a request for an access token.
@@ -54,10 +60,12 @@ func ParseTokenRequest(req *http.Request) (*TokenRequest, error) {
 	}
 
 	tr := &TokenRequest{
-		RedirectURI:  req.PostForm.Get("redirect_uri"),
-		Code:         req.PostForm.Get("code"),
-		RefreshToken: req.PostForm.Get("refresh_token"),
-		CodeVerifier: req.PostForm.Get("code_verifier"),
+		RedirectURI:         req.PostForm.Get("redirect_uri"),
+		Code:                req.PostForm.Get("code"),
+		RefreshToken:        req.PostForm.Get("refresh_token"),
+		CodeVerifier:        req.PostForm.Get("code_verifier"),
+		ClientAssertion:     req.PostForm.Get("client_assertion"),
+		ClientAssertionType: req.PostForm.Get("client_assertion_type"),
 	}
 
 	// Auth the request. Exactly one authentication method is permitted.
