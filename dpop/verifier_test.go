@@ -1,18 +1,23 @@
 package dpop
 
 import (
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"maps"
 	"math/big"
 	"strings"
 	"testing"
 	"time"
 	"uuid"
+
+	jwtint "lds.li/oauth2ext/internal/jwt"
+	"lds.li/oauth2ext/jwt"
 )
 
 // Example DPoP token from RFC 9449 Appendix A.1
@@ -30,16 +35,15 @@ func TestDPoPVerifier_ExampleToken(t *testing.T) {
 		now: time.Unix(1562262616, 0).Add(10 * time.Minute),
 	}
 
-	// Extract thumbprint from the token header for validation
-	header, err := parseJWTHeader(rfc9449ExampleToken)
+	// Extract thumbprint from the token header for validation.
+	header, err := jwtint.ParseCompactJWS(rfc9449ExampleToken, dpopSignatureAlgorithms)
 	if err != nil {
 		t.Fatalf("failed to parse JWT header: %v", err)
 	}
-	jwk, _ := header["jwk"].(map[string]any)
-	if len(jwk) == 0 {
+	if header.Header.JSONWebKey == nil {
 		t.Fatal("jwk header is missing")
 	}
-	expectedThumbprint, err := calculateJWKThumbprint(jwk)
+	expectedThumbprint, err := jwkThumbprint(header.Header.JSONWebKey)
 	if err != nil {
 		t.Fatalf("failed to calculate thumbprint: %v", err)
 	}
@@ -77,16 +81,8 @@ func generateTestKey(t *testing.T) *ecdsa.PrivateKey {
 func TestDPoPVerifier_RoundTrip(t *testing.T) {
 	// Generate a test ECDSA key
 	privKey := generateTestKey(t)
+	signer := mustSigner(t, privKey)
 
-	// Create signer using the constructor - it automatically creates the JWK
-	signer, err := NewSigner(privKey)
-	if err != nil {
-		t.Fatalf("failed to create encoder: %v", err)
-	}
-
-	// Create DPoP token with typ header
-	// DPoP tokens typically don't have an explicit expiration - they use iat with
-	// a validity window, so we mark it WithoutExpiration
 	now := time.Now()
 	opts := ProofOptions{
 		HTTPMethod:  "POST",
@@ -96,17 +92,12 @@ func TestDPoPVerifier_RoundTrip(t *testing.T) {
 		AccessToken: "access-token",
 	}
 
-	// SignAndEncode now automatically includes the jwk header
-	token, err := signer.SignAndEncode(opts)
+	token, err := Sign(t.Context(), signer, opts)
 	if err != nil {
 		t.Fatalf("failed to encode DPoP token: %v", err)
 	}
 
-	// Calculate expected thumbprint from the encoder's JWK
-	expectedThumbprint, err := calculateJWKThumbprint(signer.jwk)
-	if err != nil {
-		t.Fatalf("failed to calculate expected thumbprint: %v", err)
-	}
+	expectedThumbprint := signerThumbprint(t, signer)
 
 	// Create validator with expected thumbprint
 	validator, err := NewValidator(&ValidatorOpts{
@@ -138,24 +129,152 @@ func TestDPoPVerifier_RoundTrip(t *testing.T) {
 	t.Logf("Successfully completed DPoP round-trip with thumbprint: %s", expectedThumbprint)
 }
 
-func TestDPoPVerifier_RejectsMissingJWK(t *testing.T) {
-	// Create a token without the jwk header using encodeWithHeaders directly
-	privKey := generateTestKey(t)
-
-	signer, err := NewSigner(privKey)
+func TestSign_AllowsSupportedAsymmetricAlgorithms(t *testing.T) {
+	_, edPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("failed to create encoder: %v", err)
+		t.Fatal(err)
 	}
+	signer, err := jwt.NewSigningIdentity(edPrivate, jwt.EdDSA, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := Sign(t.Context(), signer, ProofOptions{HTTPMethod: "GET", HTTPURI: "https://server.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := jwtint.ParseCompactJWS(compact, dpopSignatureAlgorithms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Header.Algorithm != string(jwt.EdDSA) {
+		t.Fatalf("algorithm: got %q, want %q", parsed.Header.Algorithm, jwt.EdDSA)
+	}
+}
 
+func TestDPoP_SignVerify_AllSupportedAlgorithms(t *testing.T) {
+	tests := []struct {
+		name string
+		alg  jwt.Algorithm
+		key  func(t *testing.T) crypto.Signer
+	}{
+		{name: "RS256", alg: jwt.RS256, key: func(t *testing.T) crypto.Signer {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return key
+		}},
+		{name: "RS384", alg: jwt.RS384, key: func(t *testing.T) crypto.Signer {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return key
+		}},
+		{name: "RS512", alg: jwt.RS512, key: func(t *testing.T) crypto.Signer {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return key
+		}},
+		{name: "PS256", alg: jwt.PS256, key: func(t *testing.T) crypto.Signer {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return key
+		}},
+		{name: "PS384", alg: jwt.PS384, key: func(t *testing.T) crypto.Signer {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return key
+		}},
+		{name: "PS512", alg: jwt.PS512, key: func(t *testing.T) crypto.Signer {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return key
+		}},
+		{name: "ES256", alg: jwt.ES256, key: func(t *testing.T) crypto.Signer { return generateTestKey(t) }},
+		{name: "ES384", alg: jwt.ES384, key: func(t *testing.T) crypto.Signer {
+			key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return key
+		}},
+		{name: "ES512", alg: jwt.ES512, key: func(t *testing.T) crypto.Signer {
+			key, err := ecdsa.GenerateKey(elliptic.P521(), rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return key
+		}},
+		{name: "EdDSA", alg: jwt.EdDSA, key: func(t *testing.T) crypto.Signer {
+			_, key, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return key
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			signer := mustSignerConfig(t, tt.key(t), tt.alg, nil)
+			proof, err := Sign(t.Context(), signer, ProofOptions{HTTPMethod: "GET", HTTPURI: "https://server.example"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			thumbprint := signerThumbprint(t, signer)
+			validator, err := NewValidator(&ValidatorOpts{ExpectedThumbprint: thumbprint})
+			if err != nil {
+				t.Fatal(err)
+			}
+			verified, err := (&Verifier{}).VerifyAndDecode(proof, validator)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if verified.Thumbprint != thumbprint {
+				t.Fatalf("thumbprint: got %q, want %q", verified.Thumbprint, thumbprint)
+			}
+		})
+	}
+}
+
+func TestDPoPRejectsRedundantSigner(t *testing.T) {
+	a := generateTestKey(t)
+	b, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aIdentity, err := jwt.NewSigningIdentity(a, jwt.ES256, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bIdentity, err := jwt.NewSigningIdentity(b, jwt.RS256, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingKeys, err := jwt.NewSigningKeySet(aIdentity, bIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := signingKeys.Sign(t.Context(), map[string]any{"sub": "test"}, jwt.SignOptions{}); err == nil {
+		t.Fatal("expected exact algorithm for multi-identity signer")
+	}
+}
+
+func TestDPoPVerifier_RejectsMissingJWK(t *testing.T) {
+	privKey := generateTestKey(t)
 	now := time.Now()
-	// Encode without jwk header.
-	token, err := signer.signPayload(map[string]any{
+	token := mustSignClaims(t, mustSigner(t, privKey), map[string]any{
 		"jti": "test",
 		"iat": now.Unix(),
-	}, nil, false)
-	if err != nil {
-		t.Fatalf("failed to sign token: %v", err)
-	}
+	}, jwt.SignOptions{Type: "dpop+jwt", SkipKeyID: true})
 
 	// DPoPVerifier should reject tokens without jwk header
 	// We need to extract thumbprint from a valid token structure, but this token doesn't have jwk
@@ -178,29 +297,20 @@ func TestDPoPVerifier_RejectsMissingJWK(t *testing.T) {
 func TestDPoPVerifier_RejectsExpiredToken(t *testing.T) {
 	// Create a DPoP token that is expired (issued in the past beyond validity window)
 	privKey := generateTestKey(t)
+	signer := mustSigner(t, privKey)
 
-	signer, err := NewSigner(privKey)
-	if err != nil {
-		t.Fatalf("failed to create encoder: %v", err)
-	}
-
-	// Issue token 20 minutes ago (default validity is 10 minutes)
 	issuedAt := time.Now().Add(-20 * time.Minute)
 	opts := ProofOptions{
 		HTTPMethod: "POST",
 		HTTPURI:    "https://server.example.com/token",
 		IssuedAt:   issuedAt,
 	}
-	token, err := signer.SignAndEncode(opts)
+	token, err := Sign(t.Context(), signer, opts)
 	if err != nil {
 		t.Fatalf("failed to encode DPoP token: %v", err)
 	}
 
-	// Calculate thumbprint for validation
-	expectedThumbprint, err := calculateJWKThumbprint(signer.jwk)
-	if err != nil {
-		t.Fatalf("failed to calculate thumbprint: %v", err)
-	}
+	expectedThumbprint := signerThumbprint(t, signer)
 
 	validator, err := NewValidator(&ValidatorOpts{
 		ExpectedThumbprint: expectedThumbprint,
@@ -219,11 +329,9 @@ func TestDPoPVerifier_RejectsExpiredToken(t *testing.T) {
 }
 
 func TestDPoPVerifier_RequiresDPoPClaims(t *testing.T) {
-	signer, err := NewSigner(generateTestKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	validator, err := NewValidator(&ValidatorOpts{ExpectedThumbprint: signer.thumb})
+	key := generateTestKey(t)
+	signer := mustSigner(t, key)
+	validator, err := NewValidator(&ValidatorOpts{ExpectedThumbprint: signerThumbprint(t, signer)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,10 +345,7 @@ func TestDPoPVerifier_RequiresDPoPClaims(t *testing.T) {
 		t.Run(claim, func(t *testing.T) {
 			payload := maps.Clone(baseClaims)
 			delete(payload, claim)
-			compact, err := signer.signPayload(payload, nil, true)
-			if err != nil {
-				t.Fatal(err)
-			}
+			compact := mustSignClaims(t, signer, payload, dpopSignOpts())
 			if _, err := new(Verifier).VerifyAndDecode(compact, validator); err == nil || !strings.Contains(err.Error(), claim+" claim is required") {
 				t.Fatalf("error: got %v, want missing %s claim", err, claim)
 			}
@@ -248,49 +353,9 @@ func TestDPoPVerifier_RequiresDPoPClaims(t *testing.T) {
 	}
 }
 
-func TestJWKThumbprint_Calculation(t *testing.T) {
-	// Test that thumbprint calculation works correctly
-	// The JWK from the RFC example:
-	jwk := map[string]any{
-		"kty": "EC",
-		"crv": "P-256",
-		"x":   "l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfWVAWBFs",
-		"y":   "9VE4jf_Ok_o64zbTTlcuNJajHmt6v9TDVrU0CdvGRDA",
-	}
-
-	thumbprint, err := calculateJWKThumbprint(jwk)
-	if err != nil {
-		t.Fatalf("failed to calculate thumbprint: %v", err)
-	}
-
-	if thumbprint == "" {
-		t.Error("thumbprint is empty")
-	}
-
-	// The thumbprint should be a base64url-encoded string (43 characters for SHA-256)
-	if len(thumbprint) != 43 {
-		t.Errorf("thumbprint has unexpected length: got %d, expected 43", len(thumbprint))
-	}
-
-	// Calculate again - should be the same
-	thumbprint2, err := calculateJWKThumbprint(jwk)
-	if err != nil {
-		t.Fatalf("failed to calculate thumbprint second time: %v", err)
-	}
-
-	if thumbprint != thumbprint2 {
-		t.Error("thumbprint calculation is not deterministic")
-	}
-
-	t.Logf("JWK thumbprint: %s", thumbprint)
-}
-
 func TestDPoPVerifier_HTM_HTU_Validation(t *testing.T) {
 	privKey := generateTestKey(t)
-	signer, err := NewSigner(privKey)
-	if err != nil {
-		t.Fatalf("failed to create encoder: %v", err)
-	}
+	signer := mustSigner(t, privKey)
 
 	now := time.Now()
 	opts := ProofOptions{
@@ -299,16 +364,12 @@ func TestDPoPVerifier_HTM_HTU_Validation(t *testing.T) {
 		IssuedAt:   now,
 	}
 
-	token, err := signer.SignAndEncode(opts)
+	token, err := Sign(t.Context(), signer, opts)
 	if err != nil {
 		t.Fatalf("failed to encode DPoP token: %v", err)
 	}
 
-	// Calculate thumbprint for validation
-	expectedThumbprint, err := calculateJWKThumbprint(signer.jwk)
-	if err != nil {
-		t.Fatalf("failed to calculate thumbprint: %v", err)
-	}
+	expectedThumbprint := signerThumbprint(t, signer)
 
 	htm := "POST"
 	htu := "https://server.example.com/token"
@@ -413,15 +474,12 @@ func TestDPoPVerifier_HTM_HTU_Validation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to create validator: %v", err)
 		}
-		compact, err := signer.signPayload(map[string]any{
+		compact := mustSignClaims(t, signer, map[string]any{
 			"jti": uuid.NewV4().String(),
 			"iat": now.Unix(),
 			"htm": "POST",
 			"htu": "https://server.example.com/token%",
-		}, nil, true)
-		if err != nil {
-			t.Fatal(err)
-		}
+		}, dpopSignOpts())
 		if _, err := new(Verifier).VerifyAndDecode(compact, validator); err == nil {
 			t.Fatal("expected error for malformed htu percent-encoding")
 		}
@@ -480,17 +538,10 @@ func testLeafCertChain(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate, *x50
 	return leafPriv, leafCert, caCert
 }
 
-func x5cB64Chain(leaf, ca *x509.Certificate) []string {
-	return []string{
-		base64.StdEncoding.EncodeToString(leaf.Raw),
-		base64.StdEncoding.EncodeToString(ca.Raw),
-	}
-}
-
-func TestNewSignerWithCertificateChain_MismatchedLeaf(t *testing.T) {
+func TestSignerRejectsMismatchedCertificateLeaf(t *testing.T) {
 	_, leafCert, caCert := testLeafCertChain(t)
 	wrongPriv := generateTestKey(t)
-	_, err := NewSignerWithCertificateChain(wrongPriv, []*x509.Certificate{leafCert, caCert})
+	_, err := jwt.NewSigningIdentity(wrongPriv, "", "", leafCert, caCert)
 	if err == nil {
 		t.Fatal("expected error when signer key does not match leaf certificate")
 	}
@@ -502,26 +553,20 @@ func TestNewSignerWithCertificateChain_MismatchedLeaf(t *testing.T) {
 func TestDPoPVerifier_TrustedRoots_X5C(t *testing.T) {
 	leafPriv, leafCert, caCert := testLeafCertChain(t)
 
-	signer, err := NewSignerWithCertificateChain(leafPriv, []*x509.Certificate{leafCert, caCert})
-	if err != nil {
-		t.Fatalf("NewSignerWithCertificateChain: %v", err)
-	}
-
-	token, err := signer.SignAndEncode(ProofOptions{
-		HTTPMethod: "POST",
-		HTTPURI:    "https://server.example.com/token",
+	signer := mustSignerWithCerts(t, leafPriv, []*x509.Certificate{leafCert, caCert})
+	token, err := Sign(t.Context(), signer, ProofOptions{
+		HTTPMethod:          "POST",
+		HTTPURI:             "https://server.example.com/token",
+		IncludeCertificates: true,
 	})
 	if err != nil {
-		t.Fatalf("SignAndEncode: %v", err)
+		t.Fatalf("Sign: %v", err)
 	}
 
 	roots := x509.NewCertPool()
 	roots.AddCert(caCert)
 
-	expectedTP, err := calculateJWKThumbprint(signer.jwk)
-	if err != nil {
-		t.Fatalf("thumbprint: %v", err)
-	}
+	expectedTP := signerThumbprint(t, signer)
 	val, err := NewValidator(&ValidatorOpts{ExpectedThumbprint: expectedTP})
 	if err != nil {
 		t.Fatalf("NewValidator: %v", err)
@@ -549,23 +594,47 @@ func TestDPoPVerifier_TrustedRoots_X5C(t *testing.T) {
 	}
 }
 
+func TestDPoPSignOmitsCertificatesByDefault(t *testing.T) {
+	leafPriv, leafCert, caCert := testLeafCertChain(t)
+	signer := mustSignerWithCerts(t, leafPriv, []*x509.Certificate{leafCert, caCert})
+	proof, err := Sign(t.Context(), signer, ProofOptions{HTTPMethod: "GET", HTTPURI: "https://server.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := jwtint.ParseCompactJWS(proof, dpopSignatureAlgorithms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := parsed.Header.ExtraHeaders["x5c"]; ok {
+		t.Fatal("x5c should be omitted unless explicitly requested")
+	}
+}
+
+func TestDPoPSignRequiresConfiguredCertificatesWhenRequested(t *testing.T) {
+	signer := mustSigner(t, generateTestKey(t))
+	_, err := Sign(t.Context(), signer, ProofOptions{
+		HTTPMethod:          "GET",
+		HTTPURI:             "https://server.example",
+		IncludeCertificates: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "has no certificate chain") {
+		t.Fatalf("error: got %v, want missing certificate chain", err)
+	}
+}
+
 func TestDPoPVerifier_TrustedRoots_RequiresX5C(t *testing.T) {
 	_, _, caCert := testLeafCertChain(t)
 	roots := x509.NewCertPool()
 	roots.AddCert(caCert)
 
 	privKey := generateTestKey(t)
-	signer, err := NewSigner(privKey)
-	if err != nil {
-		t.Fatalf("NewSigner: %v", err)
-	}
-
-	token, err := signer.SignAndEncode(ProofOptions{
+	signer := mustSigner(t, privKey)
+	token, err := Sign(t.Context(), signer, ProofOptions{
 		HTTPMethod: "POST",
 		HTTPURI:    "https://server.example.com/token",
 	})
 	if err != nil {
-		t.Fatalf("SignAndEncode: %v", err)
+		t.Fatalf("Sign: %v", err)
 	}
 
 	val, err := NewValidator(&ValidatorOpts{
@@ -582,6 +651,25 @@ func TestDPoPVerifier_TrustedRoots_RequiresX5C(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "x5c header is required") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDPoPVerifier_TrustedRoots_RequiresEmbeddedJWK(t *testing.T) {
+	leafPriv, leafCert, caCert := testLeafCertChain(t)
+	signer := mustSignerWithCerts(t, leafPriv, []*x509.Certificate{leafCert, caCert})
+	token := mustSignClaims(t, signer, map[string]any{
+		"jti": uuid.NewV4().String(), "iat": time.Now().Unix(),
+		"htm": "GET", "htu": "https://server.example",
+	}, jwt.SignOptions{Type: "dpop+jwt", SkipKeyID: true, Certificates: jwt.RequireCertificates})
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+	validator, err := NewValidator(&ValidatorOpts{IgnoreThumbprint: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&Verifier{TrustedRoots: roots}).VerifyAndDecode(token, validator)
+	if err == nil || !strings.Contains(err.Error(), "jwk header is missing") {
+		t.Fatalf("error: got %v, want missing embedded jwk", err)
 	}
 }
 
@@ -610,17 +698,14 @@ func TestDPoPVerifier_TrustedRoots_WrongRoot(t *testing.T) {
 		t.Fatalf("parse other CA: %v", err)
 	}
 
-	signer, err := NewSignerWithCertificateChain(leafPriv, []*x509.Certificate{leafCert, caCert})
-	if err != nil {
-		t.Fatalf("NewSignerWithCertificateChain: %v", err)
-	}
-
-	token, err := signer.SignAndEncode(ProofOptions{
-		HTTPMethod: "POST",
-		HTTPURI:    "https://server.example.com/token",
+	signer := mustSignerWithCerts(t, leafPriv, []*x509.Certificate{leafCert, caCert})
+	token, err := Sign(t.Context(), signer, ProofOptions{
+		HTTPMethod:          "POST",
+		HTTPURI:             "https://server.example.com/token",
+		IncludeCertificates: true,
 	})
 	if err != nil {
-		t.Fatalf("SignAndEncode: %v", err)
+		t.Fatalf("Sign: %v", err)
 	}
 
 	wrongRoots := x509.NewCertPool()
@@ -643,44 +728,26 @@ func TestDPoPVerifier_TrustedRoots_WrongRoot(t *testing.T) {
 	}
 }
 
-func TestDPoPVerifier_TrustedRoots_JWKMismatchesLeaf(t *testing.T) {
-	leafPriv, leafCert, caCert := testLeafCertChain(t)
-	otherPriv := generateTestKey(t)
-	otherJWK, err := publicKeyToJWK(otherPriv.Public())
+func TestRequireJWKMatchesLeaf(t *testing.T) {
+	_, leafCert, _ := testLeafCertChain(t)
+	otherJWK, _, err := jwtint.PublicJWK(generateTestKey(t).Public())
 	if err != nil {
-		t.Fatalf("publicKeyToJWK: %v", err)
+		t.Fatal(err)
 	}
-
-	signer, err := NewSigner(leafPriv)
-	if err != nil {
-		t.Fatalf("NewSigner: %v", err)
-	}
-
-	token, err := signer.signPayload(map[string]any{
-		"jti": "test",
-		"iat": time.Now().Unix(),
-	}, map[string]any{
-		"jwk": otherJWK,
-		"x5c": x5cB64Chain(leafCert, caCert),
-	}, false)
-	if err != nil {
-		t.Fatalf("signPayload: %v", err)
-	}
-
-	roots := x509.NewCertPool()
-	roots.AddCert(caCert)
-
-	val, err := NewValidator(&ValidatorOpts{IgnoreThumbprint: true})
-	if err != nil {
-		t.Fatalf("NewValidator: %v", err)
-	}
-
-	v := &Verifier{TrustedRoots: roots}
-	_, err = v.VerifyAndDecode(token, val)
-	if err == nil {
+	if err := requireJWKMatchesLeaf(&otherJWK, leafCert.PublicKey); err == nil {
 		t.Fatal("expected jwk / x5c mismatch error")
-	}
-	if !strings.Contains(err.Error(), "jwk does not match x5c leaf") {
+	} else if !strings.Contains(err.Error(), "jwk does not match x5c leaf") {
 		t.Errorf("unexpected error: %v", err)
+	}
+
+	matching, _, err := jwtint.PublicJWK(leafCert.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := requireJWKMatchesLeaf(&matching, leafCert.PublicKey); err != nil {
+		t.Fatalf("matching jwk: %v", err)
+	}
+	if err := requireJWKMatchesLeaf(nil, leafCert.PublicKey); err == nil {
+		t.Fatal("expected missing jwk error")
 	}
 }

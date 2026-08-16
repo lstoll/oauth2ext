@@ -13,6 +13,7 @@ func TestValidationPolicyRequiresExplicitDecisions(t *testing.T) {
 		IgnoreIssuer:      true,
 		IgnoreAudiences:   true,
 		AllowedAlgorithms: []Algorithm{ES256},
+		Type:              TypeAny,
 	}
 	if err := valid.validate(); err != nil {
 		t.Fatalf("valid policy: %v", err)
@@ -31,6 +32,7 @@ func TestValidationPolicyRequiresExplicitDecisions(t *testing.T) {
 			p.ExpectedAudiences = []string{""}
 		}},
 		{"missing algorithms", func(p *ValidationPolicy) { p.AllowedAlgorithms = nil }},
+		{"missing typ decision", func(p *ValidationPolicy) { p.Type = TypePolicyUnspecified }},
 		{"negative clock skew", func(p *ValidationPolicy) { p.ClockSkew = -time.Second }},
 		{"excessive clock skew", func(p *ValidationPolicy) { p.ClockSkew = MaxClockSkew + time.Nanosecond }},
 	}
@@ -50,6 +52,7 @@ func TestValidationPolicyAllowsMaximumClockSkew(t *testing.T) {
 		IgnoreIssuer:      true,
 		IgnoreAudiences:   true,
 		AllowedAlgorithms: []Algorithm{ES256},
+		Type:              TypeAny,
 		ClockSkew:         MaxClockSkew,
 	}
 	if err := policy.validate(); err != nil {
@@ -64,6 +67,7 @@ func TestClockSkewAppliesLeeway(t *testing.T) {
 		IgnoreIssuer:      true,
 		IgnoreAudiences:   true,
 		AllowedAlgorithms: []Algorithm{ES256},
+		Type:              TypeAny,
 	}
 	requireVerificationError(t, validateClaims(claims, policy, now), VerificationErrorCodeExpired)
 	policy.ClockSkew = DefaultClockSkew
@@ -75,10 +79,11 @@ func TestClockSkewAppliesLeeway(t *testing.T) {
 func TestVerifyRequiresExpirationByDefault(t *testing.T) {
 	signer := newTestSigner(t)
 	compact := signer.sign(t, map[string]any{"sub": "subject"})
-	_, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
+	_, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 		IgnoreIssuer:      true,
 		IgnoreAudiences:   true,
 		AllowedAlgorithms: []Algorithm{ES256},
+		Type:              TypeAny,
 	})
 	requireVerificationError(t, err, VerificationErrorCodeClaim)
 }
@@ -89,15 +94,16 @@ func TestVerifyTypeMatchIsExact(t *testing.T) {
 	policy := ValidationPolicy{
 		IgnoreIssuer:      true,
 		IgnoreAudiences:   true,
+		Type:              TypeExact,
 		ExpectedType:      "at+jwt",
 		AllowedAlgorithms: []Algorithm{ES256},
 	}
-	if _, err := signer.keySet.VerifyJWT(compact, policy); err != nil {
+	if _, err := verifyJWT(t, signer.keySet, compact, policy); err != nil {
 		t.Fatalf("exact typ match: %v", err)
 	}
 
 	policy.ExpectedType = "AT+JWT"
-	_, err := signer.keySet.VerifyJWT(compact, policy)
+	_, err := verifyJWT(t, signer.keySet, compact, policy)
 	requireVerificationError(t, err, VerificationErrorCodeType)
 }
 
@@ -106,12 +112,13 @@ func TestVerifyEmptyExpectedTypeRequiresAbsentType(t *testing.T) {
 	policy := ValidationPolicy{
 		IgnoreIssuer:      true,
 		IgnoreAudiences:   true,
+		Type:              TypeAbsent,
 		AllowedAlgorithms: []Algorithm{ES256},
 	}
 
 	withoutType := newTestSigner(t)
 	compact := withoutType.sign(t, map[string]any{"exp": now.Add(time.Hour).Unix()})
-	if _, err := withoutType.keySet.VerifyJWT(compact, policy); err != nil {
+	if _, err := verifyJWT(t, withoutType.keySet, compact, policy); err != nil {
 		t.Fatalf("token without typ: %v", err)
 	}
 
@@ -120,7 +127,7 @@ func TestVerifyEmptyExpectedTypeRequiresAbsentType(t *testing.T) {
 			signer := newTestSignerWithType(t, typ)
 			compact := signer.sign(t, map[string]any{"exp": now.Add(time.Hour).Unix()})
 			requireVerificationError(t, func() error {
-				_, err := signer.keySet.VerifyJWT(compact, policy)
+				_, err := verifyJWT(t, signer.keySet, compact, policy)
 				return err
 			}(), VerificationErrorCodeType)
 		})
@@ -128,8 +135,33 @@ func TestVerifyEmptyExpectedTypeRequiresAbsentType(t *testing.T) {
 }
 
 func TestTypeHeaderRejectsNonString(t *testing.T) {
-	_, err := typeHeader(jose.Header{
+	_, _, err := typeHeader(jose.Header{
 		ExtraHeaders: map[jose.HeaderKey]any{jose.HeaderType: 42},
 	})
 	requireVerificationError(t, err, VerificationErrorCodeType)
+}
+
+func TestVerifyJWTOrAbsentTypeIsCaseInsensitive(t *testing.T) {
+	now := time.Now()
+	policy := ValidationPolicy{
+		IgnoreIssuer:      true,
+		IgnoreAudiences:   true,
+		Type:              TypeJWTOrAbsent,
+		AllowedAlgorithms: []Algorithm{ES256},
+	}
+	for _, typ := range []string{"jwt", "JwT"} {
+		t.Run(typ, func(t *testing.T) {
+			signer := newTestSignerWithType(t, typ)
+			compact := signer.sign(t, map[string]any{"exp": now.Add(time.Hour).Unix()})
+			if _, err := verifyJWT(t, signer.keySet, compact, policy); err != nil {
+				t.Fatalf("typ %q: %v", typ, err)
+			}
+		})
+	}
+	signer := newTestSignerWithType(t, "at+jwt")
+	compact := signer.sign(t, map[string]any{"exp": now.Add(time.Hour).Unix()})
+	requireVerificationError(t, func() error {
+		_, err := verifyJWT(t, signer.keySet, compact, policy)
+		return err
+	}(), VerificationErrorCodeType)
 }

@@ -9,7 +9,7 @@ import (
 	"lds.li/oauth2ext/jwt"
 )
 
-func TestProviderVerifyJWT(t *testing.T) {
+func TestProviderVerifier(t *testing.T) {
 	svr, signer := newMockDiscoveryServer(t)
 	t.Cleanup(svr.Close)
 
@@ -31,11 +31,16 @@ func TestProviderVerifyJWT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	verified, err := p.VerifyJWT(ctx, compact, jwt.ValidationPolicy{
+	verifier, err := p.Verifier(ctx, jwt.ValidationPolicy{
 		ExpectedAudiences: []string{"client"},
+		Type:              jwt.TypeAny,
 		RequireIssuedAt:   true,
 		AllowedAlgorithms: []jwt.Algorithm{jwt.ES256},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := verifier.Verify(compact)
 	if err != nil {
 		t.Fatal(err)
 	}

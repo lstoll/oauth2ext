@@ -14,6 +14,22 @@ const (
 	MaxClockSkew = 10 * time.Minute
 )
 
+// TypePolicy controls how a JWT typ header is handled.
+type TypePolicy uint8
+
+const (
+	// TypePolicyUnspecified is invalid. Callers must choose a type policy.
+	TypePolicyUnspecified TypePolicy = iota
+	// TypeAny accepts an absent typ or any string value.
+	TypeAny
+	// TypeAbsent requires typ to be absent.
+	TypeAbsent
+	// TypeExact requires ExpectedType exactly.
+	TypeExact
+	// TypeJWTOrAbsent accepts either an absent typ or typ "JWT".
+	TypeJWTOrAbsent
+)
+
 // ValidationPolicy configures signature verification and RFC 7519 claim validation.
 type ValidationPolicy struct {
 	// ExpectedIssuer is the exact issuer URL the token must contain. Exactly one
@@ -30,8 +46,10 @@ type ValidationPolicy struct {
 	// Provider verification also requires this to be set explicitly by the
 	// token-profile validator.
 	AllowedAlgorithms []Algorithm
-	// ExpectedType requires an exact JOSE typ header match. When empty, the typ
-	// header must be absent or explicitly empty.
+	// Type explicitly controls typ handling. TypePolicyUnspecified is invalid;
+	// callers must choose the intended token type semantics.
+	Type TypePolicy
+	// ExpectedType is required when Type is TypeExact.
 	ExpectedType string
 	// ClockSkew is the leeway applied to exp, nbf, and iat validation.
 	ClockSkew time.Duration
@@ -54,6 +72,18 @@ func (p ValidationPolicy) validate() error {
 	}
 	if slices.Contains(p.ExpectedAudiences, "") {
 		return fmt.Errorf("%w: ExpectedAudiences must not contain an empty value", ErrPolicy)
+	}
+	switch p.Type {
+	case TypeAny, TypeAbsent, TypeJWTOrAbsent:
+		if p.ExpectedType != "" {
+			return fmt.Errorf("%w: ExpectedType is only valid with TypeExact", ErrPolicy)
+		}
+	case TypeExact:
+		if p.ExpectedType == "" {
+			return fmt.Errorf("%w: ExpectedType is required with TypeExact", ErrPolicy)
+		}
+	default:
+		return fmt.Errorf("%w: invalid Type", ErrPolicy)
 	}
 	if p.ClockSkew < 0 || p.ClockSkew > MaxClockSkew {
 		return fmt.Errorf("%w: ClockSkew must be between 0 and %s", ErrPolicy, MaxClockSkew)

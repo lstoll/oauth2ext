@@ -3,12 +3,10 @@ package dpop
 import (
 	"context"
 	"crypto"
-	"crypto/ecdsa"
-	"crypto/rsa"
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
-	jsonv2 "encoding/json/v2"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -16,9 +14,13 @@ import (
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
+	jwtint "lds.li/oauth2ext/internal/jwt"
+	"lds.li/oauth2ext/jwt"
 )
 
 const (
+	maxProofBytes = 64 << 10
+
 	// DefaultValidityAfterIssue is the default maximum age of a DPoP proof.
 	DefaultValidityAfterIssue = 10 * time.Minute
 	// DefaultClockSkew is the default allowance for clock differences.
@@ -39,8 +41,9 @@ type Verifier struct {
 	// DefaultClockSkew and is capped at MaxClockSkew.
 	ClockSkew time.Duration
 
-	// TrustedRoots, when non-nil, requires and validates an x5c header. When
-	// nil, the proof is verified with its embedded jwk header.
+	// TrustedRoots, when non-nil, requires and validates x5c in addition to the
+	// mandatory embedded jwk; the certificate leaf must equal that JWK. When nil,
+	// the proof is verified with its embedded jwk header.
 	TrustedRoots *x509.CertPool
 
 	// ReplayStore atomically detects reused proofs. Nil uses a bounded,
@@ -134,10 +137,14 @@ func (v *Verifier) VerifyAndDecodeContext(ctx context.Context, compact string, v
 	if validator == nil {
 		return nil, fmt.Errorf("dpop: validator is nil")
 	}
-	header, err := parseJWTHeader(compact)
-	if err != nil {
-		return nil, fmt.Errorf("parsing JWT header: %w", err)
+	if len(compact) > maxProofBytes {
+		return nil, fmt.Errorf("DPoP proof exceeds %d bytes", maxProofBytes)
 	}
+	signed, err := jwtint.ParseCompactJWS(compact, dpopSignatureAlgorithms)
+	if err != nil {
+		return nil, fmt.Errorf("parsing signed proof: %w", err)
+	}
+	header := signed.Header
 	algorithm, err := requiredHeaderString(header, "alg")
 	if err != nil {
 		return nil, err
@@ -148,7 +155,7 @@ func (v *Verifier) VerifyAndDecodeContext(ctx context.Context, compact string, v
 		return nil, fmt.Errorf("typ header mismatch: got %q, want %q", typ, "dpop+jwt")
 	}
 	for _, forbidden := range []string{"crit", "jku", "x5u"} {
-		if _, ok := header[forbidden]; ok {
+		if _, ok := header.ExtraHeaders[jose.HeaderKey(forbidden)]; ok {
 			return nil, fmt.Errorf("unsupported %s header", forbidden)
 		}
 	}
@@ -156,8 +163,11 @@ func (v *Verifier) VerifyAndDecodeContext(ctx context.Context, compact string, v
 	var publicKey any
 	var thumbprint string
 	var certificateChain []*x509.Certificate
+	if header.JSONWebKey == nil {
+		return nil, fmt.Errorf("jwk header is missing")
+	}
 	if v.TrustedRoots == nil {
-		thumbprint, publicKey, err = verifyMaterialFromJWK(header)
+		thumbprint, publicKey, err = verifyMaterialFromJWK(header.JSONWebKey)
 	} else {
 		thumbprint, publicKey, certificateChain, err = v.verifyMaterialFromX5C(header)
 	}
@@ -171,23 +181,13 @@ func (v *Verifier) VerifyAndDecodeContext(ctx context.Context, compact string, v
 		return nil, fmt.Errorf("JWK thumbprint mismatch: got %q, want %q", thumbprint, validator.opts.ExpectedThumbprint)
 	}
 
-	signed, err := jose.ParseSigned(compact, []jose.SignatureAlgorithm{jose.SignatureAlgorithm(algorithm)})
-	if err != nil {
-		return nil, fmt.Errorf("parsing signed proof: %w", err)
-	}
-	if len(signed.Signatures) != 1 {
-		return nil, fmt.Errorf("DPoP proof must have exactly one signature")
-	}
 	payloadJSON, err := signed.Verify(publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("verifying JWT: %w", err)
 	}
-	var claims map[string]any
-	if err := jsonv2.Unmarshal(payloadJSON, &claims); err != nil {
+	_, claims, err := jwtint.DecodeJSONObject(payloadJSON)
+	if err != nil {
 		return nil, fmt.Errorf("decoding DPoP claims: %w", err)
-	}
-	if claims == nil {
-		return nil, fmt.Errorf("DPoP payload is not an object")
 	}
 
 	clockSkew, err := v.clockSkew()
@@ -336,8 +336,14 @@ func validateProofClaims(claims map[string]any, opts ValidatorOpts, now time.Tim
 	return proof, nil
 }
 
-func requiredHeaderString(header map[string]any, name string) (string, error) {
-	value, ok := header[name]
+func requiredHeaderString(header jose.Header, name string) (string, error) {
+	if name == "alg" {
+		if header.Algorithm == "" {
+			return "", fmt.Errorf("alg header is missing")
+		}
+		return header.Algorithm, nil
+	}
+	value, ok := header.ExtraHeaders[jose.HeaderKey(name)]
 	if !ok {
 		return "", fmt.Errorf("%s header is missing", name)
 	}
@@ -347,6 +353,37 @@ func requiredHeaderString(header map[string]any, name string) (string, error) {
 	}
 	return text, nil
 }
+
+var dpopSignatureAlgorithms = func() []jose.SignatureAlgorithm {
+	algorithms := make([]jose.SignatureAlgorithm, 0, len(dpopAlgorithms))
+	for _, algorithm := range dpopAlgorithms {
+		switch algorithm {
+		case jwt.RS256:
+			algorithms = append(algorithms, jose.RS256)
+		case jwt.RS384:
+			algorithms = append(algorithms, jose.RS384)
+		case jwt.RS512:
+			algorithms = append(algorithms, jose.RS512)
+		case jwt.PS256:
+			algorithms = append(algorithms, jose.PS256)
+		case jwt.PS384:
+			algorithms = append(algorithms, jose.PS384)
+		case jwt.PS512:
+			algorithms = append(algorithms, jose.PS512)
+		case jwt.ES256:
+			algorithms = append(algorithms, jose.ES256)
+		case jwt.ES384:
+			algorithms = append(algorithms, jose.ES384)
+		case jwt.ES512:
+			algorithms = append(algorithms, jose.ES512)
+		case jwt.EdDSA:
+			algorithms = append(algorithms, jose.EdDSA)
+		default:
+			panic(fmt.Sprintf("dpop: unsupported configured algorithm %q", algorithm))
+		}
+	}
+	return algorithms
+}()
 
 func requiredStringClaim(claims map[string]any, name string) (string, error) {
 	value, err := optionalStringClaim(claims, name)
@@ -391,25 +428,6 @@ func numericDate(value any, name string) (time.Time, error) {
 	return time.Unix(int64(seconds), int64(fraction*float64(time.Second))), nil
 }
 
-func parsePublicJWK(value any) (*jose.JSONWebKey, error) {
-	object, ok := value.(map[string]any)
-	if !ok || len(object) == 0 {
-		return nil, fmt.Errorf("jwk header is missing")
-	}
-	encoded, err := jsonv2.Marshal(object)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling jwk: %w", err)
-	}
-	var key jose.JSONWebKey
-	if err := jsonv2.Unmarshal(encoded, &key); err != nil {
-		return nil, fmt.Errorf("parsing jwk: %w", err)
-	}
-	if !key.Valid() || !key.IsPublic() {
-		return nil, fmt.Errorf("jwk must be a valid public key")
-	}
-	return &key, nil
-}
-
 func jwkThumbprint(key *jose.JSONWebKey) (string, error) {
 	thumbprint, err := key.Thumbprint(crypto.SHA256)
 	if err != nil {
@@ -418,10 +436,12 @@ func jwkThumbprint(key *jose.JSONWebKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(thumbprint), nil
 }
 
-func verifyMaterialFromJWK(header map[string]any) (string, any, error) {
-	key, err := parsePublicJWK(header["jwk"])
-	if err != nil {
-		return "", nil, err
+func verifyMaterialFromJWK(key *jose.JSONWebKey) (string, any, error) {
+	if key == nil {
+		return "", nil, fmt.Errorf("jwk header is missing")
+	}
+	if !key.Valid() || !key.IsPublic() {
+		return "", nil, fmt.Errorf("jwk must be a valid public key")
 	}
 	thumbprint, err := jwkThumbprint(key)
 	if err != nil {
@@ -430,89 +450,59 @@ func verifyMaterialFromJWK(header map[string]any) (string, any, error) {
 	return thumbprint, key.Key, nil
 }
 
-func (v *Verifier) verifyMaterialFromX5C(header map[string]any) (string, any, []*x509.Certificate, error) {
-	x5c, ok := header["x5c"].([]any)
-	if !ok || len(x5c) == 0 {
-		return "", nil, nil, fmt.Errorf("x5c header is required when Verifier.TrustedRoots is set")
-	}
-	chain, err := parseAndVerifyCertChain(v.TrustedRoots, x5c)
+func (v *Verifier) verifyMaterialFromX5C(header jose.Header) (string, any, []*x509.Certificate, error) {
+	chains, err := header.Certificates(x509.VerifyOptions{
+		Roots:     v.TrustedRoots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	})
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("verifying certificate chain: %w", err)
+		if errors.Is(err, jose.ErrMissingX5cHeader) {
+			return "", nil, nil, fmt.Errorf("x5c header is required when Verifier.TrustedRoots is set")
+		}
+		return "", nil, nil, fmt.Errorf("verifying certificate chain: certificate chain verification failed: %w", err)
 	}
-	leafJWK := &jose.JSONWebKey{Key: chain[0].PublicKey}
-	thumbprint, err := jwkThumbprint(leafJWK)
+	if len(chains) == 0 || len(chains[0]) == 0 {
+		return "", nil, nil, fmt.Errorf("verifying certificate chain: certificate chain verification failed")
+	}
+	chain := chains[0]
+	if err := requireJWKMatchesLeaf(header.JSONWebKey, chain[0].PublicKey); err != nil {
+		return "", nil, nil, err
+	}
+	thumbprint, err := jwkThumbprint(header.JSONWebKey)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("calculating JWK thumbprint: %w", err)
 	}
-	if value, ok := header["jwk"]; ok {
-		headerJWK, err := parsePublicJWK(value)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		headerThumbprint, err := jwkThumbprint(headerJWK)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		if headerThumbprint != thumbprint {
-			return "", nil, nil, fmt.Errorf("jwk does not match x5c leaf certificate public key")
-		}
-	}
-	return thumbprint, chain[0].PublicKey, chain, nil
+	return thumbprint, header.JSONWebKey.Key, chain, nil
 }
 
-func validateAlgorithmKey(algorithm string, key any) error {
-	switch publicKey := key.(type) {
-	case *rsa.PublicKey:
-		if algorithm != "RS256" && algorithm != "RS384" && algorithm != "RS512" {
-			return fmt.Errorf("algorithm %q does not match RSA key", algorithm)
-		}
-		if _, err := determineAlgorithmFromKey(publicKey); err != nil {
-			return err
-		}
-	case *ecdsa.PublicKey:
-		want, err := determineAlgorithmFromKey(publicKey)
-		if err != nil {
-			return err
-		}
-		if algorithm != want {
-			return fmt.Errorf("algorithm %q does not match ECDSA key; want %q", algorithm, want)
-		}
-	default:
-		return fmt.Errorf("unsupported DPoP public key type %T", key)
+func requireJWKMatchesLeaf(jwk *jose.JSONWebKey, leaf crypto.PublicKey) error {
+	if jwk == nil {
+		return fmt.Errorf("jwk header is missing")
+	}
+	if !jwk.Valid() || !jwk.IsPublic() {
+		return fmt.Errorf("jwk must be a valid public key")
+	}
+	pub, ok := jwk.Key.(crypto.PublicKey)
+	if !ok {
+		return fmt.Errorf("jwk must be a valid public key")
+	}
+	eq, ok := pub.(interface{ Equal(crypto.PublicKey) bool })
+	if !ok || !eq.Equal(leaf) {
+		return fmt.Errorf("jwk does not match x5c leaf certificate public key")
 	}
 	return nil
 }
 
-func parseAndVerifyCertChain(roots *x509.CertPool, encoded []any) ([]*x509.Certificate, error) {
-	if roots == nil {
-		return nil, fmt.Errorf("trusted roots are not set")
+func validateAlgorithmKey(algorithm string, key any) error {
+	publicKey, ok := key.(crypto.PublicKey)
+	if !ok {
+		return fmt.Errorf("unsupported DPoP public key type %T", key)
 	}
-	certificates := make([]*x509.Certificate, 0, len(encoded))
-	for i, value := range encoded {
-		text, ok := value.(string)
-		if !ok {
-			return nil, fmt.Errorf("x5c[%d] is not a string", i)
-		}
-		der, err := base64.StdEncoding.DecodeString(text)
-		if err != nil {
-			return nil, fmt.Errorf("decoding x5c[%d]: %w", i, err)
-		}
-		certificate, err := x509.ParseCertificate(der)
-		if err != nil {
-			return nil, fmt.Errorf("parsing x5c[%d]: %w", i, err)
-		}
-		certificates = append(certificates, certificate)
+	if err := jwtint.ValidatePublicKey(publicKey); err != nil {
+		return err
 	}
-	intermediates := x509.NewCertPool()
-	for _, certificate := range certificates[1:] {
-		intermediates.AddCert(certificate)
+	if !jwtint.PublicKeySupportsAlgorithm(publicKey, algorithm) {
+		return fmt.Errorf("algorithm %q does not match public key type %T", algorithm, publicKey)
 	}
-	if _, err := certificates[0].Verify(x509.VerifyOptions{
-		Intermediates: intermediates,
-		Roots:         roots,
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-	}); err != nil {
-		return nil, fmt.Errorf("certificate chain verification failed: %w", err)
-	}
-	return certificates, nil
+	return nil
 }

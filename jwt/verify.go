@@ -1,73 +1,69 @@
 package jwt
 
 import (
-	"encoding/json/jsontext"
-	jsonv2 "encoding/json/v2"
 	"fmt"
+	"strings"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
-	josejwt "github.com/go-jose/go-jose/v4/jwt"
+	jwtint "lds.li/oauth2ext/internal/jwt"
 )
 
 const maxTokenBytes = 256 << 10 // 256 KiB
 
-type payloadCapture struct {
-	payload jsontext.Value
-	claims  map[string]any
+// Verifier is an immutable verifier bound to a stable, reloadable key-set
+// handle and a cloned, validated policy.
+type Verifier struct {
+	keys    *VerificationKeySet
+	policy  ValidationPolicy
+	allowed []jose.SignatureAlgorithm
 }
 
-func (p *payloadCapture) UnmarshalJSON(data []byte) error {
-	var claims map[string]any
-	if err := jsonv2.Unmarshal(data, &claims); err != nil {
-		return err
-	}
-	if claims == nil {
-		return fmt.Errorf("JWT payload is not an object")
-	}
-	p.payload = jsontext.Value(data).Clone()
-	p.claims = claims
-	return nil
-}
-
-// VerifyJWT verifies a compact JWT and returns an opaque verified token.
-func (k *KeySet) VerifyJWT(compact string, policy ValidationPolicy) (*VerifiedJWT, error) {
-	if k == nil {
-		return nil, fmt.Errorf("%w: nil key set", ErrKey)
-	}
-	if len(compact) > maxTokenBytes {
-		return nil, verificationErrorf(VerificationErrorCodeInvalidToken, "token exceeds %d bytes", maxTokenBytes)
+// NewVerifier validates and clones policy, binding it to keys. The key set may
+// later be atomically replaced without changing this verifier's policy.
+func NewVerifier(keys *VerificationKeySet, policy ValidationPolicy) (*Verifier, error) {
+	if keys == nil || keys.state.Load() == nil {
+		return nil, fmt.Errorf("%w: invalid key set", ErrKey)
 	}
 	if err := policy.validate(); err != nil {
 		return nil, err
 	}
-
 	allowed, err := toJoseAlgorithms(policy.AllowedAlgorithms)
 	if err != nil {
 		return nil, err
 	}
+	policy.ExpectedAudiences = append([]string(nil), policy.ExpectedAudiences...)
+	policy.AllowedAlgorithms = append([]Algorithm(nil), policy.AllowedAlgorithms...)
+	return &Verifier{keys: keys, policy: policy, allowed: allowed}, nil
+}
 
-	tok, err := josejwt.ParseSigned(compact, allowed)
+// Verify verifies a compact JWT and returns an opaque verified token.
+func (v *Verifier) Verify(compact string) (*VerifiedJWT, error) {
+	if v == nil || v.keys == nil {
+		return nil, fmt.Errorf("%w: invalid verifier", ErrKey)
+	}
+	policy := v.policy
+	if len(compact) > maxTokenBytes {
+		return nil, verificationErrorf(VerificationErrorCodeInvalidToken, "token exceeds %d bytes", maxTokenBytes)
+	}
+	tok, err := jwtint.ParseCompactJWS(compact, v.allowed)
 	if err != nil {
 		return nil, mapParseError(err)
 	}
-	if len(tok.Headers) != 1 {
-		return nil, verificationErrorf(VerificationErrorCodeInvalidToken, "expected exactly one signature")
-	}
-	header := tok.Headers[0]
+	header := tok.Header
 	if err := rejectTokenControlledKeys(header); err != nil {
 		return nil, err
 	}
 
-	typ, err := typeHeader(header)
+	typ, present, err := typeHeader(header)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateType(typ, policy); err != nil {
+	if err := validateType(typ, present, policy); err != nil {
 		return nil, err
 	}
 
-	verificationKeys, err := k.matchingKeys(string(header.Algorithm), header.KeyID)
+	verificationKeys, err := v.keys.matchingKeys(string(header.Algorithm), header.KeyID)
 	if err != nil {
 		return nil, verificationErrorf(VerificationErrorCodeKey, "%v", err)
 	}
@@ -77,17 +73,21 @@ func (k *KeySet) VerifyJWT(compact string, policy ValidationPolicy) (*VerifiedJW
 
 	var lastErr error
 	for _, key := range verificationKeys {
-		var dest payloadCapture
-		if err := tok.Claims(key, &dest); err != nil {
+		payload, err := tok.Verify(key)
+		if err != nil {
 			lastErr = err
 			continue
 		}
-		if err := validateClaims(dest.claims, policy, time.Now()); err != nil {
+		raw, claims, err := jwtint.DecodeJSONObject(payload)
+		if err != nil {
+			return nil, mapClaimsError(err)
+		}
+		if err := validateClaims(claims, policy, time.Now()); err != nil {
 			return nil, err
 		}
 		return &VerifiedJWT{
-			payload: dest.payload,
-			claims:  dest.claims,
+			payload: raw,
+			claims:  claims,
 			alg:     Algorithm(header.Algorithm),
 		}, nil
 	}
@@ -107,24 +107,40 @@ func rejectTokenControlledKeys(header jose.Header) error {
 	return nil
 }
 
-func validateType(typ string, policy ValidationPolicy) error {
-	if typ != policy.ExpectedType {
+func validateType(typ string, present bool, policy ValidationPolicy) error {
+	switch policy.Type {
+	case TypeAny:
+		return nil
+	case TypeAbsent:
+		if !present {
+			return nil
+		}
+		return verificationErrorf(VerificationErrorCodeType, "typ must be absent, got %q", typ)
+	case TypeExact:
+		if typ == policy.ExpectedType {
+			return nil
+		}
 		return verificationErrorf(VerificationErrorCodeType, "typ mismatch: got %q, want %q", typ, policy.ExpectedType)
+	case TypeJWTOrAbsent:
+		if !present || strings.EqualFold(typ, "JWT") {
+			return nil
+		}
+		return verificationErrorf(VerificationErrorCodeType, "typ must be absent or JWT, got %q", typ)
 	}
-	return nil
+	return verificationErrorf(VerificationErrorCodeType, "invalid typ policy")
 }
 
-func typeHeader(header jose.Header) (string, error) {
+func typeHeader(header jose.Header) (string, bool, error) {
 	if header.ExtraHeaders == nil {
-		return "", nil
+		return "", false, nil
 	}
 	value, ok := header.ExtraHeaders[jose.HeaderType]
 	if !ok {
-		return "", nil
+		return "", false, nil
 	}
 	typ, ok := value.(string)
 	if !ok {
-		return "", verificationErrorf(VerificationErrorCodeType, "typ header is not a string")
+		return "", true, verificationErrorf(VerificationErrorCodeType, "typ header is not a string")
 	}
-	return typ, nil
+	return typ, true, nil
 }

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -504,7 +503,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 	}
 
 	accessTokenAlgorithm := s.accessTokenSigningAlgorithm()
-	atSigned, err := s.config.Signer.SignJWT(ctx, accessTokenAlgorithm, ac)
+	atSigned, err := s.config.Signer.Sign(ctx, ac.Claims, jwt.SignOptions{Type: ac.Type, Algorithm: accessTokenAlgorithm})
 	if err != nil {
 		return nil, fmt.Errorf("signing access token with algorithm %s: %w", accessTokenAlgorithm, err)
 	}
@@ -515,7 +514,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 		if err != nil {
 			return nil, fmt.Errorf("building ID token claims: %w", err)
 		}
-		idSigned, err := s.config.Signer.SignJWT(ctx, idTokenAlgorithm, idc)
+		idSigned, err := s.config.Signer.Sign(ctx, idc.Claims, jwt.SignOptions{Type: idc.Type, Algorithm: idTokenAlgorithm})
 		if err != nil {
 			return nil, fmt.Errorf("signing ID token with algorithm %s: %w", idTokenAlgorithm, err)
 		}
@@ -542,7 +541,7 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 	}, nil
 }
 
-func (s *Server) buildIDClaims(grant *storedGrant, tresp *TokenResponse) (JWTSigningInput, error) {
+func (s *Server) buildIDClaims(grant *storedGrant, tresp *TokenResponse) (signingInput, error) {
 	idExp := tresp.IDTokenExpiry
 	if idExp.IsZero() {
 		idExp = s.now().Add(s.config.IDTokenValidity)
@@ -553,7 +552,7 @@ func (s *Server) buildIDClaims(grant *storedGrant, tresp *TokenResponse) (JWTSig
 		claims, err = additionalClaims(application.Additional, idTokenReservedClaims)
 	}
 	if err != nil {
-		return JWTSigningInput{}, err
+		return signingInput{}, err
 	}
 	subject := grant.UserID
 	if application != nil && application.Subject != "" {
@@ -574,10 +573,10 @@ func (s *Server) buildIDClaims(grant *storedGrant, tresp *TokenResponse) (JWTSig
 	if len(grant.AMR) > 0 {
 		claims["amr"] = slices.Clone(grant.AMR)
 	}
-	return marshalSigningInput("", claims)
+	return signingInput{Type: "", Claims: claims}, nil
 }
 
-func (s *Server) buildAccessTokenClaims(grantID string, grant *storedGrant, tresp *TokenResponse) (_ JWTSigningInput, expiresAt time.Time, _ error) {
+func (s *Server) buildAccessTokenClaims(grantID string, grant *storedGrant, tresp *TokenResponse) (_ signingInput, expiresAt time.Time, _ error) {
 	atExp := tresp.AccessTokenExpiry
 	if atExp.IsZero() {
 		atExp = s.now().Add(s.config.AccessTokenValidity)
@@ -588,7 +587,7 @@ func (s *Server) buildAccessTokenClaims(grantID string, grant *storedGrant, tres
 		claims, err = additionalClaims(application.Additional, accessTokenReservedClaims)
 	}
 	if err != nil {
-		return JWTSigningInput{}, time.Time{}, err
+		return signingInput{}, time.Time{}, err
 	}
 	subject := grant.UserID
 	if application != nil && application.Subject != "" {
@@ -615,17 +614,13 @@ func (s *Server) buildAccessTokenClaims(grantID string, grant *storedGrant, tres
 	var addState storedAdditionalState
 	if len(grant.AdditionalState) > 0 {
 		if err := json.Unmarshal(grant.AdditionalState, &addState); err != nil {
-			return JWTSigningInput{}, time.Time{}, fmt.Errorf("failed to unmarshal additional state: %w", err)
+			return signingInput{}, time.Time{}, fmt.Errorf("failed to unmarshal additional state: %w", err)
 		}
 	}
 	if addState.DPoPThumbprint != nil {
 		claims["cnf"] = map[string]any{"jkt": *addState.DPoPThumbprint}
 	}
-	input, err := marshalSigningInput("at+jwt", claims)
-	if err != nil {
-		return JWTSigningInput{}, time.Time{}, err
-	}
-	return input, atExp, nil
+	return signingInput{Type: "at+jwt", Claims: claims}, atExp, nil
 }
 
 var idTokenReservedClaims = map[string]struct{}{
@@ -647,14 +642,6 @@ func additionalClaims(additional map[string]any, reserved map[string]struct{}) (
 		claims[name] = value
 	}
 	return claims, nil
-}
-
-func marshalSigningInput(typ string, claims map[string]any) (JWTSigningInput, error) {
-	payload, err := jsonv2.Marshal(claims)
-	if err != nil {
-		return JWTSigningInput{}, fmt.Errorf("marshaling JWT claims: %w", err)
-	}
-	return JWTSigningInput{Type: typ, Payload: payload}, nil
 }
 
 func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {

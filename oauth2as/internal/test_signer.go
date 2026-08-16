@@ -8,15 +8,14 @@ import (
 	"testing"
 
 	"lds.li/oauth2ext/jwt"
-	"lds.li/oauth2ext/oauth2as"
 )
 
-func NewTestSigner(t testing.TB, algorithms ...jwt.Algorithm) *oauth2as.LocalJWTSigner {
+func NewTestSigner(t testing.TB, algorithms ...jwt.Algorithm) jwt.Signer {
 	t.Helper()
 	if len(algorithms) == 0 {
 		algorithms = []jwt.Algorithm{jwt.ES256}
 	}
-	keys := make([]oauth2as.SigningKey, 0, len(algorithms))
+	identities := make([]*jwt.SigningIdentity, 0, len(algorithms))
 	for _, algorithm := range algorithms {
 		switch algorithm {
 		case jwt.ES256:
@@ -24,18 +23,26 @@ func NewTestSigner(t testing.TB, algorithms ...jwt.Algorithm) *oauth2as.LocalJWT
 			if err != nil {
 				t.Fatal(err)
 			}
-			keys = append(keys, oauth2as.SigningKey{Algorithm: algorithm, Key: key})
+			identity, err := jwt.NewSigningIdentity(key, algorithm, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			identities = append(identities, identity)
 		case jwt.RS256:
 			key, err := rsa.GenerateKey(rand.Reader, 2048)
 			if err != nil {
 				t.Fatal(err)
 			}
-			keys = append(keys, oauth2as.SigningKey{Algorithm: algorithm, Key: key})
+			identity, err := jwt.NewSigningIdentity(key, algorithm, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			identities = append(identities, identity)
 		default:
 			t.Fatalf("unsupported test algorithm %q", algorithm)
 		}
 	}
-	signer, err := oauth2as.NewLocalJWTSigner(oauth2as.LocalJWTSignerConfig{SigningKeys: keys})
+	signer, err := jwt.NewSigningKeySet(identities...)
 	if err != nil {
 		t.Fatal(err)
 	}

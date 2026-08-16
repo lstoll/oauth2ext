@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as/discovery"
 	"lds.li/oauth2ext/oauth2as/internal"
 	"lds.li/oauth2ext/provider"
@@ -19,6 +20,10 @@ func TestDiscovery(t *testing.T) {
 	t.Cleanup(cancel)
 
 	testSigner := internal.NewTestSigner(t)
+	verificationKeys, err := jwt.NewVerificationKeySetFromSigner(testSigner)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	m := http.NewServeMux()
 	ts := httptest.NewTLSServer(m)
@@ -29,7 +34,7 @@ func TestDiscovery(t *testing.T) {
 	pm.TokenEndpoint = ts.URL + "/token"
 	pm.IDTokenSigningAlgValuesSupported = []string{"ES256"}
 
-	ch, err := discovery.NewOIDCConfigurationHandlerWithKeyset(pm, testSigner)
+	ch, err := discovery.NewOIDCConfigurationHandlerWithVerificationKeys(pm, verificationKeys)
 	if err != nil {
 		t.Fatalf("error creating handler: %v", err)
 	}

@@ -52,7 +52,7 @@ func TestTokenCommitFailuresAreAtomic(t *testing.T) {
 			Issuer:               "https://issuer",
 			Storage:              store,
 			Signer:               signer,
-			Verifier:             verifier,
+			VerificationKeys:     verifier,
 			AccessTokenValidity:  time.Hour,
 			IDTokenValidity:      time.Hour,
 			RefreshTokenValidity: time.Hour,

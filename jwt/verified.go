@@ -2,13 +2,27 @@ package jwt
 
 import (
 	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"math"
 	"time"
 )
 
+// DecodeClaims decodes the verified payload into dst using the strict JSON
+// decoder. dst must be a non-nil pointer. The token's registered claims have
+// already passed verifier policy checks before this method can be called.
+func (v *VerifiedJWT) DecodeClaims(dst any) error {
+	if v == nil || v.alg == "" || len(v.payload) == 0 {
+		return fmt.Errorf("jwt: invalid VerifiedJWT")
+	}
+	if dst == nil {
+		return fmt.Errorf("jwt: DecodeClaims destination must be a non-nil pointer")
+	}
+	return jsonv2.Unmarshal(v.payload, dst)
+}
+
 // VerifiedJWT is an opaque JWT that has passed signature and policy validation.
-// The zero value is invalid; obtain instances only via KeySet.VerifyJWT.
+// The zero value is invalid; obtain instances only via Verifier.Verify.
 type VerifiedJWT struct {
 	payload jsontext.Value
 	claims  map[string]any

@@ -90,7 +90,7 @@ func TestProviderDiscoveryLimitsResponses(t *testing.T) {
 	}
 }
 
-func TestVerifyJWTDoesNotRefreshForVerificationFailure(t *testing.T) {
+func TestVerifierDoesNotRefreshForVerificationFailure(t *testing.T) {
 	trusted := jwttest.NewSigner(t)
 	untrusted := jwttest.NewSigner(t)
 	var discoveryRequests atomic.Int64
@@ -145,6 +145,7 @@ func TestVerifyJWTDoesNotRefreshForVerificationFailure(t *testing.T) {
 
 	policy := jwt.ValidationPolicy{
 		ExpectedAudiences: []string{"client"},
+		Type:              jwt.TypeAny,
 		AllowedAlgorithms: []jwt.Algorithm{jwt.ES256},
 		RequireIssuedAt:   true,
 	}
@@ -153,7 +154,11 @@ func TestVerifyJWTDoesNotRefreshForVerificationFailure(t *testing.T) {
 		"bad signature": badSignatureToken,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := p.VerifyJWT(ctx, compact, policy); err == nil {
+			verifier, err := p.Verifier(ctx, policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := verifier.Verify(compact); err == nil {
 				t.Fatal("expected verification failure")
 			}
 		})
@@ -212,17 +217,12 @@ func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
 	})
 	svr.Config.Handler = mux
 
-	keys, err := jwt.ParseJWKSet(local.JWKS())
+	keys, err := jwt.ParseVerificationJWKS(local.JWKS())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sourceCalls atomic.Int64
-	source := jwt.KeySetSourceFunc(func(context.Context) (*jwt.KeySet, error) {
-		sourceCalls.Add(1)
-		return keys, nil
-	})
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, svr.Client())
-	p, err := DiscoverOIDCProvider(ctx, svr.URL, WithVerificationKeys(source))
+	p, err := DiscoverOIDCProvider(ctx, svr.URL, WithVerificationKeys(keys))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,13 +241,22 @@ func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
 	}
 	policy := jwt.ValidationPolicy{
 		ExpectedAudiences: []string{"client"},
+		Type:              jwt.TypeAny,
 		RequireIssuedAt:   true,
 		AllowedAlgorithms: []jwt.Algorithm{jwt.ES256},
 	}
-	if _, err := p.VerifyJWT(ctx, compact, policy); err != nil {
+	verifier, err := p.Verifier(ctx, policy)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.VerifyJWT(ctx, compact, policy); err != nil {
+	if _, err := verifier.Verify(compact); err != nil {
+		t.Fatal(err)
+	}
+	verifier, err = p.Verifier(ctx, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(compact); err != nil {
 		t.Fatal(err)
 	}
 	if got := jwksRequests.Load(); got != 0 {
@@ -255,9 +264,6 @@ func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
 	}
 	if got := discoveryRequests.Load(); got < 3 {
 		t.Fatalf("discovery requests = %d, want at least 3", got)
-	}
-	if got := sourceCalls.Load(); got < 3 {
-		t.Fatalf("source calls = %d, want at least 3", got)
 	}
 
 	first, err := p.JWKS(ctx)
@@ -275,7 +281,7 @@ func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
 	}
 }
 
-func TestWithVerificationKeysRejectsNilSource(t *testing.T) {
+func TestWithVerificationKeysRejectsNil(t *testing.T) {
 	if _, err := DiscoverOIDCProvider(t.Context(), "https://issuer.example", WithVerificationKeys(nil)); err == nil {
 		t.Fatal("expected nil verification key source error")
 	}

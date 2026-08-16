@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-func testClaims(issuer, subject string, audiences []string, now time.Time, custom map[string]any) map[string]any {
+func testClaims(audiences []string, now time.Time, custom map[string]any) map[string]any {
 	out := map[string]any{
-		"iss": issuer,
-		"sub": subject,
+		"iss": "https://issuer.example",
+		"sub": "subject",
 		"iat": now.Unix(),
 		"exp": now.Add(time.Hour).Unix(),
 	}
@@ -24,15 +24,39 @@ func testClaims(issuer, subject string, audiences []string, now time.Time, custo
 	return out
 }
 
+func TestVerifierClonesPolicySlices(t *testing.T) {
+	signer := newTestSigner(t)
+	now := time.Now().UTC()
+	compact := signer.sign(t, testClaims([]string{"client"}, now, nil))
+	audiences := []string{"client"}
+	algorithms := []Algorithm{ES256}
+	verifier, err := NewVerifier(signer.keySet, ValidationPolicy{
+		ExpectedIssuer:    "https://issuer.example",
+		ExpectedAudiences: audiences,
+		AllowedAlgorithms: algorithms,
+		Type:              TypeAny,
+		RequireIssuedAt:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	audiences[0] = "attacker"
+	algorithms[0] = RS256
+	if _, err := verifier.Verify(compact); err != nil {
+		t.Fatalf("verifier changed after source policy mutation: %v", err)
+	}
+}
+
 func TestVerifyAudienceAndTime(t *testing.T) {
 	signer := newTestSigner(t)
 	now := time.Now().UTC()
-	compact := signer.sign(t, testClaims("https://issuer.example", "subject", []string{"client"}, now, nil))
+	compact := signer.sign(t, testClaims([]string{"client"}, now, nil))
 
-	verified, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
+	verified, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 		ExpectedIssuer:    "https://issuer.example",
 		ExpectedAudiences: []string{"client"},
 		AllowedAlgorithms: []Algorithm{ES256},
+		Type:              TypeAny,
 		RequireIssuedAt:   true,
 	})
 	if err != nil {
@@ -52,6 +76,19 @@ func TestVerifyAudienceAndTime(t *testing.T) {
 	if algorithm != ES256 {
 		t.Fatalf("algorithm: got %q, want ES256", algorithm)
 	}
+	var decoded struct {
+		Subject string `json:"sub"`
+		Issuer  string `json:"iss"`
+	}
+	if err := verified.DecodeClaims(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Subject != "subject" || decoded.Issuer != "https://issuer.example" {
+		t.Fatalf("decoded claims: %+v", decoded)
+	}
+	if err := verified.DecodeClaims(nil); err == nil {
+		t.Fatal("DecodeClaims accepted nil destination")
+	}
 	if _, err := verified.String("missing"); err == nil {
 		t.Fatal("expected missing claim error")
 	}
@@ -60,11 +97,12 @@ func TestVerifyAudienceAndTime(t *testing.T) {
 func TestVerifyRejectsWrongAudience(t *testing.T) {
 	signer := newTestSigner(t)
 	now := time.Now().UTC()
-	compact := signer.sign(t, testClaims("https://issuer.example", "subject", []string{"other"}, now, nil))
-	_, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
+	compact := signer.sign(t, testClaims([]string{"other"}, now, nil))
+	_, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 		ExpectedIssuer:    "https://issuer.example",
 		ExpectedAudiences: []string{"client"},
 		AllowedAlgorithms: []Algorithm{ES256},
+		Type:              TypeAny,
 	})
 	if err == nil {
 		t.Fatal("expected audience error")
@@ -74,10 +112,11 @@ func TestVerifyRejectsWrongAudience(t *testing.T) {
 func TestVerifyClassifiesDisallowedAlgorithm(t *testing.T) {
 	signer := newTestSigner(t)
 	compact := signer.sign(t, map[string]any{"sub": "subject"})
-	_, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
+	_, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 		IgnoreIssuer:           true,
 		IgnoreAudiences:        true,
 		AllowedAlgorithms:      []Algorithm{ES384},
+		Type:                   TypeAny,
 		AllowMissingExpiration: true,
 	})
 	requireVerificationError(t, err, VerificationErrorCodeInvalidAlgorithm)
@@ -88,10 +127,11 @@ func TestVerifyRejectsOutOfRangeNumericDate(t *testing.T) {
 	compact := signer.sign(t, map[string]any{
 		"nbf": json.Number("1e20"),
 	})
-	_, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
+	_, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 		IgnoreIssuer:           true,
 		IgnoreAudiences:        true,
 		AllowedAlgorithms:      []Algorithm{ES256},
+		Type:                   TypeAny,
 		AllowMissingExpiration: true,
 	})
 	requireVerificationError(t, err, VerificationErrorCodeClaim)
@@ -118,14 +158,12 @@ func TestVerifyRejectsAmbiguousJSON(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			compact, err := signer.signer.Sign(tt.payload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = signer.keySet.VerifyJWT(compact, ValidationPolicy{
+			compact := signer.signRaw(t, tt.payload)
+			_, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 				IgnoreIssuer:           true,
 				IgnoreAudiences:        true,
 				AllowedAlgorithms:      []Algorithm{ES256},
+				Type:                   TypeAny,
 				AllowMissingExpiration: true,
 			})
 			requireVerificationError(t, err, VerificationErrorCodeInvalidToken)
@@ -136,10 +174,11 @@ func TestVerifyRejectsAmbiguousJSON(t *testing.T) {
 func TestVerifiedJWTRejectsNullTypedClaim(t *testing.T) {
 	signer := newTestSigner(t)
 	compact := signer.sign(t, map[string]any{"custom": nil})
-	verified, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
+	verified, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 		IgnoreIssuer:           true,
 		IgnoreAudiences:        true,
 		AllowedAlgorithms:      []Algorithm{ES256},
+		Type:                   TypeAny,
 		AllowMissingExpiration: true,
 	})
 	if err != nil {
@@ -162,14 +201,15 @@ func TestVerifiedJWTRejectsNullTypedClaim(t *testing.T) {
 func TestVerifiedJWTGenericAccessors(t *testing.T) {
 	signer := newTestSigner(t)
 	now := time.Now().UTC()
-	compact := signer.sign(t, testClaims("https://issuer.example", "subject", []string{"client"}, now, map[string]any{
+	compact := signer.sign(t, testClaims([]string{"client"}, now, map[string]any{
 		"org_id": "org-1",
 		"admin":  true,
 	}))
-	verified, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
+	verified, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 		ExpectedIssuer:    "https://issuer.example",
 		ExpectedAudiences: []string{"client"},
 		AllowedAlgorithms: []Algorithm{ES256},
+		Type:              TypeAny,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -192,10 +232,11 @@ func TestVerifiedJWTObjectReturnsCopy(t *testing.T) {
 			"nested": map[string]any{"enabled": true},
 		},
 	})
-	verified, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
+	verified, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 		IgnoreIssuer:           true,
 		IgnoreAudiences:        true,
 		AllowedAlgorithms:      []Algorithm{ES256},
+		Type:                   TypeAny,
 		AllowMissingExpiration: true,
 	})
 	if err != nil {
@@ -224,10 +265,11 @@ func TestVerifiedJWTArrayOfJSONValues(t *testing.T) {
 		"roles": []map[string]any{{"name": "admin"}},
 		"empty": []any{},
 	})
-	verified, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
+	verified, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 		IgnoreIssuer:           true,
 		IgnoreAudiences:        true,
 		AllowedAlgorithms:      []Algorithm{ES256},
+		Type:                   TypeAny,
 		AllowMissingExpiration: true,
 	})
 	if err != nil {
@@ -272,10 +314,11 @@ func TestVerifiedJWTNumbersUseFloat64(t *testing.T) {
 			"large": json.Number("9007199254740993"),
 		},
 	})
-	verified, err := signer.keySet.VerifyJWT(compact, ValidationPolicy{
+	verified, err := verifyJWT(t, signer.keySet, compact, ValidationPolicy{
 		IgnoreIssuer:           true,
 		IgnoreAudiences:        true,
 		AllowedAlgorithms:      []Algorithm{ES256},
+		Type:                   TypeAny,
 		AllowMissingExpiration: true,
 	})
 	if err != nil {
