@@ -172,11 +172,16 @@ func TestE2E(t *testing.T) {
 			}
 
 			o2 := &oauth2.Config{
-				ClientID:     clientID,
-				ClientSecret: clientSecret,
-				Endpoint:     provider.Endpoint(),
-				RedirectURL:  cliSvr.URL,
-				Scopes:       []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
+				ClientID: clientID,
+				ClientSecret: func() string {
+					if tc.WithPKCE {
+						return ""
+					}
+					return clientSecret
+				}(),
+				Endpoint:    provider.Endpoint(),
+				RedirectURL: cliSvr.URL,
+				Scopes:      []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
 			}
 
 			var acopts []oauth2.AuthCodeOption
