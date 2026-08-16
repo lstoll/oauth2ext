@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"bytes"
 	"context"
 	jsonv2 "encoding/json/v2"
 	"fmt"
@@ -23,12 +22,14 @@ type Provider struct {
 	Metadata      Metadata
 	HTTPClient    *http.Client
 	CacheDuration time.Duration
+	// VerificationKeys overrides the key source advertised by discovery. It
+	// must not be modified after the provider is first used.
+	VerificationKeys jwt.KeySetSource
 
 	refreshMu        sync.Mutex
 	cacheMu          sync.RWMutex
 	cacheLastFetched time.Time
-	cachedJWKS       []byte
-	cachedKeySet     *jwt.KeySet
+	keys             jwt.KeySetSource
 
 	oidcDiscoveryURL string
 	discoveryIssuer  string
@@ -100,8 +101,19 @@ func (p *Provider) JWKS(ctx context.Context) ([]byte, error) {
 	if err := p.refreshIfNeeded(ctx); err != nil {
 		return nil, err
 	}
-	_, state := p.snapshot()
-	return bytes.Clone(state.jwks), nil
+	_, keys := p.snapshot()
+	if keys == nil {
+		return nil, fmt.Errorf("provider has no verification keys")
+	}
+	keySet, err := keys.KeySet(ctx)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := jsonv2.Marshal(keySet)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling provider verification keys: %w", err)
+	}
+	return encoded, nil
 }
 
 // VerifyJWT verifies a compact JWT against the provider JWKS and policy.
@@ -112,13 +124,17 @@ func (p *Provider) VerifyJWT(ctx context.Context, compact string, policy jwt.Val
 	if err := p.refreshIfNeeded(ctx); err != nil {
 		return nil, err
 	}
-	md, state := p.snapshot()
-	if md == nil || state.keySet == nil {
+	md, keys := p.snapshot()
+	if md == nil || keys == nil {
 		return nil, fmt.Errorf("provider has no verification keys")
+	}
+	keySet, err := keys.KeySet(ctx)
+	if err != nil {
+		return nil, err
 	}
 	policy.ExpectedIssuer = md.issuer()
 	policy.IgnoreIssuer = false
-	return state.keySet.VerifyJWT(compact, policy)
+	return keySet.VerifyJWT(compact, policy)
 }
 
 func algorithmsFromMetadata(algs []string) []jwt.Algorithm {
@@ -136,15 +152,17 @@ func algorithmsFromMetadata(algs []string) []jwt.Algorithm {
 	return out
 }
 
-type cachedState struct {
-	jwks   []byte
-	keySet *jwt.KeySet
-}
-
-func (p *Provider) snapshot() (Metadata, cachedState) {
+func (p *Provider) snapshot() (Metadata, jwt.KeySetSource) {
 	p.cacheMu.RLock()
 	defer p.cacheMu.RUnlock()
-	return p.Metadata, cachedState{jwks: p.cachedJWKS, keySet: p.cachedKeySet}
+	return p.Metadata, p.keySourceLocked()
+}
+
+func (p *Provider) keySourceLocked() jwt.KeySetSource {
+	if p.VerificationKeys != nil {
+		return p.VerificationKeys
+	}
+	return p.keys
 }
 
 // Userinfo will use the token source to query the userinfo endpoint of the
