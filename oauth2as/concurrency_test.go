@@ -54,8 +54,11 @@ func TestRefreshTokenConcurrency(t *testing.T) {
 		t.Fatalf("failed to create grant: %v", err)
 	}
 
-	tok := token.New(tokenUsageRefresh, gid, userID)
 	rtID := "rt-1"
+	tok, err := token.New(tokenUsageRefresh, rtID, gid, userID)
+	if err != nil {
+		t.Fatalf("failed to generate refresh token: %v", err)
+	}
 	rt := &StoredRefreshToken{
 		GrantID:          gid,
 		Token:            tok.Stored(),
@@ -66,7 +69,7 @@ func TestRefreshTokenConcurrency(t *testing.T) {
 		t.Fatalf("failed to create refresh token: %v", err)
 	}
 
-	rtString := tok.ToUser(rtID)
+	rtString := tok.UserToken()
 
 	// Fire concurrent requests
 	var wg sync.WaitGroup

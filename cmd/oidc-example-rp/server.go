@@ -134,23 +134,23 @@ func (s *server) callback(w http.ResponseWriter, req *http.Request) {
 
 	idt, hasIDToken := oidc.GetIDToken(token)
 	if hasIDToken {
-		verifier, err := claims.NewIDTokenVerifier(s.provider)
+		verifier, err := claims.NewIDTokenVerifier(s.provider, claims.IDTokenVerifierOpts{
+			ClientID: &s.oa2Cfg.ClientID,
+		})
 		if err != nil {
-			http.Error(w, fmt.Sprintf("error creating verifier: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("error creating ID token verifier: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		validator := claims.NewIDTokenValidator(&claims.IDTokenValidatorOpts{
-			ClientID: &s.oa2Cfg.ClientID,
+		verifiedID, err := verifier.VerifyTokenResponse(req.Context(), token, claims.IDTokenValidationInput{
+			IgnoreNonce: true,
 		})
-
-		verifiedID, err := verifier.VerifyAndDecodeToken(req.Context(), *token, validator)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error verifying ID token: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		payload, err := verifiedID.JSONPayload()
+		payload, err := verifiedID.Payload()
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error getting ID payload: %v", err), http.StatusInternalServerError)
 			return

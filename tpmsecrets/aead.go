@@ -1,41 +1,43 @@
 package tpmsecrets
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/google/go-tpm/tpm2"
-	"github.com/tink-crypto/tink-go/v2/tink"
 )
 
-// tpmAEAD implements tink.AEAD using TPM sealing.
-// It treats the TPM as a KMS that seals data (keys) to the machine.
-type tpmAEAD struct{}
-
-var _ tink.AEAD = (*tpmAEAD)(nil)
+const maxTPMSealedPartSize = 1 << 20
 
 type sealedBlob struct {
 	Public  []byte
 	Private []byte
 }
 
-func (t *tpmAEAD) Encrypt(plaintext, associatedData []byte) ([]byte, error) {
-	// For KMSEnvelope usage, AAD is typically empty for the DEK encryption.
-	// We ignore it anyway, as they TPM does not support arbitrary AAD binding.
+type keySealer interface {
+	Seal([]byte) (sealedBlob, error)
+	Unseal(sealedBlob) ([]byte, error)
+}
 
+// tpmKeySealer treats the TPM as a KEK: it seals and unseals short random data
+// encryption keys without exposing a general-purpose AEAD abstraction.
+type tpmKeySealer struct{}
+
+func (tpmKeySealer) Seal(plaintext []byte) (sealedBlob, error) {
+	if len(plaintext) == 0 || len(plaintext) > maxTPMSealedPartSize {
+		return sealedBlob{}, fmt.Errorf("invalid plaintext size for TPM sealing")
+	}
 	rwc, err := openTPM()
 	if err != nil {
-		return nil, err
+		return sealedBlob{}, err
 	}
 	defer closeTPM(rwc)
 
 	srk, err := getSRK(rwc)
 	if err != nil {
-		return nil, err
+		return sealedBlob{}, err
 	}
 	defer flushHandle(rwc, srk.Handle)
 
-	// Create a KeyedHash object containing the data
 	create := tpm2.Create{
 		ParentHandle: *srk,
 		InSensitive: tpm2.TPM2BSensitiveCreate{
@@ -50,15 +52,13 @@ func (t *tpmAEAD) Encrypt(plaintext, associatedData []byte) ([]byte, error) {
 			ObjectAttributes: tpm2.TPMAObject{
 				FixedTPM:            true,
 				FixedParent:         true,
-				SensitiveDataOrigin: false, // We provide the data
+				SensitiveDataOrigin: false,
 				UserWithAuth:        true,
 				NoDA:                true,
 			},
 			Parameters: tpm2.NewTPMUPublicParms(tpm2.TPMAlgKeyedHash,
 				&tpm2.TPMSKeyedHashParms{
-					Scheme: tpm2.TPMTKeyedHashScheme{
-						Scheme: tpm2.TPMAlgNull,
-					},
+					Scheme: tpm2.TPMTKeyedHashScheme{Scheme: tpm2.TPMAlgNull},
 				},
 			),
 			Unique: tpm2.NewTPMUPublicID(tpm2.TPMAlgKeyedHash, &tpm2.TPM2BDigest{}),
@@ -67,25 +67,18 @@ func (t *tpmAEAD) Encrypt(plaintext, associatedData []byte) ([]byte, error) {
 
 	rsp, err := create.Execute(rwc)
 	if err != nil {
-		return nil, fmt.Errorf("tpm create: %w", err)
+		return sealedBlob{}, fmt.Errorf("tpm create: %w", err)
 	}
-
-	pubBytes := tpm2.Marshal(rsp.OutPublic)
-
-	blob := sealedBlob{
-		Private: rsp.OutPrivate.Buffer,
-		Public:  pubBytes,
-	}
-
-	return json.Marshal(blob)
+	return sealedBlob{
+		Private: append([]byte(nil), rsp.OutPrivate.Buffer...),
+		Public:  tpm2.Marshal(rsp.OutPublic),
+	}, nil
 }
 
-func (t *tpmAEAD) Decrypt(ciphertext, associatedData []byte) ([]byte, error) {
-	var blob sealedBlob
-	if err := json.Unmarshal(ciphertext, &blob); err != nil {
-		return nil, fmt.Errorf("unmarshal sealed data: %w", err)
+func (tpmKeySealer) Unseal(blob sealedBlob) ([]byte, error) {
+	if len(blob.Public) == 0 || len(blob.Public) > maxTPMSealedPartSize || len(blob.Private) == 0 || len(blob.Private) > maxTPMSealedPartSize {
+		return nil, fmt.Errorf("invalid TPM-sealed key")
 	}
-
 	rwc, err := openTPM()
 	if err != nil {
 		return nil, err
@@ -102,29 +95,25 @@ func (t *tpmAEAD) Decrypt(ciphertext, associatedData []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal public: %w", err)
 	}
-
-	load := tpm2.Load{
+	loadRsp, err := (tpm2.Load{
 		ParentHandle: *srk,
 		InPrivate:    tpm2.TPM2BPrivate{Buffer: blob.Private},
 		InPublic:     *pub,
-	}
-	loadRsp, err := load.Execute(rwc)
+	}).Execute(rwc)
 	if err != nil {
 		return nil, fmt.Errorf("tpm load: %w", err)
 	}
 	defer flushHandle(rwc, loadRsp.ObjectHandle)
 
-	unseal := tpm2.Unseal{
+	rsp, err := (tpm2.Unseal{
 		ItemHandle: tpm2.AuthHandle{
 			Handle: loadRsp.ObjectHandle,
 			Name:   loadRsp.Name,
 			Auth:   tpm2.PasswordAuth(nil),
 		},
-	}
-	rsp, err := unseal.Execute(rwc)
+	}).Execute(rwc)
 	if err != nil {
 		return nil, fmt.Errorf("tpm unseal: %w", err)
 	}
-
-	return rsp.OutData.Buffer, nil
+	return append([]byte(nil), rsp.OutData.Buffer...), nil
 }

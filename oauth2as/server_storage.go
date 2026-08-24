@@ -35,7 +35,7 @@ type loadedAuthCodeGrant struct {
 	authCode          *StoredAuthCode
 	decryptedMetadata []byte
 	additionalState   storedAdditionalState
-	grantKey          *token.DEKHandle
+	grantKey          *token.GrantKey
 }
 
 func (l *loadedAuthCodeGrant) Grant() *StoredGrant              { return l.grant }
@@ -57,7 +57,7 @@ type loadedRefreshTokenGrant struct {
 	refreshToken      *StoredRefreshToken
 	decryptedMetadata []byte
 	additionalState   storedAdditionalState
-	grantKey          *token.DEKHandle
+	grantKey          *token.GrantKey
 }
 
 func (l *loadedRefreshTokenGrant) Grant() *StoredGrant              { return l.grant }
@@ -94,7 +94,7 @@ func (s *Server) getGrantFromAuthCode(ctx context.Context, presentedCode string)
 		return nil, errGrantExpired
 	}
 
-	verifiedToken, err := parsedCode.Verify(tokenUsageAuthCode, storedCode.Code, storedCode.GrantID, grant.UserID)
+	verifiedToken, err := parsedCode.Verify(storedCode.Code, storedCode.GrantID, grant.UserID)
 	if err != nil {
 		return nil, errGrantTokenInvalid
 	}
@@ -112,7 +112,7 @@ func (s *Server) getGrantFromAuthCode(ctx context.Context, presentedCode string)
 	}
 
 	if len(storedCode.EncryptedGrantKey) > 0 {
-		loadedGrant.grantKey, err = verifiedToken.DEKHandle(storedCode.EncryptedGrantKey)
+		loadedGrant.grantKey, err = verifiedToken.UnwrapGrantKey(storedCode.EncryptedGrantKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt grant key: %w", err)
 		}
@@ -122,7 +122,7 @@ func (s *Server) getGrantFromAuthCode(ctx context.Context, presentedCode string)
 		if loadedGrant.grantKey == nil {
 			return nil, fmt.Errorf("grant missing encryption key")
 		}
-		loadedGrant.decryptedMetadata, err = loadedGrant.grantKey.Decrypt(grant.EncryptedMetadata, []byte(storedCode.GrantID))
+		loadedGrant.decryptedMetadata, err = loadedGrant.grantKey.DecryptMetadata(grant.EncryptedMetadata, storedCode.GrantID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt metadata with grant key: %w", err)
 		}
@@ -154,7 +154,7 @@ func (s *Server) getGrantFromRefreshToken(ctx context.Context, presentedToken st
 		return nil, errGrantExpired
 	}
 
-	verifiedToken, err := parsedToken.Verify(tokenUsageRefresh, storedToken.Token, storedToken.GrantID, grant.UserID)
+	verifiedToken, err := parsedToken.Verify(storedToken.Token, storedToken.GrantID, grant.UserID)
 	if err != nil {
 		return nil, errGrantTokenInvalid
 	}
@@ -166,7 +166,7 @@ func (s *Server) getGrantFromRefreshToken(ctx context.Context, presentedToken st
 	}
 
 	if len(storedToken.EncryptedGrantKey) > 0 {
-		loadedGrant.grantKey, err = verifiedToken.DEKHandle(storedToken.EncryptedGrantKey)
+		loadedGrant.grantKey, err = verifiedToken.UnwrapGrantKey(storedToken.EncryptedGrantKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt grant key: %w", err)
 		}
@@ -182,7 +182,7 @@ func (s *Server) getGrantFromRefreshToken(ctx context.Context, presentedToken st
 		if loadedGrant.grantKey == nil {
 			return nil, fmt.Errorf("grant missing encryption key")
 		}
-		loadedGrant.decryptedMetadata, err = loadedGrant.grantKey.Decrypt(grant.EncryptedMetadata, []byte(storedToken.GrantID))
+		loadedGrant.decryptedMetadata, err = loadedGrant.grantKey.DecryptMetadata(grant.EncryptedMetadata, storedToken.GrantID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt metadata with grant key: %w", err)
 		}
@@ -205,20 +205,25 @@ func (s *Server) putGrantWithAuthCode(ctx context.Context, loadedGrant *loadedAu
 		return "", "", fmt.Errorf("failed to create grant: %w", err)
 	}
 
-	// Create token
-	tok := token.New(tokenUsageAuthCode, grid, loadedGrant.grant.UserID)
+	// Create the token with its final record ID so all derived material is bound
+	// to the exact storage record.
+	cid := newUUIDv4()
+	tok, err := token.New(tokenUsageAuthCode, cid, grid, loadedGrant.grant.UserID)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate authorization code: %w", err)
+	}
 
 	var encryptedGrantKey []byte
 	if len(loadedGrant.decryptedMetadata) > 0 {
 		if loadedGrant.grantKey == nil {
-			loadedGrant.grantKey, err = token.GenerateDEK()
+			loadedGrant.grantKey, err = token.GenerateGrantKey()
 			if err != nil {
 				return "", "", fmt.Errorf("failed to generate grant key: %w", err)
 			}
 		}
 
 		// Encrypt metadata with the Grant Key
-		encryptedMetadata, err := loadedGrant.grantKey.Encrypt(loadedGrant.decryptedMetadata, []byte(grid))
+		encryptedMetadata, err := loadedGrant.grantKey.EncryptMetadata(loadedGrant.decryptedMetadata, grid)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to encrypt metadata: %w", err)
 		}
@@ -230,13 +235,11 @@ func (s *Server) putGrantWithAuthCode(ctx context.Context, loadedGrant *loadedAu
 		}
 
 		// Encrypt the Grant Key with the new Token
-		encryptedGrantKey, err = loadedGrant.grantKey.EncryptDEKToToken(&tok)
+		encryptedGrantKey, err = loadedGrant.grantKey.WrapForToken(&tok)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to encrypt grant key: %w", err)
 		}
 	}
-
-	cid := newUUIDv4()
 
 	// Create the auth code
 	err = s.config.Storage.CreateAuthCode(ctx, cid, &StoredAuthCode{
@@ -250,7 +253,7 @@ func (s *Server) putGrantWithAuthCode(ctx context.Context, loadedGrant *loadedAu
 		return "", "", fmt.Errorf("failed to create auth code: %w", err)
 	}
 
-	return grid, tok.ToUser(cid), nil
+	return grid, tok.UserToken(), nil
 }
 
 // putGrantWithRefreshToken creates or updates the grant including encrypted data
@@ -264,7 +267,7 @@ func (s *Server) putGrantWithRefreshToken(ctx context.Context, loadedGrant *load
 
 	if len(loadedGrant.decryptedMetadata) > 0 {
 		if loadedGrant.grantKey == nil {
-			loadedGrant.grantKey, err = token.GenerateDEK()
+			loadedGrant.grantKey, err = token.GenerateGrantKey()
 			if err != nil {
 				return "", "", "", fmt.Errorf("failed to generate grant key: %w", err)
 			}
@@ -281,7 +284,7 @@ func (s *Server) putGrantWithRefreshToken(ctx context.Context, loadedGrant *load
 
 		if len(loadedGrant.decryptedMetadata) > 0 {
 			// Encrypt metadata with the Grant Key
-			encryptedMetadata, err := loadedGrant.grantKey.Encrypt(loadedGrant.decryptedMetadata, []byte(grid))
+			encryptedMetadata, err := loadedGrant.grantKey.EncryptMetadata(loadedGrant.decryptedMetadata, grid)
 			if err != nil {
 				return "", "", "", fmt.Errorf("failed to encrypt metadata: %w", err)
 			}
@@ -295,7 +298,7 @@ func (s *Server) putGrantWithRefreshToken(ctx context.Context, loadedGrant *load
 		grid = loadedGrant.grantID
 		if len(loadedGrant.decryptedMetadata) > 0 {
 			// Encrypt metadata with the Grant Key
-			encryptedMetadata, err := loadedGrant.grantKey.Encrypt(loadedGrant.decryptedMetadata, []byte(grid))
+			encryptedMetadata, err := loadedGrant.grantKey.EncryptMetadata(loadedGrant.decryptedMetadata, grid)
 			if err != nil {
 				return "", "", "", fmt.Errorf("failed to encrypt metadata: %w", err)
 			}
@@ -307,17 +310,19 @@ func (s *Server) putGrantWithRefreshToken(ctx context.Context, loadedGrant *load
 		}
 	}
 
-	tok := token.New(tokenUsageRefresh, grid, loadedGrant.grant.UserID)
+	tid := newUUIDv4()
+	tok, err := token.New(tokenUsageRefresh, tid, grid, loadedGrant.grant.UserID)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to generate refresh token: %w", err)
+	}
 
 	var encryptedGrantKey []byte
 	if loadedGrant.grantKey != nil {
-		encryptedGrantKey, err = loadedGrant.grantKey.EncryptDEKToToken(&tok)
+		encryptedGrantKey, err = loadedGrant.grantKey.WrapForToken(&tok)
 		if err != nil {
 			return "", "", "", fmt.Errorf("failed to encrypt grant key: %w", err)
 		}
 	}
-
-	tid := newUUIDv4()
 
 	err = s.config.Storage.CreateRefreshToken(ctx, tid, &StoredRefreshToken{
 		GrantID:           grid,
@@ -330,5 +335,5 @@ func (s *Server) putGrantWithRefreshToken(ctx context.Context, loadedGrant *load
 		return "", "", "", fmt.Errorf("failed to create refresh token: %w", err)
 	}
 
-	return grid, tok.ToUser(tid), tid, nil
+	return grid, tok.UserToken(), tid, nil
 }

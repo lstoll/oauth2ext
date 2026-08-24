@@ -15,10 +15,7 @@ func TestTransport(t *testing.T) {
 		t.Fatalf("failed to create signer: %v", err)
 	}
 
-	// TODO - we might want to expose the thumbprint from the encoder or
-	// something? Let's see how it plays out.
-
-	expectedThumbprint, err := calculateJWKThumbprint(signer.jwk)
+	expectedThumbprint, err := signer.Thumbprint()
 	if err != nil {
 		t.Fatalf("failed to calculate thumbprint: %v", err)
 	}
@@ -36,7 +33,12 @@ func TestTransport(t *testing.T) {
 		},
 	}
 
-	resp, err := client.Get(server.URL + "/test/path")
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/test/path?ignored=true", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "DPoP access-token")
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -51,19 +53,21 @@ func TestTransport(t *testing.T) {
 
 	validator, err := NewValidator(&ValidatorOpts{
 		ExpectedThumbprint: expectedThumbprint,
+		ExpectedHTM:        new(http.MethodGet),
+		ExpectedHTU:        new(server.URL + "/test/path"),
 	})
 	if err != nil {
 		t.Fatalf("failed to create validator: %v", err)
 	}
 
 	verifier := &Verifier{}
-	verifiedJWT, err := verifier.VerifyAndDecode(capturedDPoP, validator)
+	proof, err := verifier.VerifyAndDecode(capturedDPoP, validator)
 	if err != nil {
 		t.Fatalf("failed to verify DPoP proof: %v", err)
 	}
 
-	if verifiedJWT == nil {
-		t.Error("verifiedJWT is nil")
+	if proof.AccessTokenHash != hashAccessToken("access-token") {
+		t.Errorf("ath: got %q, want %q", proof.AccessTokenHash, hashAccessToken("access-token"))
 	}
 
 	t.Logf("Successfully verified DPoP proof with thumbprint: %s", expectedThumbprint)

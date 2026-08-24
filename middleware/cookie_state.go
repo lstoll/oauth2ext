@@ -102,6 +102,7 @@ func (c *Cookiestore) GetOIDCSession(r *http.Request) (*SessionData, error) {
 
 			sd.Logins = append(sd.Logins, SessionDataLogin{
 				State:         state,
+				Nonce:         v.Get("no"),
 				PKCEChallenge: v.Get("pc"), // pkce_challenge
 				ReturnTo:      v.Get("rt"), // return_to
 				Expires:       int(expires),
@@ -175,14 +176,14 @@ func (c *Cookiestore) SaveOIDCSession(w http.ResponseWriter, r *http.Request, d 
 			state := after
 			if _, isActive := activeLoginStates[state]; !isActive {
 				// This state is no longer active or was truncated, delete its cookie
-				_ = setCookieIfNotSet(w, r, c.newLoginStateCookie(state, "", "", 0))
+				_ = setCookieIfNotSet(w, r, c.newLoginStateCookie(state, "", "", "", 0))
 			}
 		}
 	}
 
 	// Set cookies for all currently active (and potentially new) login states
 	for state, loginData := range activeLoginStates {
-		cookie := c.newLoginStateCookie(state, loginData.PKCEChallenge, loginData.ReturnTo, loginData.Expires)
+		cookie := c.newLoginStateCookie(state, loginData.Nonce, loginData.PKCEChallenge, loginData.ReturnTo, loginData.Expires)
 		_ = setCookieIfNotSet(w, r, cookie)
 	}
 
@@ -213,10 +214,13 @@ func (c *Cookiestore) newTokenCookie(value string, expires time.Time) *http.Cook
 
 // newLoginStateCookie creates a cookie for an individual login state.
 // The expiration of the cookie is tied to the login state's expiration.
-func (c *Cookiestore) newLoginStateCookie(state, pkceChallenge, returnTo string, expires int) *http.Cookie {
+func (c *Cookiestore) newLoginStateCookie(state, nonce, pkceChallenge, returnTo string, expires int) *http.Cookie {
 	opts := c.getCookieOpts()
 	v := url.Values{}
 	v.Set("ex", strconv.FormatInt(int64(expires), 10))
+	if nonce != "" {
+		v.Set("no", nonce)
+	}
 	if pkceChallenge != "" {
 		v.Set("pc", pkceChallenge)
 	}

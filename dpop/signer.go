@@ -6,198 +6,178 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
-	"hash"
-	"maps"
+	"time"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
-	"github.com/tink-crypto/tink-go/v2/signature/subtle"
+	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/cryptosigner"
 )
 
-// Signer is used to sign DPoP proofs
+// ProofOptions contains the claims used to create a DPoP proof. IssuedAt and
+// JWTID are generated when omitted.
+type ProofOptions struct {
+	HTTPMethod string
+	HTTPURI    string
+	IssuedAt   time.Time
+	JWTID      string
+	Nonce      string
+	// AccessToken, when set, is hashed into the ath claim.
+	AccessToken string
+}
+
+// Signer signs DPoP proofs with a crypto.Signer.
 type Signer struct {
 	signer crypto.Signer
 	jwk    map[string]any
-	// x5c, when non-empty, is the RFC 7515 x5c header (base64-encoded DER
-	// PKIX), leaf first, same order as passed to NewSignerWithCertificateChain.
-	x5c []string
+	thumb  string
+	x5c    []string
 }
 
-// NewSigner creates a new Signer using the provided [crypto.Signer].
-// The signer should represent a hardware bound or otherwise unextractable
-// signing key. The JWK will be calculated from the signer's public key.
+// NewSigner creates a Signer using signer. The key must be an RSA key of at
+// least 2048 bits or an ECDSA P-256, P-384, or P-521 key.
 func NewSigner(signer crypto.Signer) (*Signer, error) {
+	if signer == nil {
+		return nil, fmt.Errorf("dpop: signer is required")
+	}
+	if _, err := determineAlgorithmFromKey(signer.Public()); err != nil {
+		return nil, err
+	}
 	jwk, err := publicKeyToJWK(signer.Public())
 	if err != nil {
-		return nil, fmt.Errorf("failed to create JWK: %v", err)
+		return nil, fmt.Errorf("creating JWK: %w", err)
 	}
-	return &Signer{
-		signer: signer,
-		jwk:    jwk,
-	}, nil
+	thumbprint, err := calculateJWKThumbprint(jwk)
+	if err != nil {
+		return nil, fmt.Errorf("calculating JWK thumbprint: %w", err)
+	}
+	return &Signer{signer: signer, jwk: jwk, thumb: thumbprint}, nil
 }
 
-// NewSignerWithCertificateChain returns a Signer that includes an x5c JWT
-// header built from chain. The leaf certificate (chain[0]) must contain the
-// same public key as signer. Remaining entries are intermediates and/or the
-// root, in order from leaf toward trust.
+// Thumbprint returns the RFC 7638 SHA-256 thumbprint of the signing key.
+func (s *Signer) Thumbprint() (string, error) {
+	if s == nil || s.thumb == "" {
+		return "", fmt.Errorf("dpop: invalid signer")
+	}
+	return s.thumb, nil
+}
+
+// NewSignerWithCertificateChain returns a Signer that includes an x5c header.
+// The leaf certificate must contain the signer's public key.
 //
-// Note: This is an experimental, non-standard extension to the DPoP spec. It
-// presents privacy concerns as it potntially exposes information about the
-// user, and is intended for use in enterprise scenarios only.
+// This is an experimental, non-standard DPoP extension intended for enterprise
+// deployments. Sending a certificate chain can disclose identifying data.
 func NewSignerWithCertificateChain(signer crypto.Signer, chain []*x509.Certificate) (*Signer, error) {
+	if signer == nil {
+		return nil, fmt.Errorf("dpop: signer is required")
+	}
 	if len(chain) == 0 {
 		return nil, fmt.Errorf("certificate chain is empty")
 	}
 	if !leafCertMatchesSigner(chain[0], signer.Public()) {
 		return nil, fmt.Errorf("leaf certificate public key does not match signer")
 	}
-	jwk, err := publicKeyToJWK(signer.Public())
+	s, err := NewSigner(signer)
 	if err != nil {
-		return nil, fmt.Errorf("creating JWK: %w", err)
+		return nil, err
 	}
-	x5c := make([]string, len(chain))
-	for i, c := range chain {
-		x5c[i] = base64.StdEncoding.EncodeToString(c.Raw)
+	s.x5c = make([]string, len(chain))
+	for i, certificate := range chain {
+		s.x5c[i] = base64.StdEncoding.EncodeToString(certificate.Raw)
 	}
-	return &Signer{
-		signer: signer,
-		jwk:    jwk,
-		x5c:    x5c,
-	}, nil
+	return s, nil
 }
 
-func leafCertMatchesSigner(leaf *x509.Certificate, pub crypto.PublicKey) bool {
-	switch cp := leaf.PublicKey.(type) {
+func leafCertMatchesSigner(leaf *x509.Certificate, publicKey crypto.PublicKey) bool {
+	if leaf == nil {
+		return false
+	}
+	switch certificateKey := leaf.PublicKey.(type) {
 	case *ecdsa.PublicKey:
-		sp, ok := pub.(*ecdsa.PublicKey)
-		return ok && cp.Equal(sp)
+		signerKey, ok := publicKey.(*ecdsa.PublicKey)
+		return ok && certificateKey.Equal(signerKey)
 	case *rsa.PublicKey:
-		sp, ok := pub.(*rsa.PublicKey)
-		return ok && cp.Equal(sp)
+		signerKey, ok := publicKey.(*rsa.PublicKey)
+		return ok && certificateKey.Equal(signerKey)
 	default:
 		return false
 	}
 }
 
-// SignAndEncode signs the JWT as a DPoP proof, and returns the compact JWT.
-func (e *Signer) SignAndEncode(raw *jwt.RawJWTOptions) (string, error) {
-	raw.TypeHeader = new("dpop+jwt")
-	rawJWT, err := jwt.NewRawJWT(raw)
-	if err != nil {
-		return "", fmt.Errorf("creating raw JWT: %w", err)
+// SignAndEncode creates and signs a compact DPoP proof.
+func (s *Signer) SignAndEncode(options ProofOptions) (string, error) {
+	if s == nil || s.signer == nil {
+		return "", fmt.Errorf("dpop: invalid signer")
 	}
-	headers := map[string]any{"jwk": e.jwk}
-	if len(e.x5c) > 0 {
-		headers["x5c"] = e.x5c
+	if options.HTTPMethod == "" {
+		return "", fmt.Errorf("dpop: HTTPMethod is required")
 	}
-	return e.encodeWithHeaders(rawJWT, headers)
+	if options.HTTPURI == "" {
+		return "", fmt.Errorf("dpop: HTTPURI is required")
+	}
+	if options.IssuedAt.IsZero() {
+		options.IssuedAt = time.Now()
+	}
+	if options.JWTID == "" {
+		options.JWTID = rand.Text()
+	}
+	payload := map[string]any{
+		"jti": options.JWTID,
+		"htm": options.HTTPMethod,
+		"htu": options.HTTPURI,
+		"iat": float64(options.IssuedAt.Unix()) + float64(options.IssuedAt.Nanosecond())/float64(time.Second),
+	}
+	if options.Nonce != "" {
+		payload["nonce"] = options.Nonce
+	}
+	if options.AccessToken != "" {
+		payload["ath"] = hashAccessToken(options.AccessToken)
+	}
+	return s.signPayload(payload, nil, true)
 }
 
-// encodeWithHeaders encodes a JWT with additional custom headers. If a key
-// exists in both, the additionalHeaders value takes precedence.
-func (e *Signer) encodeWithHeaders(raw *jwt.RawJWT, additionalHeaders map[string]any) (string, error) {
-	payload, err := raw.JSONPayload()
-	if err != nil {
-		return "", fmt.Errorf("getting JSON payload: %w", err)
-	}
+func hashAccessToken(accessToken string) string {
+	digest := sha256.Sum256([]byte(accessToken))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
 
-	alg, err := e.determineAlgorithm()
+// signPayload exists for malformed-proof tests. defaultHeaders controls whether
+// the signer's jwk and x5c values are included.
+func (s *Signer) signPayload(payload map[string]any, headers map[string]any, defaultHeaders bool) (string, error) {
+	algorithm, err := determineAlgorithmFromKey(s.signer.Public())
 	if err != nil {
 		return "", fmt.Errorf("determining algorithm: %w", err)
 	}
-
-	header := map[string]any{
-		"alg": alg,
-	}
-
-	if raw.HasTypeHeader() {
-		typ, err := raw.TypeHeader()
-		if err == nil {
-			header["typ"] = typ
+	signerOptions := new(jose.SignerOptions).WithType("dpop+jwt")
+	if defaultHeaders {
+		signerOptions.WithHeader("jwk", s.jwk)
+		if len(s.x5c) > 0 {
+			signerOptions.WithHeader("x5c", s.x5c)
 		}
 	}
-
-	maps.Copy(header, additionalHeaders)
-
-	headerJSON, err := json.Marshal(header)
-	if err != nil {
-		return "", fmt.Errorf("encoding header: %w", err)
+	for name, value := range headers {
+		signerOptions.WithHeader(jose.HeaderKey(name), value)
 	}
-
-	headerB64 := base64.RawURLEncoding.EncodeToString(headerJSON)
-	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
-
-	signingInput := headerB64 + "." + payloadB64
-
-	hasher, hashOpts, err := e.getHasher(alg)
+	jwsSigner, err := jose.NewSigner(jose.SigningKey{
+		Algorithm: jose.SignatureAlgorithm(algorithm),
+		Key:       cryptosigner.Opaque(s.signer),
+	}, signerOptions)
 	if err != nil {
-		return "", fmt.Errorf("getting hasher: %w", err)
+		return "", fmt.Errorf("creating JWS signer: %w", err)
 	}
-
-	hasher.Write([]byte(signingInput))
-	hashed := hasher.Sum(nil)
-
-	signature, err := e.signer.Sign(rand.Reader, hashed, hashOpts)
+	payloadJSON, err := jsonv2.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("encoding payload: %w", err)
+	}
+	signed, err := jwsSigner.Sign(payloadJSON)
 	if err != nil {
 		return "", fmt.Errorf("signing: %w", err)
 	}
-
-	if ecdsaKey, ok := e.signer.Public().(*ecdsa.PublicKey); ok {
-		// JWT uses IEEE P1363 format for ECDSA signatures but Go returns ASN.1
-		// DER format, so convert it.
-		tsig, err := subtle.DecodeECDSASignature(signature, "DER")
-		if err != nil {
-			return "", fmt.Errorf("decoding ECDSA signature: %w", err)
-		}
-		jwtsig, err := tsig.EncodeECDSASignature("IEEE_P1363", ecdsaKey.Curve.Params().Name)
-		if err != nil {
-			return "", fmt.Errorf("encoding ECDSA signature: %w", err)
-		}
-		signature = jwtsig
+	compact, err := signed.CompactSerialize()
+	if err != nil {
+		return "", fmt.Errorf("serializing proof: %w", err)
 	}
-
-	signatureB64 := base64.RawURLEncoding.EncodeToString(signature)
-
-	return signingInput + "." + signatureB64, nil
-}
-
-func (e *Signer) determineAlgorithm() (string, error) {
-	pubKey := e.signer.Public()
-
-	switch key := pubKey.(type) {
-	case *rsa.PublicKey:
-		// TODO - how best to support other algs? Add an opt?
-		return "RS256", nil
-	case *ecdsa.PublicKey:
-		switch key.Curve.Params().BitSize {
-		case 256:
-			return "ES256", nil
-		case 384:
-			return "ES384", nil
-		case 521:
-			return "ES512", nil
-		default:
-			return "", fmt.Errorf("unsupported ECDSA curve size: %d", key.Curve.Params().BitSize)
-		}
-	default:
-		return "", fmt.Errorf("unsupported public key type: %T", pubKey)
-	}
-}
-
-func (e *Signer) getHasher(alg string) (hash.Hash, crypto.SignerOpts, error) {
-	switch alg {
-	case "RS256", "ES256":
-		return sha256.New(), crypto.SHA256, nil
-	case "RS384", "ES384":
-		return sha512.New384(), crypto.SHA384, nil
-	case "RS512", "ES512":
-		return sha512.New(), crypto.SHA512, nil
-	default:
-		return nil, nil, fmt.Errorf("unsupported algorithm: %s", alg)
-	}
+	return compact, nil
 }
