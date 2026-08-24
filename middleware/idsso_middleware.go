@@ -286,13 +286,7 @@ func (h *IDSSOHandler[IDClaims]) authenticateCallback(r *http.Request, session *
 
 	session.Token = &oidc.TokenWithID{Token: token}
 
-	returnTo := foundLogin.ReturnTo
-	if returnTo == "" {
-		returnTo = h.BaseURL
-		if returnTo == "" {
-			returnTo = "/"
-		}
-	}
+	returnTo := resolveReturnTo(foundLogin.ReturnTo, h.BaseURL)
 
 	session.Logins = slices.DeleteFunc(session.Logins, func(sl SessionDataLogin) bool {
 		return sl.State == state
@@ -318,7 +312,7 @@ func (h *IDSSOHandler[IDClaims]) startAuthentication(r *http.Request, session *S
 	}
 
 	if r.Method == http.MethodGet {
-		returnTo = r.URL.RequestURI()
+		returnTo = sanitizeReturnTo(r.URL.RequestURI())
 	}
 	session.Logins = append(session.Logins, SessionDataLogin{
 		State:         state,

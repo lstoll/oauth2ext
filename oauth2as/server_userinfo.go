@@ -1,24 +1,44 @@
 package oauth2as
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
+	"time"
 
 	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
+	"lds.li/oauth2ext/oidc"
 )
 
 type UserinfoHandler func(ctx context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error)
 
 // UserinfoRequest contains information about this request to the UserInfo
-// endpoint
+// endpoint. The handler is responsible for returning only claims permitted by
+// GrantedScopes.
 type UserinfoRequest struct {
 	// Subject is the sub of the user this request is for.
 	Subject string
+	// GrantID is the ID of the grant associated with the access token.
+	GrantID string
+	// Metadata is unencrypted application metadata from the grant.
+	Metadata []byte
+	// GrantedScopes are the scopes granted on the associated grant.
+	GrantedScopes []string
+	// ACR is the Authentication Context Class Reference from the grant.
+	ACR string
+	// AMR lists the Authentication Methods References from the grant.
+	AMR []string
+	// AuthenticatedAt is when the End-User last actively authenticated.
+	AuthenticatedAt time.Time
+	// MaxAge is the max_age from the original authorization request, if any.
+	MaxAge *int
 }
 
 // UserinfoResponse contains information to response to the userinfo response.
@@ -28,10 +48,9 @@ type UserinfoResponse struct {
 	Identity any
 }
 
-// UserinfoHandler can handle a request to the userinfo endpoint. If the request is not
-// valid, an error will be returned. Otherwise handler will be invoked with
-// information about the requestor passed in. This handler should write the
-// appropriate response data in JSON format to the passed writer.
+// UserinfoHandler verifies the access token, loads and validates its grant,
+// and invokes the configured handler. Claim selection by scope remains the
+// application handler's responsibility.
 //
 // https://openid.net/specs/openid-connect-core-1_0.html#UserInfoResponse
 func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
@@ -48,34 +67,67 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// TODO: Implement scope and audience validation on the access token
-
 	atJWT, err := s.verifyAccessToken(req.Context(), authSp[1])
 	if err != nil {
 		slog.ErrorContext(req.Context(), "invalid access token", "error", err)
-		be := &oauth2proto.BearerError{Code: oauth2proto.BearerErrorCodeInvalidRequest, Description: "invalid access token"}
-		herr := &oauth2proto.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), Cause: err}
-		_ = oauth2proto.WriteError(w, req, herr)
+		writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", err)
 		return
 	}
 
 	atSub, err := atJWT.Subject()
 	if err != nil {
 		slog.ErrorContext(req.Context(), "invalid access token", "error", err)
-		be := &oauth2proto.BearerError{Code: oauth2proto.BearerErrorCodeInvalidRequest, Description: "invalid access token"}
-		herr := &oauth2proto.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), Cause: err}
-		_ = oauth2proto.WriteError(w, req, herr)
+		writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", err)
 		return
 	}
 
-	// If we make it to here, we have been presented a valid token for a valid session. Run the handler.
+	grantID, err := atJWT.String(claimGrantID)
+	if err != nil {
+		slog.ErrorContext(req.Context(), "invalid access token grant ID claim", "error", err)
+		writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", err)
+		return
+	}
+	tokenClientID, err := atJWT.String("client_id")
+	if err != nil {
+		slog.ErrorContext(req.Context(), "invalid access token client ID claim", "error", err)
+		writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", err)
+		return
+	}
+	grant, err := s.config.Storage.GetGrant(req.Context(), grantID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			slog.WarnContext(req.Context(), "grant not found for access token", "grantID", grantID)
+			writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", err)
+			return
+		}
+		slog.ErrorContext(req.Context(), "failed to load grant for userinfo", "grantID", grantID, "error", err)
+		herr := &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error loading grant"}
+		_ = oauth2proto.WriteError(w, req, herr)
+		return
+	}
+	if tokenClientID != grant.ClientID {
+		writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", nil)
+		return
+	}
+	if !slices.Contains(grant.GrantedScopes, oidc.ScopeOpenID) {
+		be := &oauth2proto.BearerError{Code: oauth2proto.BearerErrorCodeInsufficientScope, Description: "openid scope required"}
+		herr := &oauth2proto.HTTPError{Code: http.StatusForbidden, WWWAuthenticate: be.String(), CauseMsg: "openid scope required"}
+		_ = oauth2proto.WriteError(w, req, herr)
+		return
+	}
 	uireq := &UserinfoRequest{
-		Subject: atSub,
+		Subject:         atSub,
+		GrantID:         grantID,
+		Metadata:        bytes.Clone(grant.Metadata),
+		GrantedScopes:   slices.Clone(grant.GrantedScopes),
+		ACR:             grant.ACR,
+		AMR:             slices.Clone(grant.AMR),
+		AuthenticatedAt: authTimeFromGrant(grant),
+		MaxAge:          maxAgeFromGrant(grant),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 
-	// TODO: Return an error if UserinfoHandler is not configured
 	uiresp, err := s.config.UserinfoHandler(req.Context(), uireq)
 	if err != nil {
 		herr := &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "error in user handler"}
@@ -83,7 +135,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if uiresp.Identity == nil {
-		herr := &oauth2proto.HTTPError{Code: http.StatusInternalServerError, Cause: err, CauseMsg: "userinfo has no identity"}
+		herr := &oauth2proto.HTTPError{Code: http.StatusInternalServerError, CauseMsg: "userinfo has no identity"}
 		_ = oauth2proto.WriteError(w, req, herr)
 		return
 	}
@@ -94,6 +146,12 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		_ = oauth2proto.WriteError(w, req, err)
 		return
 	}
+}
+
+func writeUserinfoBearerError(w http.ResponseWriter, req *http.Request, code oauth2proto.BearerErrorCode, description string, cause error) { // nolint:unparam // code may vary in future.
+	bearerError := &oauth2proto.BearerError{Code: code, Description: description}
+	httpError := &oauth2proto.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: bearerError.String(), Cause: cause}
+	_ = oauth2proto.WriteError(w, req, httpError)
 }
 
 func (s *Server) verifyAccessToken(ctx context.Context, compact string) (*jwt.VerifiedJWT, error) {

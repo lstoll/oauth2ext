@@ -82,6 +82,7 @@ func TestRefreshTokenConcurrency(t *testing.T) {
 			v.Set("grant_type", "refresh_token")
 			v.Set("refresh_token", rtString)
 			v.Set("client_id", "test-client")
+			v.Set("client_secret", "test-secret")
 
 			req := httptest.NewRequest("POST", "/token", nil)
 			req.Form = v

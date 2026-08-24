@@ -66,6 +66,46 @@ func TestParseAuthRequest(t *testing.T) {
 			WantErr:     true,
 			WantErrCode: AuthErrorCodeInvalidRequest,
 		},
+		{
+			Name:        "Invalid max_age",
+			Query:       "response_type=code&client_id=client&max_age=bad",
+			WantErr:     true,
+			WantErrCode: AuthErrorCodeInvalidRequest,
+		},
+		{
+			Name:        "Empty max_age",
+			Query:       "response_type=code&client_id=client&max_age=",
+			WantErr:     true,
+			WantErrCode: AuthErrorCodeInvalidRequest,
+		},
+		{
+			Name:  "max_age zero",
+			Query: "response_type=code&client_id=client&max_age=0",
+			CmpReq: &AuthRequest{
+				ClientID:     "client",
+				ResponseType: ResponseTypeCode,
+				MaxAge:       new(0),
+				Raw: url.Values{
+					"client_id":     {"client"},
+					"response_type": {"code"},
+					"max_age":       {"0"},
+				},
+			},
+		},
+		{
+			Name:  "max_age set",
+			Query: "response_type=code&client_id=client&max_age=3600",
+			CmpReq: &AuthRequest{
+				ClientID:     "client",
+				ResponseType: ResponseTypeCode,
+				MaxAge:       new(3600),
+				Raw: url.Values{
+					"client_id":     {"client"},
+					"response_type": {"code"},
+					"max_age":       {"3600"},
+				},
+			},
+		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
 			meth := tc.Method

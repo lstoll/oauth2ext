@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,6 +112,12 @@ func TestCodeToken(t *testing.T) {
 
 		if tresp.AccessToken == "" {
 			t.Error("token request should have returned an access token, but got none")
+		}
+		if _, ok := tresp.ExtraParams["id_token"]; ok {
+			t.Error("token response included an ID token without the openid scope")
+		}
+		if !slices.Equal(tresp.Scopes, []string{oidc.ScopeOfflineAccess}) {
+			t.Errorf("token response scopes: got %v", tresp.Scopes)
 		}
 	})
 
@@ -218,14 +225,14 @@ func TestCodeToken(t *testing.T) {
 		grant := &StoredGrant{
 			UserID:        "testsub",
 			ClientID:      rs256ClientID,
-			GrantedScopes: []string{oidc.ScopeOfflineAccess},
+			GrantedScopes: []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
 			GrantedAt:     time.Now(),
 			ExpiresAt:     time.Now().Add(1 * time.Minute),
 			Request: &AuthRequest{
 				ClientID:    rs256ClientID,
 				RedirectURI: rs256ClientRedirect,
 				State:       "",
-				Scopes:      []string{oidc.ScopeOfflineAccess},
+				Scopes:      []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
 			},
 		}
 
@@ -434,6 +441,23 @@ func TestRefreshToken(t *testing.T) {
 		}
 	})
 
+	t.Run("Invalid client secret should fail", func(t *testing.T) {
+		o := newOIDC()
+		refreshToken := newRefreshGrant(t, o.config.Storage)
+
+		treq := &oauth2proto.TokenRequest{
+			GrantType:    oauth2proto.GrantTypeRefreshToken,
+			RefreshToken: refreshToken,
+			ClientID:     clientID,
+			ClientSecret: "invalid-secret",
+		}
+
+		_, err := o.refreshToken(context.Background(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
+		if err, ok := err.(*oauth2proto.TokenError); !ok || err.ErrorCode != oauth2proto.TokenErrorCodeUnauthorizedClient {
+			t.Errorf("want unauthorized_client error, got: %v", err)
+		}
+	})
+
 	t.Run("Refresh token with handler errors", func(t *testing.T) {
 		o := newOIDC()
 		refreshToken := newRefreshGrant(t, o.config.Storage)
@@ -510,14 +534,16 @@ func TestUserinfo(t *testing.T) {
 		return nil
 	}
 
-	signAccessToken := func(tokenIssuer string, expiresAt time.Time) string {
+	signAccessToken := func(tokenIssuer string, expiresAt time.Time, additional map[string]any) string {
 		signer, _ := testSignerVerifier(t)
-		payload, err := jsonv2.Marshal(map[string]any{
+		claims := map[string]any{
 			"iss": tokenIssuer,
 			"sub": "sub",
 			"iat": time.Now().Unix(),
 			"exp": expiresAt.Unix(),
-		})
+		}
+		maps.Copy(claims, additional)
+		payload, err := jsonv2.Marshal(claims)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -535,7 +561,7 @@ func TestUserinfo(t *testing.T) {
 		Name string
 		// Setup should return both a session to be persisted, and an access
 		// token
-		Setup   func(t *testing.T) (accessToken string)
+		Setup   func(t *testing.T, storage *MemStorage) (accessToken string)
 		Handler func(w io.Writer, uireq *UserinfoRequest) error
 		// WantErr signifies that we expect an error
 		WantErr bool
@@ -544,8 +570,15 @@ func TestUserinfo(t *testing.T) {
 	}{
 		{
 			Name: "Simple output, valid session",
-			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(issuer, time.Now().Add(time.Minute))
+			Setup: func(t *testing.T, storage *MemStorage) (accessToken string) {
+				grantID, err := storage.CreateGrant(t.Context(), &StoredGrant{
+					UserID: "sub", ClientID: "client-id", GrantedScopes: []string{oidc.ScopeOpenID},
+					GrantedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return signAccessToken(issuer, time.Now().Add(time.Minute), map[string]any{claimGrantID: grantID, "client_id": "client-id"})
 			},
 			Handler: echoHandler,
 			WantJSON: map[string]any{
@@ -554,23 +587,23 @@ func TestUserinfo(t *testing.T) {
 		},
 		{
 			Name: "Token for other issuer",
-			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken("http://other", time.Now().Add(time.Minute))
+			Setup: func(t *testing.T, _ *MemStorage) (accessToken string) {
+				return signAccessToken("http://other", time.Now().Add(time.Minute), nil)
 			},
 			Handler: echoHandler,
 			WantErr: true,
 		},
 		{
 			Name: "Expired access token",
-			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(issuer, time.Now().Add(-time.Minute))
+			Setup: func(t *testing.T, _ *MemStorage) (accessToken string) {
+				return signAccessToken(issuer, time.Now().Add(-time.Minute), nil)
 			},
 			Handler: echoHandler,
 			WantErr: true,
 		},
 		{
 			Name: "No access token",
-			Setup: func(t *testing.T) (accessToken string) {
+			Setup: func(t *testing.T, _ *MemStorage) (accessToken string) {
 				return ""
 			},
 			Handler: echoHandler,
@@ -608,7 +641,7 @@ func TestUserinfo(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			at := tc.Setup(t)
+			at := tc.Setup(t, s)
 
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("GET", "/userinfo", nil)
@@ -625,6 +658,191 @@ func TestUserinfo(t *testing.T) {
 				t.Errorf("want no error, got status: %d", rec.Result().StatusCode)
 			}
 		})
+	}
+}
+
+func TestUserinfoGrantContext(t *testing.T) {
+	const issuer = "http://iss"
+
+	s := NewMemStorage()
+	grant := &StoredGrant{
+		UserID:        "sub",
+		ClientID:      "client-id",
+		GrantedScopes: []string{"openid", "profile"},
+		GrantedAt:     time.Now(),
+		ExpiresAt:     time.Now().Add(time.Hour),
+		Metadata:      []byte(`{"federation":"abc"}`),
+		ACR:           "urn:mace:incommon:iap:silver",
+		AMR:           []string{"pwd"},
+	}
+	grantID, err := s.CreateGrant(context.Background(), grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, verifier := testSignerVerifier(t)
+	accessToken := signTestAccessToken(t, signer, issuer, grantID, "client-id")
+
+	var gotReq *UserinfoRequest
+	oidc, err := NewServer(Config{
+		Issuer:   issuer,
+		Storage:  s,
+		Signer:   signer,
+		Verifier: verifier,
+		UserinfoHandler: func(_ context.Context, uireq *UserinfoRequest) (*UserinfoResponse, error) {
+			gotReq = uireq
+			return &UserinfoResponse{Identity: map[string]any{"sub": uireq.Subject}}, nil
+		},
+		TokenHandler: func(_ context.Context, req *TokenRequest) (*TokenResponse, error) {
+			return &TokenResponse{}, nil
+		},
+		Clients: staticClientSource{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+	req.Header.Set("authorization", "Bearer "+accessToken)
+	oidc.UserinfoHandler(rec, req)
+
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("want status 200, got %d", rec.Result().StatusCode)
+	}
+	if gotReq == nil {
+		t.Fatal("userinfo handler was not called")
+	}
+	if gotReq.GrantID != grantID {
+		t.Errorf("GrantID: want %q, got %q", grantID, gotReq.GrantID)
+	}
+	if string(gotReq.Metadata) != `{"federation":"abc"}` {
+		t.Errorf("Metadata: got %q", gotReq.Metadata)
+	}
+	if !slices.Equal(gotReq.GrantedScopes, []string{"openid", "profile"}) {
+		t.Errorf("GrantedScopes: got %v", gotReq.GrantedScopes)
+	}
+	if gotReq.ACR != "urn:mace:incommon:iap:silver" {
+		t.Errorf("ACR: got %q", gotReq.ACR)
+	}
+	if !slices.Equal(gotReq.AMR, []string{"pwd"}) {
+		t.Errorf("AMR: got %v", gotReq.AMR)
+	}
+
+	gotReq.Metadata[0] = 'X'
+	gotReq.GrantedScopes[0] = "changed"
+	gotReq.AMR[0] = "changed"
+	stored, err := s.GetGrant(t.Context(), grantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored.Metadata) != `{"federation":"abc"}` || !slices.Equal(stored.GrantedScopes, []string{"openid", "profile"}) || !slices.Equal(stored.AMR, []string{"pwd"}) {
+		t.Fatalf("userinfo handler mutated stored grant: %#v", stored)
+	}
+}
+
+func TestUserinfoRequiresOpenIDScope(t *testing.T) {
+	const issuer = "http://iss"
+	storage := NewMemStorage()
+	grantID, err := storage.CreateGrant(t.Context(), &StoredGrant{
+		UserID:        "sub",
+		ClientID:      "client-id",
+		GrantedScopes: []string{"profile"},
+		GrantedAt:     time.Now(),
+		ExpiresAt:     time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, verifier := testSignerVerifier(t)
+	server, err := NewServer(Config{
+		Issuer: issuer, Storage: storage, Signer: signer, Verifier: verifier,
+		UserinfoHandler: func(context.Context, *UserinfoRequest) (*UserinfoResponse, error) {
+			t.Fatal("userinfo handler called without openid scope")
+			return nil, nil
+		},
+		TokenHandler: func(context.Context, *TokenRequest) (*TokenResponse, error) { return &TokenResponse{}, nil },
+		Clients:      staticClientSource{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+	request.Header.Set("authorization", "Bearer "+signTestAccessToken(t, signer, issuer, grantID, "client-id"))
+	server.UserinfoHandler(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status: got %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestUserinfoFailsClosedOnGrantContext(t *testing.T) {
+	const issuer = "http://iss"
+	storage := NewMemStorage()
+	grantID, err := storage.CreateGrant(t.Context(), &StoredGrant{
+		UserID: "sub", ClientID: "client-id", GrantedScopes: []string{oidc.ScopeOpenID},
+		GrantedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, verifier := testSignerVerifier(t)
+	server, err := NewServer(Config{
+		Issuer: issuer, Storage: storage, Signer: signer, Verifier: verifier,
+		UserinfoHandler: func(context.Context, *UserinfoRequest) (*UserinfoResponse, error) {
+			t.Fatal("userinfo handler called with invalid grant context")
+			return nil, nil
+		},
+		TokenHandler: func(context.Context, *TokenRequest) (*TokenResponse, error) { return &TokenResponse{}, nil },
+		Clients:      staticClientSource{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, grantID, clientID string
+	}{
+		{name: "missing grant claim", clientID: "client-id"},
+		{name: "unknown grant", grantID: "unknown", clientID: "client-id"},
+		{name: "wrong client", grantID: grantID, clientID: "other-client"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+			request.Header.Set("authorization", "Bearer "+signTestAccessToken(t, signer, issuer, test.grantID, test.clientID))
+			server.UserinfoHandler(recorder, request)
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("status: got %d, want %d", recorder.Code, http.StatusUnauthorized)
+			}
+		})
+	}
+}
+
+func signTestAccessToken(t *testing.T, signer JWTSigner, issuer, grantID, clientID string) string {
+	t.Helper()
+	claims := map[string]any{
+		"iss": issuer, "sub": "sub", "client_id": clientID,
+		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix(),
+	}
+	if grantID != "" {
+		claims[claimGrantID] = grantID
+	}
+	input, err := marshalSigningInput("at+jwt", claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := signer.SignJWT(t.Context(), jwt.ES256, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compact
+}
+
+func TestValidateTokenClientAllowsPublicClientWithoutSecret(t *testing.T) {
+	server := &Server{config: Config{Clients: staticClientSource{{ID: "public", Public: true}}}}
+	err := server.validateTokenClient(t.Context(), &oauth2proto.TokenRequest{ClientID: "public"}, "public")
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -773,7 +991,11 @@ func (c staticClientSource) RedirectURIs(ctx context.Context, clientID string) (
 func (c staticClientSource) ClientOpts(ctx context.Context, clientID string) ([]ClientOpt, error) {
 	for _, sc := range c {
 		if sc.ID == clientID {
-			return sc.Opts, nil
+			opts := slices.Clone(sc.Opts)
+			if sc.Public {
+				opts = append(opts, ClientOptPublic())
+			}
+			return opts, nil
 		}
 	}
 	return nil, fmt.Errorf("client not found")

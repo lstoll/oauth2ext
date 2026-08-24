@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,51 +28,77 @@ type AuthRequest struct {
 	CodeChallenge string `json:"codeChallenge,omitzero"`
 	// ACRValues is the list of ACR values that the client is requesting.
 	ACRValues []string `json:"acrValues,omitzero"`
-	// Nonce binds an ID token to this authorization request.
+	// Nonce is the OIDC nonce from the authorization request.
 	Nonce string `json:"nonce,omitzero"`
+	// MaxAge is the OIDC max_age parameter. Nil means the parameter was omitted.
+	// A pointer to 0 means re-authentication is required. Integrators should
+	// compare [AuthTimeExceeded] against their session authentication time
+	// before calling [Server.GrantAuth].
+	MaxAge *int `json:"maxAge,omitzero"`
 
 	// Raw is the raw URL values that were passed in the request.
 	Raw url.Values `json:"raw,omitzero"`
 }
 
 func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
-	// Note: Error handling deviates from the spec - errors are returned directly
-	// rather than redirected to the client's redirect_uri.
-	// TODO - consider if we should fix this.
 	authreq, err := oauth2proto.ParseAuthRequest(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse auth request: %w", err)
+		return nil, err
 	}
 
 	cidok, err := s.config.Clients.IsValidClientID(req.Context(), authreq.ClientID)
 	if err != nil {
-		return nil, fmt.Errorf("error checking client ID %s: %w", authreq.ClientID, err)
+		return nil, &oauth2proto.HTTPError{
+			Code:     http.StatusInternalServerError,
+			Cause:    err,
+			CauseMsg: fmt.Sprintf("error checking client ID %s", authreq.ClientID),
+		}
 	}
 	if !cidok {
-		return nil, fmt.Errorf("client ID %s is not valid", authreq.ClientID)
+		return nil, &oauth2proto.HTTPError{
+			Code:     http.StatusBadRequest,
+			Message:  "unknown client",
+			CauseMsg: fmt.Sprintf("client ID %s is not valid", authreq.ClientID),
+		}
 	}
 
 	redirs, err := s.config.Clients.RedirectURIs(req.Context(), authreq.ClientID)
 	if err != nil {
-		return nil, fmt.Errorf("error getting redirect URIs for client ID %s: %w", authreq.ClientID, err)
+		return nil, &oauth2proto.HTTPError{
+			Code:     http.StatusInternalServerError,
+			Cause:    err,
+			CauseMsg: fmt.Sprintf("error getting redirect URIs for client ID %s", authreq.ClientID),
+		}
 	}
 
-	// Validate and resolve the redirect URI
 	validatedRedirectURI, err := validateAndResolveRedirectURI(authreq.RedirectURI, redirs, authreq.ClientID)
 	if err != nil {
-		return nil, err
+		return nil, &oauth2proto.HTTPError{
+			Code:     http.StatusBadRequest,
+			Message:  "invalid redirect URI",
+			CauseMsg: err.Error(),
+		}
 	}
 	authreq.RedirectURI = validatedRedirectURI
 
 	redir, err := url.Parse(authreq.RedirectURI)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse redirect URI %s: %w", authreq.RedirectURI, err)
+		return nil, &oauth2proto.HTTPError{
+			Code:     http.StatusInternalServerError,
+			Cause:    err,
+			CauseMsg: fmt.Sprintf("failed to parse redirect URI %s", authreq.RedirectURI),
+		}
 	}
 
 	switch authreq.ResponseType {
 	case oauth2proto.ResponseTypeCode:
 	default:
-		return nil, fmt.Errorf("response type %s is not supported", authreq.ResponseType)
+		return nil, &oauth2proto.AuthError{
+			State:       authreq.State,
+			Code:        oauth2proto.AuthErrorCodeUnsupportedResponseType,
+			Description: fmt.Sprintf("response type %s is not supported", authreq.ResponseType),
+			RedirectURI: redir.String(),
+		}
 	}
 
 	var acrValues []string
@@ -86,7 +113,9 @@ func (s *Server) ParseAuthRequest(req *http.Request) (*AuthRequest, error) {
 		Scopes:        authreq.Scopes,
 		CodeChallenge: authreq.CodeChallenge,
 		ACRValues:     acrValues,
-		Nonce:         authreq.Raw.Get("nonce"),
+		Nonce:         authreq.Nonce,
+		MaxAge:        authreq.MaxAge,
+		Raw:           authreq.Raw,
 	}, nil
 }
 
@@ -99,6 +128,10 @@ type AuthGrant struct {
 	// UserID is the user ID that was granted access. This is used to form the subject
 	// claim, and is provided on subsequent actions.
 	UserID string
+	// AuthenticatedAt is when the End-User last actively authenticated. If zero,
+	// [Server.GrantAuth] uses the current time. This value is emitted as the
+	// auth_time claim in ID tokens.
+	AuthenticatedAt time.Time
 	// Metadata is arbitrary metadata that can be stored with the grant. Can be
 	// used for auditing or tracking other information that is associated with
 	// the grant. This is not sensitive, and can be accessed at any time.
@@ -110,6 +143,10 @@ type AuthGrant struct {
 	// ExpiresAt is the time at which the grant will expire. If zero, the
 	// default grant validity will be used to calculate this.
 	ExpiresAt time.Time
+	// ACR is the Authentication Context Class Reference satisfied for this grant.
+	ACR string
+	// AMR lists the Authentication Methods References for this grant.
+	AMR []string
 }
 
 func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI string, _ error) {
@@ -120,19 +157,31 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		return "", fmt.Errorf("auth request is required")
 	}
 
+	now := s.now()
 	expiresAt := grant.ExpiresAt
 	if expiresAt.IsZero() {
-		expiresAt = s.now().Add(s.config.GrantValidity)
+		expiresAt = now.Add(s.config.GrantValidity)
+	}
+
+	authenticatedAt := grant.AuthenticatedAt
+	if authenticatedAt.IsZero() {
+		authenticatedAt = now
+	}
+	if authenticatedAt.After(now) {
+		return "", fmt.Errorf("authentication time must not be in the future")
 	}
 
 	sg := &StoredGrant{
-		UserID:        grant.UserID,
-		ClientID:      grant.Request.ClientID,
-		GrantedScopes: grant.GrantedScopes,
-		Request:       grant.Request,
-		GrantedAt:     s.now(),
-		ExpiresAt:     expiresAt, // Grant has absolute lifetime
-		Metadata:      grant.Metadata,
+		UserID:          grant.UserID,
+		ClientID:        grant.Request.ClientID,
+		GrantedScopes:   grant.GrantedScopes,
+		Request:         grant.Request,
+		GrantedAt:       now,
+		AuthenticatedAt: authenticatedAt,
+		ExpiresAt:       expiresAt, // Grant has absolute lifetime
+		Metadata:        grant.Metadata,
+		ACR:             grant.ACR,
+		AMR:             slices.Clone(grant.AMR),
 	}
 
 	loadedGrant := &loadedAuthCodeGrant{
@@ -140,7 +189,7 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		decryptedMetadata: grant.EncryptedMetadata,
 	}
 
-	_, authCodeString, err := s.putGrantWithAuthCode(ctx, loadedGrant, s.now().Add(s.config.CodeValidityTime))
+	_, authCodeString, err := s.putGrantWithAuthCode(ctx, loadedGrant, now.Add(s.config.CodeValidityTime))
 	if err != nil {
 		return "", fmt.Errorf("failed to put grant with auth code: %w", err)
 	}

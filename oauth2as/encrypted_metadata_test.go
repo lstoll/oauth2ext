@@ -13,6 +13,7 @@ import (
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/oauth2as"
 	"lds.li/oauth2ext/oauth2as/discovery"
+	"lds.li/oauth2ext/oauth2as/oauth2proto"
 	"lds.li/oauth2ext/oidc"
 	"lds.li/oauth2ext/provider"
 )
@@ -115,8 +116,7 @@ func TestEncryptedMetadataFlow(t *testing.T) {
 	oidcSvrMux.HandleFunc("/authorization", func(w http.ResponseWriter, req *http.Request) {
 		authReq, err := op.ParseAuthRequest(req)
 		if err != nil {
-			t.Errorf("failed to parse auth request: %v", err)
-			http.Error(w, "invalid request", http.StatusBadRequest)
+			_ = oauth2proto.WriteError(w, req, err)
 			return
 		}
 

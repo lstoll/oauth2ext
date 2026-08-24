@@ -2,11 +2,16 @@ package oauth2as
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"lds.li/oauth2ext/oauth2as/internal/token"
+	"lds.li/oauth2ext/oauth2as/oauth2proto"
 )
 
 func TestParseAuthRequest(t *testing.T) {
@@ -39,12 +44,14 @@ func TestParseAuthRequest(t *testing.T) {
 		name        string
 		queryParams string
 		expectError bool
+		wantAuthErr bool
+		wantHTTPErr bool
 		errorMsg    string
 		expected    *AuthRequest
 	}{
 		{
 			name:        "Valid auth request with all parameters",
-			queryParams: "response_type=code&client_id=test-client&redirect_uri=https://client.example.com/callback&state=test-state&scope=openid%20profile&code_challenge=test-challenge&code_challenge_method=S256&acr_values=1%202",
+			queryParams: "response_type=code&client_id=test-client&redirect_uri=https://client.example.com/callback&state=test-state&scope=openid%20profile&code_challenge=test-challenge&code_challenge_method=S256&acr_values=1%202&nonce=test-nonce&max_age=3600",
 			expectError: false,
 			expected: &AuthRequest{
 				ClientID:      "test-client",
@@ -53,6 +60,8 @@ func TestParseAuthRequest(t *testing.T) {
 				Scopes:        []string{"openid", "profile"},
 				CodeChallenge: "test-challenge",
 				ACRValues:     []string{"1", "2"},
+				Nonce:         "test-nonce",
+				MaxAge:        new(3600),
 			},
 		},
 		{
@@ -82,37 +91,43 @@ func TestParseAuthRequest(t *testing.T) {
 			name:        "Invalid client ID",
 			queryParams: "response_type=code&client_id=invalid-client&redirect_uri=https://client.example.com/callback",
 			expectError: true,
+			wantHTTPErr: true,
 			errorMsg:    "client ID invalid-client is not valid",
 		},
 		{
 			name:        "Invalid redirect URI",
 			queryParams: "response_type=code&client_id=test-client&redirect_uri=https://attacker.example.com/callback",
 			expectError: true,
-			errorMsg:    "redirect URI https://attacker.example.com/callback is not valid for client ID test-client",
+			wantHTTPErr: true,
+			errorMsg:    "redirect URI https://attacker.example.com/callback is not valid",
 		},
 		{
 			name:        "Multiple redirect URIs but none provided",
 			queryParams: "response_type=code&client_id=test-client",
 			expectError: true,
-			errorMsg:    "client ID test-client has multiple redirect URIs, but none were provided",
+			wantHTTPErr: true,
+			errorMsg:    "client ID test-client has multiple redirect URIs",
 		},
 		{
 			name:        "Unsupported response type",
-			queryParams: "response_type=token&client_id=test-client&redirect_uri=https://client.example.com/callback",
+			queryParams: "response_type=token&client_id=test-client&redirect_uri=https://client.example.com/callback&state=rt-state",
 			expectError: true,
+			wantAuthErr: true,
 			errorMsg:    "response type token is not supported",
 		},
 		{
 			name:        "Missing response_type",
 			queryParams: "client_id=test-client&redirect_uri=https://client.example.com/callback",
 			expectError: true,
-			errorMsg:    "failed to parse auth request",
+			wantAuthErr: true,
+			errorMsg:    `response_type must be "code" or "token"`,
 		},
 		{
 			name:        "Missing client_id",
 			queryParams: "response_type=code&redirect_uri=https://client.example.com/callback",
 			expectError: true,
-			errorMsg:    "failed to parse auth request",
+			wantAuthErr: true,
+			errorMsg:    "client_id must be specified",
 		},
 		{
 			name:        "Public client with valid redirect",
@@ -144,6 +159,16 @@ func TestParseAuthRequest(t *testing.T) {
 				if tc.errorMsg != "" && !strings.Contains(err.Error(), tc.errorMsg) {
 					t.Errorf("expected error containing '%s', got '%s'", tc.errorMsg, err.Error())
 				}
+				if tc.wantAuthErr {
+					if _, ok := errors.AsType[*oauth2proto.AuthError](err); !ok {
+						t.Errorf("expected *oauth2proto.AuthError, got %T", err)
+					}
+				}
+				if tc.wantHTTPErr {
+					if _, ok := errors.AsType[*oauth2proto.HTTPError](err); !ok {
+						t.Errorf("expected *oauth2proto.HTTPError, got %T", err)
+					}
+				}
 				return
 			}
 
@@ -170,6 +195,14 @@ func TestParseAuthRequest(t *testing.T) {
 			if tc.expected.CodeChallenge != result.CodeChallenge {
 				t.Errorf("expected CodeChallenge %s, got %s", tc.expected.CodeChallenge, result.CodeChallenge)
 			}
+			if tc.expected.Nonce != result.Nonce {
+				t.Errorf("expected Nonce %s, got %s", tc.expected.Nonce, result.Nonce)
+			}
+			if (tc.expected.MaxAge == nil) != (result.MaxAge == nil) {
+				t.Errorf("expected MaxAge presence %v, got %v", tc.expected.MaxAge != nil, result.MaxAge != nil)
+			} else if tc.expected.MaxAge != nil && result.MaxAge != nil && *tc.expected.MaxAge != *result.MaxAge {
+				t.Errorf("expected MaxAge %d, got %d", *tc.expected.MaxAge, *result.MaxAge)
+			}
 
 			// Compare slices
 			if len(tc.expected.Scopes) != len(result.Scopes) {
@@ -192,6 +225,54 @@ func TestParseAuthRequest(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParseAuthRequestWriteError(t *testing.T) {
+	server := &Server{
+		config: Config{
+			Clients: staticClientSource{
+				{
+					ID:           "test-client",
+					Secrets:      []string{"test-secret"},
+					RedirectURLs: []string{"https://client.example.com/callback"},
+				},
+			},
+		},
+		now: time.Now,
+	}
+
+	req, err := http.NewRequest("GET", "/auth?response_type=token&client_id=test-client&redirect_uri=https://client.example.com/callback&state=rt-state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = server.ParseAuthRequest(req)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	rec := httptest.NewRecorder()
+	if err := oauth2proto.WriteError(rec, req, err); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("want redirect status 302, got %d", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "https://client.example.com/callback") {
+		t.Fatalf("want redirect to callback, got %q", loc)
+	}
+	parsed, err := url.Parse(loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("error") != string(oauth2proto.AuthErrorCodeUnsupportedResponseType) {
+		t.Fatalf("want unsupported_response_type, got %q", parsed.Query().Get("error"))
+	}
+	if parsed.Query().Get("state") != "rt-state" {
+		t.Fatalf("want state rt-state, got %q", parsed.Query().Get("state"))
 	}
 }
 
@@ -241,8 +322,9 @@ func TestGrantAuth(t *testing.T) {
 					State:       "test-state",
 					Scopes:      []string{"openid", "profile", "email"},
 				},
-				GrantedScopes: []string{"openid", "profile", "email"},
-				UserID:        "user123",
+				GrantedScopes:   []string{"openid", "profile", "email"},
+				UserID:          "user123",
+				AuthenticatedAt: time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
 			},
 			expectError: false,
 			checkResult: func(t *testing.T, redirectURI string) {
@@ -470,6 +552,74 @@ func TestGrantAuth(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGrantAuthStoresAuthenticatedAt(t *testing.T) {
+	storage := NewMemStorage()
+	server := &Server{
+		config: Config{
+			Storage: storage,
+			Clients: staticClientSource{
+				{
+					ID:           "test-client",
+					Secrets:      []string{"test-secret"},
+					RedirectURLs: []string{"https://client.example.com/callback"},
+				},
+			},
+			CodeValidityTime: 10 * time.Minute,
+		},
+		now: time.Now,
+	}
+
+	authenticatedAt := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	redirectURI, err := server.GrantAuth(context.Background(), &AuthGrant{
+		Request: &AuthRequest{
+			ClientID:    "test-client",
+			RedirectURI: "https://client.example.com/callback",
+			State:       "state",
+			Scopes:      []string{"openid"},
+		},
+		GrantedScopes:   []string{"openid"},
+		UserID:          "user123",
+		AuthenticatedAt: authenticatedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := url.Parse(redirectURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := parsed.Query().Get("code")
+	if code == "" {
+		t.Fatal("expected code in redirect")
+	}
+
+	pt, err := token.ParseUserToken(code, tokenUsageAuthCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, grant, err := storage.GetAuthCodeAndGrant(context.Background(), pt.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !grant.AuthenticatedAt.Equal(authenticatedAt) {
+		t.Fatalf("AuthenticatedAt: got %v, want %v", grant.AuthenticatedAt, authenticatedAt)
+	}
+}
+
+func TestGrantAuthRejectsFutureAuthenticationTime(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	server := &Server{config: Config{GrantValidity: time.Hour}, now: func() time.Time { return now }}
+	_, err := server.GrantAuth(t.Context(), &AuthGrant{
+		Request:         &AuthRequest{ClientID: "client"},
+		UserID:          "subject",
+		AuthenticatedAt: now.Add(time.Second),
+	})
+	if err == nil {
+		t.Fatal("future authentication time was accepted")
 	}
 }
 
