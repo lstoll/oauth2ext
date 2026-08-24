@@ -23,7 +23,7 @@ func TestBuildTokenClaims(t *testing.T) {
 		},
 		now: func() time.Time { return now },
 	}
-	grant := &StoredGrant{
+	grant := &storedGrant{
 		UserID:          "stored-subject",
 		ClientID:        "client-id",
 		GrantedScopes:   []string{"openid", "profile"},
@@ -110,7 +110,7 @@ func TestBuildTokenClaimsRejectsReservedAdditionalClaims(t *testing.T) {
 		config: Config{Issuer: "https://issuer.example", IDTokenValidity: time.Hour, AccessTokenValidity: time.Hour},
 		now:    time.Now,
 	}
-	grant := &StoredGrant{UserID: "subject", ClientID: "client", GrantedAt: time.Now()}
+	grant := &storedGrant{UserID: "subject", ClientID: "client", GrantedAt: time.Now()}
 
 	_, err := server.buildIDClaims(grant, &TokenResponse{
 		IDTokenClaims: &IDTokenClaims{Additional: map[string]any{"iss": "attacker"}},

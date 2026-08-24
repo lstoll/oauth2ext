@@ -14,3 +14,12 @@ updates:
         update-types:
         - "minor"
         - "patch"
+  - package-ecosystem: "gomod"
+    directory: "/oauth2as/storee2e"
+    schedule:
+      interval: "weekly"
+    groups:
+      non-major-versions:
+        update-types:
+        - "minor"
+        - "patch"

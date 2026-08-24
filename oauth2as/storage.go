@@ -4,24 +4,59 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
 var (
-	// ErrNotFound is returned when a grant cannot be found in storage.
-	ErrNotFound = errors.New("not found")
-	// ErrConcurrentUpdate is returned when an update fails due to a version mismatch.
-	ErrConcurrentUpdate = errors.New("concurrent update detected")
+	// ErrNotFound is returned when a record cannot be found in storage.
+	ErrNotFound        = errors.New("not found")
+	errStorageConflict = errors.New("storage conflict")
 )
+
+type storageKind string
 
 const (
-	// MetadataDPoPThumbprint is the metadata key for storing the DPoP JWK thumbprint
-	MetadataDPoPThumbprint = "dpop_thumbprint"
+	storageKindGrant        storageKind = "grant"
+	storageKindAuthCode     storageKind = "auth_code"
+	storageKindRefreshToken storageKind = "refresh_token"
+	storageKindSession      storageKind = "session"
 )
 
-// StoredAuthCode represents an authorization code that is issued during the
+// storageRef identifies one stored record.
+type storageRef struct {
+	Kind storageKind
+	ID   string
+}
+
+// storageCheck is a precondition for an atomic commit. Version zero requires
+// that the record does not exist; any other value requires an exact match.
+type storageCheck struct {
+	Kind    storageKind
+	ID      string
+	Version uint64
+}
+
+func (c storageCheck) ref() storageRef { return storageRef{Kind: c.Kind, ID: c.ID} }
+
+// storageCommit is an atomic conditional batch. All checks must be evaluated
+// against one consistent view. If any check fails, Commit must return
+// errStorageConflict without applying any put or delete. A put creates version
+// one or increments the existing version. Mutating one record more than once
+// makes a commit invalid and must not apply any changes.
+type storageCommit struct {
+	Checks        []storageCheck
+	Grants        []storedGrant
+	AuthCodes     []storedAuthCode
+	RefreshTokens []storedRefreshToken
+	Sessions      []storedRefreshSession
+	Deletes       []storageRef
+}
+
+// storedAuthCode represents an authorization code that is issued during the
 // authorization flow. Auth codes are short-lived and single-use.
-type StoredAuthCode struct {
+type storedAuthCode struct {
+	ID      string
 	Code    []byte `json:"code,omitzero"`
 	GrantID string `json:"grantId,omitzero"`
 	// ValidUntil is the time at which the code is no longer valid for use.
@@ -32,13 +67,13 @@ type StoredAuthCode struct {
 	// EncryptedGrantKey is the key used to encrypt the grant metadata, encrypted
 	// with this auth code.
 	EncryptedGrantKey []byte `json:"encryptedGrantKey,omitzero"`
-	// Version is the version of the stored code, used for optimistic locking.
-	Version int64 `json:"version,omitzero"`
+	storageVersion    uint64
 }
 
-// StoredRefreshToken represents a refresh token that can be used to obtain new
+// storedRefreshToken represents a refresh token that can be used to obtain new
 // access tokens. Refresh tokens are long-lived and support rotation with grace periods.
-type StoredRefreshToken struct {
+type storedRefreshToken struct {
+	ID      string
 	Token   []byte `json:"token,omitzero"`
 	GrantID string `json:"grantId,omitzero"`
 	// ValidUntil is the time at which the token is no longer valid for use.
@@ -52,11 +87,11 @@ type StoredRefreshToken struct {
 	// EncryptedGrantKey is the key used to encrypt the grant metadata, encrypted
 	// with this refresh token.
 	EncryptedGrantKey []byte `json:"encryptedGrantKey,omitzero"`
-	// Version is the version of the stored token, used for optimistic locking.
-	Version int64 `json:"version,omitzero"`
+	storageVersion    uint64
 }
 
-type StoredGrant struct {
+type storedGrant struct {
+	ID string
 	// UserID is the user ID that was granted access.
 	UserID string `json:"userId,omitzero"`
 	// ClientID is the client ID that was granted access.
@@ -74,16 +109,8 @@ type StoredGrant struct {
 	// ExpiresAt is the time at which the grant will expire.
 	ExpiresAt time.Time `json:"expiresAt,omitzero"`
 
-	// AdditionalState contains internal protocol state managed by this library
-	// (e.g., DPoP thumbprints, certificate bindings). This field allows the
-	// library to evolve its internal state schema without breaking the Storage
-	// interface contract. Storage implementations MUST preserve the JSON
-	// semantics of this field but need not preserve byte-exact encoding (e.g.
-	// a jsonb column may normalize whitespace and key order). Implementations
-	// SHOULD NOT inspect or modify the meaning of its contents.
-	//
-	// Applications should use the Metadata/EncryptedMetadata fields for their
-	// own data.
+	// AdditionalState contains private protocol state encoded inside the
+	// library-owned grant record.
 	AdditionalState json.RawMessage `json:"additionalState,omitzero"`
 
 	// Metadata stores unencrypted application-specific data that can be accessed
@@ -96,64 +123,187 @@ type StoredGrant struct {
 	// as an OAuth2 client to another provider. The upstream refresh token is
 	// encrypted here and can only be decrypted by presenting a valid token.
 	EncryptedMetadata []byte `json:"encryptedMetadata,omitzero"`
-	// Version is the version of the stored grant, used for optimistic locking.
-	Version int64 `json:"version,omitzero"`
-
 	// ACR is the Authentication Context Class Reference satisfied for this grant.
 	ACR string `json:"acr,omitzero"`
 	// AMR lists the Authentication Methods References for this grant.
-	AMR []string `json:"amr,omitzero"`
+	AMR            []string `json:"amr,omitzero"`
+	storageVersion uint64
 }
 
 type storedAdditionalState struct {
 	DPoPThumbprint *string `json:"dpopThumbprint,omitzero"`
 }
 
-// Storage is the interface for storing and retrieving grants, authorization codes, and refresh tokens.
-type Storage interface {
-	// CreateGrant creates a new grant and returns a unique opaque identifier.
-	// The ID format is implementation-defined and should be treated as an
-	// opaque string.
-	CreateGrant(ctx context.Context, grant *StoredGrant) (id string, err error)
-	// UpdateGrant updates an existing grant. Returns ErrNotFound if the
-	// grant does not exist. Implementations MUST perform an optimistic locking
-	// check using the Version field. If the stored version does not match the
-	// version in the provided grant, it MUST return ErrConcurrentUpdate. On
-	// success, the stored version MUST be incremented.
-	UpdateGrant(ctx context.Context, id string, grant *StoredGrant) error
-	// ExpireGrant expires a grant and optionally deletes associated
-	// tokens/codes. Implementations MAY choose to delete associated tokens or
-	// leave them for garbage collection. Returns nil if the grant does not
-	// exist.
-	ExpireGrant(ctx context.Context, id string) error
-	// GetGrant retrieves a grant by ID. Returns ErrNotFound if the grant
-	// does not exist.
-	GetGrant(ctx context.Context, id string) (*StoredGrant, error)
+type storedRefreshSession struct {
+	GrantID         string
+	UserID          string
+	ClientID        string
+	GrantedScopes   []string
+	CreatedAt       time.Time
+	AuthenticatedAt time.Time
+	ExpiresAt       time.Time
+	LastUsedAt      time.Time
+	storageVersion  uint64
+}
 
-	// CreateAuthCode creates a new authorization code associated with a grant and
-	// returns a unique opaque identifier. Auth codes are short-lived and single-use.
-	CreateAuthCode(ctx context.Context, codeID string, code *StoredAuthCode) error
-	// ExpireAuthCode expires an authorization code. Returns ErrNotFound if the
-	// code was not found.
-	ExpireAuthCode(ctx context.Context, codeID string) error
-	// GetAuthCodeAndGrant retrieves an auth code and its associated grant by
-	// code ID. Returns ErrNotFound if the code does not exist.
-	GetAuthCodeAndGrant(ctx context.Context, codeID string) (*StoredAuthCode, *StoredGrant, error)
+type storageBackend interface {
+	GetGrant(ctx context.Context, id string) (storedGrant, error)
+	GetAuthCode(ctx context.Context, id string) (storedAuthCode, error)
+	GetRefreshToken(ctx context.Context, id string) (storedRefreshToken, error)
+	Commit(ctx context.Context, commit storageCommit) error
+	ListRefreshSessions(ctx context.Context, query storageRefreshSessionQuery) ([]storedRefreshSession, error)
+	Cleanup(ctx context.Context, options CleanupOptions) (CleanupResult, error)
+	Migrate(ctx context.Context) error
+}
 
-	// CreateRefreshToken creates a new refresh token associated with a grant
-	// and returns a unique opaque identifier. Refresh tokens are long-lived and
-	// support rotation.
-	CreateRefreshToken(ctx context.Context, tokenID string, token *StoredRefreshToken) error
-	// UpdateRefreshToken updates an existing refresh token. Returns
-	// ErrNotFound if the token does not exist. Used for updating rotation
-	// tracking fields. Implementations MUST perform an optimistic locking check
-	// using the Version field. If the stored version does not match the version
-	// in the provided token, it MUST return ErrConcurrentUpdate. On success,
-	// the stored version MUST be incremented.
-	UpdateRefreshToken(ctx context.Context, tokenID string, token *StoredRefreshToken) error
-	// ExpireRefreshToken expires a refresh token. Returns ErrNotFound if the token was not found.
-	ExpireRefreshToken(ctx context.Context, tokenID string) error
-	// GetRefreshTokenAndGrant retrieves a refresh token and its associated grant by token ID.
-	// Returns ErrNotFound if the token does not exist.
-	GetRefreshTokenAndGrant(ctx context.Context, tokenID string) (*StoredRefreshToken, *StoredGrant, error)
+// Storage is an opaque authorization-server storage implementation. Construct
+// one with [NewSQLStorage] or [NewMemoryStorage]. A Storage must be dedicated to
+// one issuer.
+type Storage struct {
+	backend storageBackend
+}
+
+// CleanupOptions controls physical removal of expired storage records.
+type CleanupOptions struct {
+	// Before removes records whose physical retention deadline is at or before
+	// this time. It defaults to the current time.
+	Before time.Time
+	// Limit bounds the number of primary records removed in one call. It
+	// defaults to 500 and cannot exceed 10000.
+	Limit int
+}
+
+// CleanupResult describes one bounded cleanup pass.
+type CleanupResult struct {
+	// Deleted is the number of primary records removed. Rows removed by foreign
+	// key cascades are not included.
+	Deleted int
+	// More reports whether another cleanup call could remove more records for
+	// the same cutoff.
+	More bool
+}
+
+const (
+	defaultCleanupLimit = 500
+	maxCleanupLimit     = 10_000
+)
+
+// Migrate applies pending schema migrations. It is safe to call on every
+// process start. In-memory storage is a no-op.
+func (s *Storage) Migrate(ctx context.Context) error {
+	if s == nil || s.backend == nil {
+		return errors.New("oauth2as: invalid storage")
+	}
+	return s.backend.Migrate(ctx)
+}
+
+// Cleanup physically removes expired storage records. Protocol validity does
+// not depend on cleanup being run.
+func (s *Storage) Cleanup(ctx context.Context, options CleanupOptions) (CleanupResult, error) {
+	if s == nil || s.backend == nil {
+		return CleanupResult{}, errors.New("oauth2as: invalid storage")
+	}
+	if options.Before.IsZero() {
+		options.Before = time.Now()
+	}
+	if options.Limit == 0 {
+		options.Limit = defaultCleanupLimit
+	}
+	if options.Limit < 0 || options.Limit > maxCleanupLimit {
+		return CleanupResult{}, errors.New("oauth2as: cleanup limit must be between 0 and 10000")
+	}
+	return s.backend.Cleanup(ctx, options)
+}
+
+func (s *Storage) getGrant(ctx context.Context, id string) (*storedGrant, error) {
+	grant, err := s.backend.GetGrant(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &grant, nil
+}
+
+func (s *Storage) getAuthCode(ctx context.Context, id string) (*storedAuthCode, error) {
+	code, err := s.backend.GetAuthCode(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &code, nil
+}
+
+func (s *Storage) getRefreshToken(ctx context.Context, id string) (*storedRefreshToken, error) {
+	token, err := s.backend.GetRefreshToken(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &token, nil
+}
+
+func (s *Storage) commit(ctx context.Context, commit storageCommit) error {
+	if err := validateStorageCommit(commit); err != nil {
+		return err
+	}
+	return s.backend.Commit(ctx, commit)
+}
+
+type storageRefreshSessionQuery struct {
+	UserID        string
+	ClientID      string
+	ActiveAt      time.Time
+	AfterLastUsed time.Time
+	AfterGrantID  string
+	Limit         int
+}
+
+func (s *Storage) listRefreshSessions(ctx context.Context, query storageRefreshSessionQuery) ([]storedRefreshSession, error) {
+	return s.backend.ListRefreshSessions(ctx, query)
+}
+
+func validateStorageCommit(commit storageCommit) error {
+	mutated := make(map[storageRef]struct{}, len(commit.Grants)+len(commit.AuthCodes)+len(commit.RefreshTokens)+len(commit.Sessions)+len(commit.Deletes))
+	add := func(ref storageRef) error {
+		if ref.ID == "" {
+			return fmt.Errorf("storage commit missing %s id", ref.Kind)
+		}
+		if _, exists := mutated[ref]; exists {
+			return fmt.Errorf("storage commit mutates %s %q more than once", ref.Kind, ref.ID)
+		}
+		mutated[ref] = struct{}{}
+		return nil
+	}
+	for i := range commit.Grants {
+		if err := add(storageRef{Kind: storageKindGrant, ID: commit.Grants[i].ID}); err != nil {
+			return err
+		}
+	}
+	for i := range commit.AuthCodes {
+		if err := add(storageRef{Kind: storageKindAuthCode, ID: commit.AuthCodes[i].ID}); err != nil {
+			return err
+		}
+	}
+	for i := range commit.RefreshTokens {
+		if err := add(storageRef{Kind: storageKindRefreshToken, ID: commit.RefreshTokens[i].ID}); err != nil {
+			return err
+		}
+	}
+	for i := range commit.Sessions {
+		if err := add(storageRef{Kind: storageKindSession, ID: commit.Sessions[i].GrantID}); err != nil {
+			return err
+		}
+	}
+	for _, ref := range commit.Deletes {
+		if err := add(ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasCreateCheck(checks []storageCheck, ref storageRef) bool {
+	for _, check := range checks {
+		if check.ref() == ref && check.Version == 0 {
+			return true
+		}
+	}
+	return false
 }
