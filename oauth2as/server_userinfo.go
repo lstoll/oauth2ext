@@ -148,7 +148,7 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func writeUserinfoBearerError(w http.ResponseWriter, req *http.Request, code oauth2proto.BearerErrorCode, description string, cause error) {
+func writeUserinfoBearerError(w http.ResponseWriter, req *http.Request, code oauth2proto.BearerErrorCode, description string, cause error) { // nolint:unparam // code may vary in future.
 	bearerError := &oauth2proto.BearerError{Code: code, Description: description}
 	httpError := &oauth2proto.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: bearerError.String(), Cause: cause}
 	_ = oauth2proto.WriteError(w, req, httpError)
