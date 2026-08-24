@@ -37,8 +37,6 @@ type TokenHandler func(_ context.Context, req *TokenRequest) (*TokenResponse, er
 // constructs the token envelope and binding claims.
 type IDTokenClaims struct {
 	Subject    string
-	ACR        string
-	AMR        []string
 	Additional map[string]any
 }
 
@@ -67,6 +65,14 @@ type TokenRequest struct {
 	// DecryptedMetadata is the decrypted metadata that was associated with the
 	// grant.
 	DecryptedMetadata []byte
+	// ACR is the Authentication Context Class Reference satisfied for this grant.
+	ACR string
+	// AMR lists the Authentication Methods References for this grant.
+	AMR []string
+	// AuthenticatedAt is when the End-User last actively authenticated.
+	AuthenticatedAt time.Time
+	// MaxAge is the max_age from the original authorization request, if any.
+	MaxAge *int
 
 	// IsRefresh indicates if this is a refresh token request.
 	IsRefresh bool
@@ -210,9 +216,9 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch client opts: %w", err)
 	}
-	copts := &clientOpts{}
-	for _, opt := range optsForClient {
-		opt(copts)
+	copts, err := applyClientOpts(optsForClient)
+	if err != nil {
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "invalid client configuration", Cause: err}
 	}
 
 	// Reject if PKCE is required but no code verifier was provided
@@ -258,6 +264,10 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 		GrantedScopes:     loadedGrant.grant.GrantedScopes,
 		Metadata:          loadedGrant.grant.Metadata,
 		DecryptedMetadata: loadedGrant.decryptedMetadata,
+		ACR:               loadedGrant.grant.ACR,
+		AMR:               slices.Clone(loadedGrant.grant.AMR),
+		AuthenticatedAt:   authTimeFromGrant(loadedGrant.grant),
+		MaxAge:            maxAgeFromGrant(loadedGrant.grant),
 		IsRefresh:         false,
 		DPoPBound:         isDPoPBound,
 		DPoPProof:         dpopProof,
@@ -313,6 +323,10 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "invalid refresh token"}
 	}
 
+	if err := s.validateTokenClient(ctx, treq, loadedGrant.grant.ClientID); err != nil {
+		return nil, err
+	}
+
 	// Handle grace period for rotated tokens
 	if loadedGrant.refreshToken.ReplacedByTokenID != "" {
 		// Strict Option 2: Revoke the new one, and issue a third.
@@ -363,9 +377,9 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch client opts: %w", err)
 	}
-	copts := &clientOpts{}
-	for _, opt := range optsForClient {
-		opt(copts)
+	copts, err := applyClientOpts(optsForClient)
+	if err != nil {
+		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "invalid client configuration", Cause: err}
 	}
 
 	idTokenAlgorithm := s.defaultIDTokenSigningAlgorithm()
@@ -383,6 +397,10 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		GrantedScopes:     loadedGrant.grant.GrantedScopes,
 		Metadata:          loadedGrant.grant.Metadata,
 		DecryptedMetadata: loadedGrant.decryptedMetadata,
+		ACR:               loadedGrant.grant.ACR,
+		AMR:               slices.Clone(loadedGrant.grant.AMR),
+		AuthenticatedAt:   authTimeFromGrant(loadedGrant.grant),
+		MaxAge:            maxAgeFromGrant(loadedGrant.grant),
 		IsRefresh:         true,
 		DPoPBound:         isDPoPBound,
 		DPoPProof:         dpopProof,
@@ -473,13 +491,8 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 		}
 	}
 
-	// TODO: Conditionally issue ID tokens only when openid scope is granted
-
-	idc, err := s.buildIDClaims(loadedGrant.Grant(), tresp)
-	if err != nil {
-		return nil, "", fmt.Errorf("building id token claims: %w", err)
-	}
-	ac, acExp, err := s.buildAccessTokenClaims(loadedGrant.GrantID(), loadedGrant.Grant(), tresp)
+	grant := loadedGrant.Grant()
+	ac, acExp, err := s.buildAccessTokenClaims(loadedGrant.GrantID(), grant, tresp)
 	if err != nil {
 		return nil, "", fmt.Errorf("building access token claims: %w", err)
 	}
@@ -489,9 +502,18 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 	if err != nil {
 		return nil, "", fmt.Errorf("signing access token with algorithm %s: %w", accessTokenAlgorithm, err)
 	}
-	idSigned, err := s.config.Signer.SignJWT(ctx, idTokenAlgorithm, idc)
-	if err != nil {
-		return nil, "", fmt.Errorf("signing ID token with algorithm %s: %w", idTokenAlgorithm, err)
+
+	var extraParams map[string]any
+	if slices.Contains(grant.GrantedScopes, oidc.ScopeOpenID) {
+		idc, err := s.buildIDClaims(grant, tresp)
+		if err != nil {
+			return nil, "", fmt.Errorf("building ID token claims: %w", err)
+		}
+		idSigned, err := s.config.Signer.SignJWT(ctx, idTokenAlgorithm, idc)
+		if err != nil {
+			return nil, "", fmt.Errorf("signing ID token with algorithm %s: %w", idTokenAlgorithm, err)
+		}
+		extraParams = map[string]any{"id_token": idSigned}
 	}
 
 	tokenType := "bearer"
@@ -504,9 +526,8 @@ func (s *Server) buildTokenResponse(ctx context.Context, idTokenAlgorithm jwt.Al
 		RefreshToken: refreshToken,
 		TokenType:    tokenType,
 		ExpiresIn:    acExp.Sub(s.now()),
-		ExtraParams: map[string]any{
-			"id_token": idSigned,
-		},
+		Scopes:       slices.Clone(grant.GrantedScopes),
+		ExtraParams:  extraParams,
 	}, rtID, nil
 }
 
@@ -532,15 +553,15 @@ func (s *Server) buildIDClaims(grant *StoredGrant, tresp *TokenResponse) (JWTSig
 	claims["aud"] = grant.ClientID
 	claims["iat"] = s.now().Unix()
 	claims["exp"] = idExp.Unix()
-	claims["auth_time"] = grant.GrantedAt.Unix()
+	claims["auth_time"] = authTimeFromGrant(grant).Unix()
 	if grant.Request != nil && grant.Request.Nonce != "" {
 		claims["nonce"] = grant.Request.Nonce
 	}
-	if application != nil && application.ACR != "" {
-		claims["acr"] = application.ACR
+	if grant.ACR != "" {
+		claims["acr"] = grant.ACR
 	}
-	if application != nil && len(application.AMR) > 0 {
-		claims["amr"] = slices.Clone(application.AMR)
+	if len(grant.AMR) > 0 {
+		claims["amr"] = slices.Clone(grant.AMR)
 	}
 	return marshalSigningInput("", claims)
 }

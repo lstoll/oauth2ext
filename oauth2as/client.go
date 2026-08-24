@@ -2,6 +2,7 @@ package oauth2as
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 
 	"lds.li/oauth2ext/jwt"
@@ -10,13 +11,15 @@ import (
 type clientOpts struct {
 	skipPKCE                bool
 	idTokenSigningAlgorithm jwt.Algorithm
+	public                  bool
 }
 
 // ClientOpt is a flag that can be set on a given client, to adjust various
 // behaviours.
 type ClientOpt func(opts *clientOpts)
 
-// ClientOptSkipPKCE indicates that the client is not required to use PKCE
+// ClientOptSkipPKCE indicates that the client is not required to use PKCE. It
+// must not be combined with [ClientOptPublic].
 func ClientOptSkipPKCE() ClientOpt {
 	return func(opts *clientOpts) {
 		opts.skipPKCE = true
@@ -29,6 +32,26 @@ func ClientOptIDTokenSigningAlgorithm(algorithm jwt.Algorithm) ClientOpt {
 	return func(opts *clientOpts) {
 		opts.idTokenSigningAlgorithm = algorithm
 	}
+}
+
+// ClientOptPublic marks a client as public. Public clients authenticate the
+// authorization-code exchange with PKCE instead of a client secret. It must
+// not be combined with [ClientOptSkipPKCE].
+func ClientOptPublic() ClientOpt {
+	return func(opts *clientOpts) {
+		opts.public = true
+	}
+}
+
+func applyClientOpts(opts []ClientOpt) (clientOpts, error) {
+	var result clientOpts
+	for _, opt := range opts {
+		opt(&result)
+	}
+	if result.public && result.skipPKCE {
+		return clientOpts{}, fmt.Errorf("public clients cannot skip PKCE")
+	}
+	return result, nil
 }
 
 // ClientSource is used for validating client information for the general flow

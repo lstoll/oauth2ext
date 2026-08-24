@@ -68,14 +68,19 @@ type StoredGrant struct {
 	Request *AuthRequest `json:"request,omitzero"`
 	// GrantedAt is the time at which the grant was granted.
 	GrantedAt time.Time `json:"grantedAt,omitzero"`
+	// AuthenticatedAt is when the End-User last actively authenticated. Emitted
+	// as the auth_time claim in ID tokens.
+	AuthenticatedAt time.Time `json:"authenticatedAt,omitzero"`
 	// ExpiresAt is the time at which the grant will expire.
 	ExpiresAt time.Time `json:"expiresAt,omitzero"`
 
 	// AdditionalState contains internal protocol state managed by this library
 	// (e.g., DPoP thumbprints, certificate bindings). This field allows the
 	// library to evolve its internal state schema without breaking the Storage
-	// interface contract. Storage implementations MUST preserve this field but
-	// SHOULD NOT inspect or modify its contents.
+	// interface contract. Storage implementations MUST preserve the JSON
+	// semantics of this field but need not preserve byte-exact encoding (e.g.
+	// a jsonb column may normalize whitespace and key order). Implementations
+	// SHOULD NOT inspect or modify the meaning of its contents.
 	//
 	// Applications should use the Metadata/EncryptedMetadata fields for their
 	// own data.
@@ -94,7 +99,10 @@ type StoredGrant struct {
 	// Version is the version of the stored grant, used for optimistic locking.
 	Version int64 `json:"version,omitzero"`
 
-	// TODO: Add ACR (Authentication Context Class Reference) and AMR (Authentication Methods References) fields
+	// ACR is the Authentication Context Class Reference satisfied for this grant.
+	ACR string `json:"acr,omitzero"`
+	// AMR lists the Authentication Methods References for this grant.
+	AMR []string `json:"amr,omitzero"`
 }
 
 type storedAdditionalState struct {
