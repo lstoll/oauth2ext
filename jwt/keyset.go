@@ -1,6 +1,7 @@
 package jwt
 
 import (
+	"context"
 	"crypto/rsa"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
@@ -15,6 +16,20 @@ const maxJWKSBytes = 1 << 20 // 1 MiB
 // KeySet is an opaque set of public verification keys.
 type KeySet struct {
 	jwks jose.JSONWebKeySet
+}
+
+// KeySetSource supplies public verification keys. Implementations may fetch
+// and cache keys, or return a fixed local key set.
+type KeySetSource interface {
+	KeySet(context.Context) (*KeySet, error)
+}
+
+// KeySetSourceFunc adapts a function to a [KeySetSource].
+type KeySetSourceFunc func(context.Context) (*KeySet, error)
+
+// KeySet returns the key set provided by f.
+func (f KeySetSourceFunc) KeySet(ctx context.Context) (*KeySet, error) {
+	return f(ctx)
 }
 
 // MarshalJSON encodes the key set as a JWKS document.

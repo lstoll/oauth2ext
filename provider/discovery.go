@@ -7,18 +7,42 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
 	"lds.li/oauth2ext/internal"
 	"lds.li/oauth2ext/jwt"
+	"lds.li/oauth2ext/jwt/remotejwks"
 )
 
-func DiscoverOIDCProvider(ctx context.Context, issuer string) (*Provider, error) {
+// Option configures a discovered provider.
+type Option func(*Provider) error
+
+// WithVerificationKeys overrides the key source advertised by discovery. The
+// source is used from initial discovery onwards, while discovery metadata and
+// issuer validation still take place.
+func WithVerificationKeys(source jwt.KeySetSource) Option {
+	return func(p *Provider) error {
+		if source == nil {
+			return fmt.Errorf("provider verification key source is required")
+		}
+		p.VerificationKeys = source
+		return nil
+	}
+}
+
+func DiscoverOIDCProvider(ctx context.Context, issuer string, options ...Option) (*Provider, error) {
 	p := &Provider{
 		oidcDiscoveryURL: strings.TrimSuffix(issuer, "/") + "/.well-known/openid-configuration",
 		discoveryIssuer:  issuer,
+	}
+	for _, option := range options {
+		if option == nil {
+			return nil, fmt.Errorf("provider option is nil")
+		}
+		if err := option(p); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := p.refreshIfNeeded(ctx); err != nil {
@@ -26,11 +50,6 @@ func DiscoverOIDCProvider(ctx context.Context, issuer string) (*Provider, error)
 	}
 
 	return p, nil
-}
-
-var validJWKSContentTypes = []string{
-	"application/json",
-	"application/jwk-set+json",
 }
 
 const maxProviderResponseBytes = 1 << 20
@@ -90,39 +109,35 @@ func (p *Provider) refreshIfNeeded(ctx context.Context) error {
 		return fmt.Errorf("provider metadata is required")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, md.jwksuri(), nil)
-	if err != nil {
-		return fmt.Errorf("creating request for %s: %w", md.jwksuri(), err)
+	p.cacheMu.RLock()
+	override := p.VerificationKeys
+	keys := p.keys
+	p.cacheMu.RUnlock()
+	if override != nil {
+		keys = override
+	} else {
+		jwksURI := md.jwksuri()
+		current, ok := keys.(*remotejwks.Source)
+		if !ok || current.URL != jwksURI {
+			keys = &remotejwks.Source{
+				URL:           jwksURI,
+				HTTPClient:    p.HTTPClient,
+				CacheDuration: cacheFor,
+			}
+		}
 	}
-	req = req.WithContext(ctx)
-	res, err := internal.HTTPClientFromContext(ctx, p.HTTPClient).Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to get keys from %s: %v", md.jwksuri(), err)
+	if keys == nil {
+		return fmt.Errorf("provider has no verification keys")
 	}
-	if res.StatusCode != http.StatusOK {
-		_ = res.Body.Close()
-		return fmt.Errorf("expected status %d, got: %d", http.StatusOK, res.StatusCode)
-	}
-	mediaType, _, err := mime.ParseMediaType(res.Header.Get("Content-Type"))
-	if err != nil || !slices.Contains(validJWKSContentTypes, mediaType) {
-		_ = res.Body.Close()
-		return fmt.Errorf("expected content type %s, got: %s", strings.Join(validJWKSContentTypes, ", "), res.Header.Get("Content-Type"))
-	}
-	jwksb, err := readBounded(res.Body, maxProviderResponseBytes)
-	_ = res.Body.Close()
-	if err != nil {
-		return fmt.Errorf("reading JWKS body: %w", err)
-	}
-
-	keySet, err := jwt.ParseJWKSet(jwksb)
-	if err != nil {
-		return fmt.Errorf("creating key set from JWKS: %w", err)
+	if _, err := keys.KeySet(ctx); err != nil {
+		return fmt.Errorf("getting provider verification keys: %w", err)
 	}
 
 	p.cacheMu.Lock()
 	p.Metadata = md
-	p.cachedJWKS = jwksb
-	p.cachedKeySet = keySet
+	if p.VerificationKeys == nil {
+		p.keys = keys
+	}
 	p.cacheLastFetched = time.Now()
 	p.cacheMu.Unlock()
 
