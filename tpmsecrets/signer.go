@@ -270,12 +270,14 @@ func getKeyPublic(rwc transport.TPM, handle tpm2.TPMHandle) (crypto.PublicKey, e
 		return nil, err
 	}
 
-	x := big.NewInt(0).SetBytes(unique.X.Buffer)
-	y := big.NewInt(0).SetBytes(unique.Y.Buffer)
-
-	return &ecdsa.PublicKey{
-		Curve: elliptic.P256(),
-		X:     x,
-		Y:     y,
-	}, nil
+	x, y := unique.X.Buffer, unique.Y.Buffer
+	const coordSize = 32
+	if len(x) > coordSize || len(y) > coordSize {
+		return nil, fmt.Errorf("invalid P-256 public key coordinates")
+	}
+	uncompressed := make([]byte, 1+2*coordSize)
+	uncompressed[0] = 0x04
+	copy(uncompressed[1+coordSize-len(x):1+coordSize], x)
+	copy(uncompressed[1+2*coordSize-len(y):], y)
+	return ecdsa.ParseUncompressedPublicKey(elliptic.P256(), uncompressed)
 }

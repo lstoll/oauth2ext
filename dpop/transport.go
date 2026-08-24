@@ -3,9 +3,7 @@ package dpop
 import (
 	"fmt"
 	"net/http"
-	"time"
-
-	"github.com/tink-crypto/tink-go/v2/jwt"
+	"strings"
 )
 
 // Transport is an [http.RoundTripper] that adds DPoP headers to requests.
@@ -24,16 +22,18 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("dpop: Signer is nil")
 	}
 
-	// Generate DPoP proof with htm and htu claims
-	now := time.Now()
-	proof, err := t.Signer.SignAndEncode(&jwt.RawJWTOptions{
-		WithoutExpiration: true,
-		IssuedAt:          &now,
-		CustomClaims: map[string]any{
-			"htm": req.Method,
-			"htu": req.URL.String(),
-		},
-	})
+	proofURL := *req.URL
+	proofURL.RawQuery = ""
+	proofURL.ForceQuery = false
+	proofURL.Fragment = ""
+	options := ProofOptions{
+		HTTPMethod: req.Method,
+		HTTPURI:    proofURL.String(),
+	}
+	if scheme, token, ok := strings.Cut(req.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "DPoP") {
+		options.AccessToken = token
+	}
+	proof, err := t.Signer.SignAndEncode(options)
 	if err != nil {
 		return nil, fmt.Errorf("dpop: failed to create proof: %w", err)
 	}

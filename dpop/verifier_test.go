@@ -7,16 +7,15 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"maps"
 	"math/big"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/tink-crypto/tink-go/v2/jwt"
 )
 
 // Example DPoP token from RFC 9449 Appendix A.1
-// Header: {"typ":"dpop+jwt","alg":"ES256","jwk":{"kty":"EC","x":"l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfVWAWBFs","y":"9VE4jf_Ok_o64zbTTlcuNJajHmt6v9TDVrU0CdvGRDA","crv":"P-256"}}
+// Header: {"typ":"dpop+jwt","alg":"ES256","jwk":{"kty":"EC","x":"l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfWVAWBFs","y":"9VE4jf_Ok_o64zbTTlcuNJajHmt6v9TDVrU0CdvGRDA","crv":"P-256"}}
 // Claims: {"jti":"-BwC3ESc6acc2lTc","htm":"POST","htu":"https://server.example.com/token","iat":1562262616}
 // Note: This is an example token, but the signature may not be valid for the given JWK.
 // For a real test, we'd need to generate a token with a known private key.
@@ -35,7 +34,7 @@ func TestDPoPVerifier_ExampleToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse JWT header: %v", err)
 	}
-	jwk := header.GetFields()["jwk"].GetStructValue().AsMap()
+	jwk, _ := header["jwk"].(map[string]any)
 	if len(jwk) == 0 {
 		t.Fatal("jwk header is missing")
 	}
@@ -88,13 +87,13 @@ func TestDPoPVerifier_RoundTrip(t *testing.T) {
 	// DPoP tokens typically don't have an explicit expiration - they use iat with
 	// a validity window, so we mark it WithoutExpiration
 	now := time.Now()
-	opts := &jwt.RawJWTOptions{
-		WithoutExpiration: true,
-		CustomClaims: map[string]any{
-			"htm": "POST",
-			"htu": "https://server.example.com/token",
-		},
-		IssuedAt: &now,
+	opts := ProofOptions{
+		HTTPMethod:  "POST",
+		HTTPURI:     "https://server.example.com/token",
+		IssuedAt:    now,
+		JWTID:       "proof-id",
+		Nonce:       "server-nonce",
+		AccessToken: "access-token",
 	}
 
 	// SignAndEncode now automatically includes the jwk header
@@ -117,16 +116,20 @@ func TestDPoPVerifier_RoundTrip(t *testing.T) {
 		t.Fatalf("failed to create validator: %v", err)
 	}
 
-	// Verify using DPoPVerifier (which uses Tink internally)
 	verifier := &Verifier{}
-	verifiedJWT, err := verifier.VerifyAndDecode(token, validator)
+	proof, err := verifier.VerifyAndDecode(token, validator)
 	if err != nil {
 		t.Fatalf("failed to verify and decode DPoP token: %v", err)
 	}
 
-	// Verify the JWT is not nil
-	if verifiedJWT == nil {
-		t.Error("verifiedJWT is nil")
+	if proof.JWTID != "proof-id" || proof.HTTPMethod != opts.HTTPMethod || proof.HTTPURI != opts.HTTPURI {
+		t.Fatalf("unexpected verified proof: %+v", proof)
+	}
+	if proof.Nonce != opts.Nonce {
+		t.Fatalf("nonce: got %q, want %q", proof.Nonce, opts.Nonce)
+	}
+	if proof.AccessTokenHash != hashAccessToken(opts.AccessToken) {
+		t.Fatalf("ath: got %q, want %q", proof.AccessTokenHash, hashAccessToken(opts.AccessToken))
 	}
 
 	t.Logf("Successfully completed DPoP round-trip with thumbprint: %s", expectedThumbprint)
@@ -142,18 +145,11 @@ func TestDPoPVerifier_RejectsMissingJWK(t *testing.T) {
 	}
 
 	now := time.Now()
-	opts := &jwt.RawJWTOptions{
-		TypeHeader:        new("dpop+jwt"),
-		WithoutExpiration: true,
-		IssuedAt:          &now,
-	}
-	rawJWT, err := jwt.NewRawJWT(opts)
-	if err != nil {
-		t.Fatalf("failed to create raw JWT: %v", err)
-	}
-
-	// Encode without jwk header by passing empty additionalHeaders
-	token, err := signer.encodeWithHeaders(rawJWT, nil)
+	// Encode without jwk header.
+	token, err := signer.signPayload(map[string]any{
+		"jti": "test",
+		"iat": now.Unix(),
+	}, nil, false)
 	if err != nil {
 		t.Fatalf("failed to sign token: %v", err)
 	}
@@ -162,7 +158,7 @@ func TestDPoPVerifier_RejectsMissingJWK(t *testing.T) {
 	// We need to extract thumbprint from a valid token structure, but this token doesn't have jwk
 	// So we'll create a validator with an empty thumbprint - it should fail during header parsing
 	validator, err := NewValidator(&ValidatorOpts{
-		ExpectedThumbprint: "", // Will fail during verification
+		IgnoreThumbprint: true,
 	})
 	if err != nil {
 		t.Fatalf("failed to create validator: %v", err)
@@ -187,14 +183,10 @@ func TestDPoPVerifier_RejectsExpiredToken(t *testing.T) {
 
 	// Issue token 20 minutes ago (default validity is 10 minutes)
 	issuedAt := time.Now().Add(-20 * time.Minute)
-	opts := &jwt.RawJWTOptions{
-		TypeHeader:        new("dpop+jwt"),
-		WithoutExpiration: true,
-		IssuedAt:          &issuedAt,
-		CustomClaims: map[string]any{
-			"htm": "POST",
-			"htu": "https://server.example.com/token",
-		},
+	opts := ProofOptions{
+		HTTPMethod: "POST",
+		HTTPURI:    "https://server.example.com/token",
+		IssuedAt:   issuedAt,
 	}
 	token, err := signer.SignAndEncode(opts)
 	if err != nil {
@@ -223,13 +215,43 @@ func TestDPoPVerifier_RejectsExpiredToken(t *testing.T) {
 	t.Logf("correctly rejected expired token: %v", err)
 }
 
+func TestDPoPVerifier_RequiresDPoPClaims(t *testing.T) {
+	signer, err := NewSigner(generateTestKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator, err := NewValidator(&ValidatorOpts{ExpectedThumbprint: signer.thumb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseClaims := map[string]any{
+		"jti": "proof-id",
+		"iat": time.Now().Unix(),
+		"htm": "POST",
+		"htu": "https://server.example.com/token",
+	}
+	for _, claim := range []string{"jti", "iat", "htm", "htu"} {
+		t.Run(claim, func(t *testing.T) {
+			payload := maps.Clone(baseClaims)
+			delete(payload, claim)
+			compact, err := signer.signPayload(payload, nil, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := new(Verifier).VerifyAndDecode(compact, validator); err == nil || !strings.Contains(err.Error(), claim+" claim is required") {
+				t.Fatalf("error: got %v, want missing %s claim", err, claim)
+			}
+		})
+	}
+}
+
 func TestJWKThumbprint_Calculation(t *testing.T) {
 	// Test that thumbprint calculation works correctly
 	// The JWK from the RFC example:
 	jwk := map[string]any{
 		"kty": "EC",
 		"crv": "P-256",
-		"x":   "l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfVWAWBFs",
+		"x":   "l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfWVAWBFs",
 		"y":   "9VE4jf_Ok_o64zbTTlcuNJajHmt6v9TDVrU0CdvGRDA",
 	}
 
@@ -268,13 +290,10 @@ func TestDPoPVerifier_HTM_HTU_Validation(t *testing.T) {
 	}
 
 	now := time.Now()
-	opts := &jwt.RawJWTOptions{
-		WithoutExpiration: true,
-		CustomClaims: map[string]any{
-			"htm": "POST",
-			"htu": "https://server.example.com/token",
-		},
-		IssuedAt: &now,
+	opts := ProofOptions{
+		HTTPMethod: "POST",
+		HTTPURI:    "https://server.example.com/token",
+		IssuedAt:   now,
 	}
 
 	token, err := signer.SignAndEncode(opts)
@@ -366,221 +385,6 @@ func TestDPoPVerifier_HTM_HTU_Validation(t *testing.T) {
 	})
 }
 
-func TestDPoPVerifier_AllowUnsetHTMHTU(t *testing.T) {
-	privKey := generateTestKey(t)
-	signer, err := NewSigner(privKey)
-	if err != nil {
-		t.Fatalf("failed to create encoder: %v", err)
-	}
-
-	expectedThumbprint, err := calculateJWKThumbprint(signer.jwk)
-	if err != nil {
-		t.Fatalf("failed to calculate thumbprint: %v", err)
-	}
-
-	htm := "POST"
-	htu := "https://server.example.com/token"
-
-	t.Run("AllowUnsetHTMHTU=false rejects missing htm", func(t *testing.T) {
-		// Create token without htm claim
-		now := time.Now()
-		opts := &jwt.RawJWTOptions{
-			WithoutExpiration: true,
-			CustomClaims: map[string]any{
-				"htu": htu,
-			},
-			IssuedAt: &now,
-		}
-		token, err := signer.SignAndEncode(opts)
-		if err != nil {
-			t.Fatalf("failed to encode DPoP token: %v", err)
-		}
-
-		validator, err := NewValidator(&ValidatorOpts{
-			ExpectedThumbprint: expectedThumbprint,
-			ExpectedHTM:        &htm,
-			AllowUnsetHTMHTU:   false,
-		})
-		if err != nil {
-			t.Fatalf("failed to create validator: %v", err)
-		}
-
-		verifier := &Verifier{}
-		_, err = verifier.VerifyAndDecode(token, validator)
-		if err == nil {
-			t.Fatal("expected error for missing htm claim when AllowUnsetHTMHTU=false")
-		}
-		if !strings.Contains(err.Error(), "htm claim missing") {
-			t.Errorf("expected htm missing error, got: %v", err)
-		}
-	})
-
-	t.Run("AllowUnsetHTMHTU=false rejects missing htu", func(t *testing.T) {
-		// Create token without htu claim
-		now := time.Now()
-		opts := &jwt.RawJWTOptions{
-			WithoutExpiration: true,
-			CustomClaims: map[string]any{
-				"htm": htm,
-			},
-			IssuedAt: &now,
-		}
-		token, err := signer.SignAndEncode(opts)
-		if err != nil {
-			t.Fatalf("failed to encode DPoP token: %v", err)
-		}
-
-		validator, err := NewValidator(&ValidatorOpts{
-			ExpectedThumbprint: expectedThumbprint,
-			ExpectedHTU:        &htu,
-			AllowUnsetHTMHTU:   false,
-		})
-		if err != nil {
-			t.Fatalf("failed to create validator: %v", err)
-		}
-
-		verifier := &Verifier{}
-		_, err = verifier.VerifyAndDecode(token, validator)
-		if err == nil {
-			t.Fatal("expected error for missing htu claim when AllowUnsetHTMHTU=false")
-		}
-		if !strings.Contains(err.Error(), "htu claim missing") {
-			t.Errorf("expected htu missing error, got: %v", err)
-		}
-	})
-
-	t.Run("AllowUnsetHTMHTU=true allows missing htm", func(t *testing.T) {
-		// Create token without htm claim
-		now := time.Now()
-		opts := &jwt.RawJWTOptions{
-			WithoutExpiration: true,
-			CustomClaims: map[string]any{
-				"htu": htu,
-			},
-			IssuedAt: &now,
-		}
-		token, err := signer.SignAndEncode(opts)
-		if err != nil {
-			t.Fatalf("failed to encode DPoP token: %v", err)
-		}
-
-		validator, err := NewValidator(&ValidatorOpts{
-			ExpectedThumbprint: expectedThumbprint,
-			ExpectedHTM:        &htm,
-			AllowUnsetHTMHTU:   true,
-		})
-		if err != nil {
-			t.Fatalf("failed to create validator: %v", err)
-		}
-
-		verifier := &Verifier{}
-		_, err = verifier.VerifyAndDecode(token, validator)
-		if err != nil {
-			t.Fatalf("verification should succeed with missing htm when AllowUnsetHTMHTU=true: %v", err)
-		}
-	})
-
-	t.Run("AllowUnsetHTMHTU=true allows missing htu", func(t *testing.T) {
-		// Create token without htu claim
-		now := time.Now()
-		opts := &jwt.RawJWTOptions{
-			WithoutExpiration: true,
-			CustomClaims: map[string]any{
-				"htm": htm,
-			},
-			IssuedAt: &now,
-		}
-		token, err := signer.SignAndEncode(opts)
-		if err != nil {
-			t.Fatalf("failed to encode DPoP token: %v", err)
-		}
-
-		validator, err := NewValidator(&ValidatorOpts{
-			ExpectedThumbprint: expectedThumbprint,
-			ExpectedHTU:        &htu,
-			AllowUnsetHTMHTU:   true,
-		})
-		if err != nil {
-			t.Fatalf("failed to create validator: %v", err)
-		}
-
-		verifier := &Verifier{}
-		_, err = verifier.VerifyAndDecode(token, validator)
-		if err != nil {
-			t.Fatalf("verification should succeed with missing htu when AllowUnsetHTMHTU=true: %v", err)
-		}
-	})
-
-	t.Run("AllowUnsetHTMHTU=true still validates when claims exist", func(t *testing.T) {
-		// Create token with both claims
-		now := time.Now()
-		opts := &jwt.RawJWTOptions{
-			WithoutExpiration: true,
-			CustomClaims: map[string]any{
-				"htm": htm,
-				"htu": htu,
-			},
-			IssuedAt: &now,
-		}
-		token, err := signer.SignAndEncode(opts)
-		if err != nil {
-			t.Fatalf("failed to encode DPoP token: %v", err)
-		}
-
-		validator, err := NewValidator(&ValidatorOpts{
-			ExpectedThumbprint: expectedThumbprint,
-			ExpectedHTM:        &htm,
-			ExpectedHTU:        &htu,
-			AllowUnsetHTMHTU:   true,
-		})
-		if err != nil {
-			t.Fatalf("failed to create validator: %v", err)
-		}
-
-		verifier := &Verifier{}
-		_, err = verifier.VerifyAndDecode(token, validator)
-		if err != nil {
-			t.Fatalf("verification should succeed with matching claims: %v", err)
-		}
-	})
-
-	t.Run("AllowUnsetHTMHTU=true still rejects mismatched claims", func(t *testing.T) {
-		// Create token with mismatched htm
-		now := time.Now()
-		opts := &jwt.RawJWTOptions{
-			WithoutExpiration: true,
-			CustomClaims: map[string]any{
-				"htm": "GET", // Different from expected
-				"htu": htu,
-			},
-			IssuedAt: &now,
-		}
-		token, err := signer.SignAndEncode(opts)
-		if err != nil {
-			t.Fatalf("failed to encode DPoP token: %v", err)
-		}
-
-		validator, err := NewValidator(&ValidatorOpts{
-			ExpectedThumbprint: expectedThumbprint,
-			ExpectedHTM:        &htm,
-			ExpectedHTU:        &htu,
-			AllowUnsetHTMHTU:   true,
-		})
-		if err != nil {
-			t.Fatalf("failed to create validator: %v", err)
-		}
-
-		verifier := &Verifier{}
-		_, err = verifier.VerifyAndDecode(token, validator)
-		if err == nil {
-			t.Fatal("expected error for mismatched htm claim even when AllowUnsetHTMHTU=true")
-		}
-		if !strings.Contains(err.Error(), "htm claim mismatch") {
-			t.Errorf("expected htm mismatch error, got: %v", err)
-		}
-	})
-}
-
 // testLeafCertChain returns a leaf ECDSA key, leaf cert, and CA cert (leaf signed by CA).
 func testLeafCertChain(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate, *x509.Certificate) {
 	t.Helper()
@@ -660,14 +464,9 @@ func TestDPoPVerifier_TrustedRoots_X5C(t *testing.T) {
 		t.Fatalf("NewSignerWithCertificateChain: %v", err)
 	}
 
-	now := time.Now()
-	token, err := signer.SignAndEncode(&jwt.RawJWTOptions{
-		WithoutExpiration: true,
-		CustomClaims: map[string]any{
-			"htm": "POST",
-			"htu": "https://server.example.com/token",
-		},
-		IssuedAt: &now,
+	token, err := signer.SignAndEncode(ProofOptions{
+		HTTPMethod: "POST",
+		HTTPURI:    "https://server.example.com/token",
 	})
 	if err != nil {
 		t.Fatalf("SignAndEncode: %v", err)
@@ -718,18 +517,16 @@ func TestDPoPVerifier_TrustedRoots_RequiresX5C(t *testing.T) {
 		t.Fatalf("NewSigner: %v", err)
 	}
 
-	now := time.Now()
-	token, err := signer.SignAndEncode(&jwt.RawJWTOptions{
-		WithoutExpiration: true,
-		IssuedAt:          &now,
+	token, err := signer.SignAndEncode(ProofOptions{
+		HTTPMethod: "POST",
+		HTTPURI:    "https://server.example.com/token",
 	})
 	if err != nil {
 		t.Fatalf("SignAndEncode: %v", err)
 	}
 
 	val, err := NewValidator(&ValidatorOpts{
-		ExpectedThumbprint: mustThumbprint(t, signer.jwk),
-		IgnoreThumbprint:   true,
+		IgnoreThumbprint: true,
 	})
 	if err != nil {
 		t.Fatalf("NewValidator: %v", err)
@@ -775,10 +572,9 @@ func TestDPoPVerifier_TrustedRoots_WrongRoot(t *testing.T) {
 		t.Fatalf("NewSignerWithCertificateChain: %v", err)
 	}
 
-	now := time.Now()
-	token, err := signer.SignAndEncode(&jwt.RawJWTOptions{
-		WithoutExpiration: true,
-		IssuedAt:          &now,
+	token, err := signer.SignAndEncode(ProofOptions{
+		HTTPMethod: "POST",
+		HTTPURI:    "https://server.example.com/token",
 	})
 	if err != nil {
 		t.Fatalf("SignAndEncode: %v", err)
@@ -788,8 +584,7 @@ func TestDPoPVerifier_TrustedRoots_WrongRoot(t *testing.T) {
 	wrongRoots.AddCert(otherCA)
 
 	val, err := NewValidator(&ValidatorOpts{
-		ExpectedThumbprint: mustThumbprint(t, signer.jwk),
-		IgnoreThumbprint:   true,
+		IgnoreThumbprint: true,
 	})
 	if err != nil {
 		t.Fatalf("NewValidator: %v", err)
@@ -818,22 +613,15 @@ func TestDPoPVerifier_TrustedRoots_JWKMismatchesLeaf(t *testing.T) {
 		t.Fatalf("NewSigner: %v", err)
 	}
 
-	now := time.Now()
-	rawJWT, err := jwt.NewRawJWT(&jwt.RawJWTOptions{
-		TypeHeader:        new("dpop+jwt"),
-		WithoutExpiration: true,
-		IssuedAt:          &now,
-	})
-	if err != nil {
-		t.Fatalf("NewRawJWT: %v", err)
-	}
-
-	token, err := signer.encodeWithHeaders(rawJWT, map[string]any{
+	token, err := signer.signPayload(map[string]any{
+		"jti": "test",
+		"iat": time.Now().Unix(),
+	}, map[string]any{
 		"jwk": otherJWK,
 		"x5c": x5cB64Chain(leafCert, caCert),
-	})
+	}, false)
 	if err != nil {
-		t.Fatalf("encodeWithHeaders: %v", err)
+		t.Fatalf("signPayload: %v", err)
 	}
 
 	roots := x509.NewCertPool()
@@ -852,13 +640,4 @@ func TestDPoPVerifier_TrustedRoots_JWKMismatchesLeaf(t *testing.T) {
 	if !strings.Contains(err.Error(), "jwk does not match x5c leaf") {
 		t.Errorf("unexpected error: %v", err)
 	}
-}
-
-func mustThumbprint(t *testing.T, jwk map[string]any) string {
-	t.Helper()
-	tp, err := calculateJWKThumbprint(jwk)
-	if err != nil {
-		t.Fatalf("thumbprint: %v", err)
-	}
-	return tp
 }

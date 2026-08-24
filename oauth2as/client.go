@@ -3,11 +3,13 @@ package oauth2as
 import (
 	"context"
 	"net/url"
+
+	"lds.li/oauth2ext/jwt"
 )
 
 type clientOpts struct {
-	skipPKCE   bool
-	signingAlg string
+	skipPKCE                bool
+	idTokenSigningAlgorithm jwt.Algorithm
 }
 
 // ClientOpt is a flag that can be set on a given client, to adjust various
@@ -21,9 +23,11 @@ func ClientOptSkipPKCE() ClientOpt {
 	}
 }
 
-func ClientOptSigningAlg(alg string) ClientOpt {
+// ClientOptIDTokenSigningAlgorithm selects the ID-token signing algorithm for
+// a client that cannot use the server default.
+func ClientOptIDTokenSigningAlgorithm(algorithm jwt.Algorithm) ClientOpt {
 	return func(opts *clientOpts) {
-		opts.signingAlg = alg
+		opts.idTokenSigningAlgorithm = algorithm
 	}
 }
 

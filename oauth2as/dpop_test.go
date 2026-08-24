@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
 	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
@@ -68,14 +67,9 @@ func TestDPoPTokenFlow(t *testing.T) {
 	t.Run("Initial token exchange with DPoP", func(t *testing.T) {
 		codeToken := newCodeGrant(t, server.config.Storage)
 
-		now := time.Now()
-		dpopProof, err := dpopSigner.SignAndEncode(&jwt.RawJWTOptions{
-			WithoutExpiration: true,
-			IssuedAt:          &now,
-			CustomClaims: map[string]any{
-				"htm": http.MethodPost,
-				"htu": issuer + "/token",
-			},
+		dpopProof, err := dpopSigner.SignAndEncode(dpop.ProofOptions{
+			HTTPMethod: http.MethodPost,
+			HTTPURI:    issuer + "/token",
 		})
 		if err != nil {
 			t.Fatalf("failed to create DPoP proof: %v", err)
@@ -150,8 +144,11 @@ func TestDPoPTokenFlow(t *testing.T) {
 			t.Fatalf("failed to create grant: %v", err)
 		}
 
-		refreshToken := token.New(tokenUsageRefresh, grantID, userID)
 		refreshTokenID := newUUIDv4()
+		refreshToken, err := token.New(tokenUsageRefresh, refreshTokenID, grantID, userID)
+		if err != nil {
+			t.Fatalf("failed to generate refresh token: %v", err)
+		}
 
 		// Create token entry for the refresh token
 		err = server.config.Storage.CreateRefreshToken(context.Background(), refreshTokenID, &StoredRefreshToken{
@@ -163,16 +160,11 @@ func TestDPoPTokenFlow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to create refresh token: %v", err)
 		}
-		refreshTokenStr := refreshToken.ToUser(refreshTokenID)
+		refreshTokenStr := refreshToken.UserToken()
 
-		now := time.Now()
-		dpopProof, err := dpopSigner.SignAndEncode(&jwt.RawJWTOptions{
-			WithoutExpiration: true,
-			IssuedAt:          &now,
-			CustomClaims: map[string]any{
-				"htm": http.MethodPost,
-				"htu": issuer + "/token",
-			},
+		dpopProof, err := dpopSigner.SignAndEncode(dpop.ProofOptions{
+			HTTPMethod: http.MethodPost,
+			HTTPURI:    issuer + "/token",
 		})
 		if err != nil {
 			t.Fatalf("failed to create DPoP proof: %v", err)
@@ -183,7 +175,6 @@ func TestDPoPTokenFlow(t *testing.T) {
 			ExpectedHTM:      new(http.MethodPost),
 			ExpectedHTU:      new(issuer + "/token"),
 			IgnoreThumbprint: true,
-			AllowUnsetHTMHTU: true,
 		})
 		if err != nil {
 			t.Fatalf("failed to create validator: %v", err)
@@ -247,8 +238,11 @@ func TestDPoPTokenFlow(t *testing.T) {
 				t.Fatalf("failed to create grant: %v", err)
 			}
 
-			refreshToken2 := token.New(tokenUsageRefresh, grantID2, userID)
 			refreshTokenID2 := newUUIDv4()
+			refreshToken2, err := token.New(tokenUsageRefresh, refreshTokenID2, grantID2, userID)
+			if err != nil {
+				t.Fatalf("failed to generate refresh token: %v", err)
+			}
 
 			// Create token entry for the refresh token
 			err = server.config.Storage.CreateRefreshToken(context.Background(), refreshTokenID2, &StoredRefreshToken{
@@ -260,7 +254,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to create refresh token: %v", err)
 			}
-			refreshTokenStr2 := refreshToken2.ToUser(refreshTokenID2)
+			refreshTokenStr2 := refreshToken2.UserToken()
 
 			// Request without DPoP header
 			req := httptest.NewRequest(http.MethodPost, "/token", nil)
@@ -314,8 +308,11 @@ func TestDPoPTokenFlow(t *testing.T) {
 				t.Fatalf("failed to create grant: %v", err)
 			}
 
-			refreshToken3 := token.New(tokenUsageRefresh, grantID3, userID)
 			refreshTokenID3 := newUUIDv4()
+			refreshToken3, err := token.New(tokenUsageRefresh, refreshTokenID3, grantID3, userID)
+			if err != nil {
+				t.Fatalf("failed to generate refresh token: %v", err)
+			}
 
 			// Create token entry for the refresh token
 			err = server.config.Storage.CreateRefreshToken(context.Background(), refreshTokenID3, &StoredRefreshToken{
@@ -327,17 +324,12 @@ func TestDPoPTokenFlow(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to create refresh token: %v", err)
 			}
-			refreshTokenStr3 := refreshToken3.ToUser(refreshTokenID3)
+			refreshTokenStr3 := refreshToken3.UserToken()
 
 			// Create DPoP proof with wrong key
-			now := time.Now()
-			wrongProof, err := wrongSigner.SignAndEncode(&jwt.RawJWTOptions{
-				WithoutExpiration: true,
-				IssuedAt:          &now,
-				CustomClaims: map[string]any{
-					"htm": http.MethodPost,
-					"htu": issuer + "/token",
-				},
+			wrongProof, err := wrongSigner.SignAndEncode(dpop.ProofOptions{
+				HTTPMethod: http.MethodPost,
+				HTTPURI:    issuer + "/token",
 			})
 			if err != nil {
 				t.Fatalf("failed to create DPoP proof: %v", err)

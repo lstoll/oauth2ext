@@ -1,331 +1,429 @@
 package dpop
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
-	"maps"
+	"math"
+	"slices"
 	"time"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
-	"github.com/tink-crypto/tink-go/v2/keyset"
-	"google.golang.org/protobuf/types/known/structpb"
+	jose "github.com/go-jose/go-jose/v4"
 )
 
-// DefaultValidityAfterIssue is the default validity after the issue time for a
-// DPoP token, if it has no explicit expiry.
-const DefaultValidityAfterIssue = 10 * time.Minute
+const (
+	// DefaultValidityAfterIssue is the default maximum age of a DPoP proof.
+	DefaultValidityAfterIssue = 10 * time.Minute
+	// DefaultClockSkew is the default allowance for clock differences.
+	DefaultClockSkew = time.Minute
+	// MaxClockSkew is the largest accepted clock-skew allowance.
+	MaxClockSkew = 10 * time.Minute
+)
 
 type Verifier struct {
-	// ValidityAfterIssue is the validity after the issue time for a DPoP token,
-	// if it has no explicit expiry. Defaults to DefaultValidityAfterIssue.
+	// ValidityAfterIssue is the maximum age of a DPoP proof. It defaults to
+	// DefaultValidityAfterIssue.
 	ValidityAfterIssue time.Duration
+	// ClockSkew is the clock-difference allowance. It defaults to
+	// DefaultClockSkew and is capped at MaxClockSkew.
+	ClockSkew time.Duration
 
-	// TrustedRoots, when non-nil, requires a non-empty x5c JWT header. The leaf
-	// certificate must chain to one of these roots (per x509.Verify). The JWT
-	// signature is verified using the leaf certificate's public key. When nil,
-	// verification uses the embedded jwk header only (RFC 9449 default). Any
-	// key usage will be considered valid.
+	// TrustedRoots, when non-nil, requires and validates an x5c header. When
+	// nil, the proof is verified with its embedded jwk header.
 	TrustedRoots *x509.CertPool
 
 	now time.Time
 }
 
-// Proof is the result of verifying a DPoP token.
+// Proof is a verified DPoP proof.
 type Proof struct {
-	// VerifiedJWT is the verified JWT.
-	VerifiedJWT *jwt.VerifiedJWT
-	// Thumbprint is the JWK thumbprint.
-	Thumbprint string
-	// CertificateChain is the validated x5c chain (leaf first, then
-	// intermediates toward the trust anchor) when [Verifier.TrustedRoots] was
-	// set; otherwise nil.
+	Thumbprint       string
 	CertificateChain []*x509.Certificate
+	JWTID            string
+	HTTPMethod       string
+	HTTPURI          string
+	IssuedAt         time.Time
+	ExpiresAt        *time.Time
+	Nonce            string
+	AccessTokenHash  string
 }
 
-// ValidatorOpts parameters for DPoP token validation.
+// ValidatorOpts contains request-specific DPoP checks.
 type ValidatorOpts struct {
-	// ExpectedThumbprint is the expected JWK thumbprint. The token must match
-	// this.
 	ExpectedThumbprint string
-	// IgnoreThumbprint is used to ignore the thumbprint check, this is useful
-	// for the initial validation before the thumbprint is bound to the token.
-	IgnoreThumbprint bool
-	// ExpectedHTM is the expected HTTP method. If set, the htm claim must match.
-	ExpectedHTM *string
-	// ExpectedHTU is the expected HTTP URI. If set, the htu claim must match.
-	ExpectedHTU *string
-	// AllowUnsetHTMHTU is used to allow the htm and htu claims to be unset. If
-	// this is true, the expected values will only be checked if the claims are
-	// set.
-	AllowUnsetHTMHTU bool
+	IgnoreThumbprint   bool
+	ExpectedHTM        *string
+	ExpectedHTU        *string
 }
 
-// Validator is used to validate DPoP tokens
 type Validator struct {
-	opts *ValidatorOpts
+	opts ValidatorOpts
 }
 
 func NewValidator(opts *ValidatorOpts) (*Validator, error) {
-	return &Validator{
-		opts: opts,
-	}, nil
+	if opts == nil {
+		return nil, fmt.Errorf("dpop: validator options are required")
+	}
+	if (opts.ExpectedThumbprint != "") == opts.IgnoreThumbprint {
+		return nil, fmt.Errorf("dpop: exactly one of ExpectedThumbprint and IgnoreThumbprint must be set")
+	}
+	if opts.ExpectedHTM != nil && *opts.ExpectedHTM == "" {
+		return nil, fmt.Errorf("dpop: ExpectedHTM must not be empty")
+	}
+	if opts.ExpectedHTU != nil && *opts.ExpectedHTU == "" {
+		return nil, fmt.Errorf("dpop: ExpectedHTU must not be empty")
+	}
+	cloned := *opts
+	if opts.ExpectedHTM != nil {
+		cloned.ExpectedHTM = new(*opts.ExpectedHTM)
+	}
+	if opts.ExpectedHTU != nil {
+		cloned.ExpectedHTU = new(*opts.ExpectedHTU)
+	}
+	return &Validator{opts: cloned}, nil
 }
 
-// VerifyAndDecode verifies a DPoP token and returns the verified JWT along with
-// the JWK thumbprint.
-func (d *Verifier) VerifyAndDecode(compact string, validator *Validator) (*Proof, error) {
+// VerifyAndDecode verifies a compact DPoP proof and applies validator.
+func (v *Verifier) VerifyAndDecode(compact string, validator *Validator) (*Proof, error) {
+	if v == nil {
+		return nil, fmt.Errorf("dpop: verifier is nil")
+	}
+	if validator == nil {
+		return nil, fmt.Errorf("dpop: validator is nil")
+	}
 	header, err := parseJWTHeader(compact)
 	if err != nil {
 		return nil, fmt.Errorf("parsing JWT header: %w", err)
 	}
+	algorithm, err := requiredHeaderString(header, "alg")
+	if err != nil {
+		return nil, err
+	}
+	if typ, err := requiredHeaderString(header, "typ"); err != nil {
+		return nil, err
+	} else if typ != "dpop+jwt" {
+		return nil, fmt.Errorf("typ header mismatch: got %q, want %q", typ, "dpop+jwt")
+	}
+	for _, forbidden := range []string{"crit", "jku", "x5u"} {
+		if _, ok := header[forbidden]; ok {
+			return nil, fmt.Errorf("unsupported %s header", forbidden)
+		}
+	}
 
+	var publicKey any
 	var thumbprint string
-	var handle *keyset.Handle
-	var certChain []*x509.Certificate
-
-	if d.TrustedRoots != nil {
-		thumbprint, handle, certChain, err = d.verifyMaterialFromX5C(header)
+	var certificateChain []*x509.Certificate
+	if v.TrustedRoots == nil {
+		thumbprint, publicKey, err = verifyMaterialFromJWK(header)
 	} else {
-		thumbprint, handle, err = verifyMaterialFromJWK(header)
+		thumbprint, publicKey, certificateChain, err = v.verifyMaterialFromX5C(header)
 	}
 	if err != nil {
 		return nil, err
 	}
-
+	if err := validateAlgorithmKey(algorithm, publicKey); err != nil {
+		return nil, err
+	}
 	if !validator.opts.IgnoreThumbprint && thumbprint != validator.opts.ExpectedThumbprint {
 		return nil, fmt.Errorf("JWK thumbprint mismatch: got %q, want %q", thumbprint, validator.opts.ExpectedThumbprint)
 	}
 
-	jwtVerifier, err := jwt.NewVerifier(handle)
+	signed, err := jose.ParseSigned(compact, []jose.SignatureAlgorithm{jose.SignatureAlgorithm(algorithm)})
 	if err != nil {
-		return nil, fmt.Errorf("creating tink verifier: %w", err)
+		return nil, fmt.Errorf("parsing signed proof: %w", err)
 	}
-
-	tinkValidator, err := jwt.NewValidator(&jwt.ValidatorOpts{
-		ExpectedTypeHeader:     new("dpop+jwt"),
-		AllowMissingExpiration: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("creating validator: %w", err)
+	if len(signed.Signatures) != 1 {
+		return nil, fmt.Errorf("DPoP proof must have exactly one signature")
 	}
-
-	verifiedJWT, err := jwtVerifier.VerifyAndDecode(compact, tinkValidator)
+	payloadJSON, err := signed.Verify(publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("verifying JWT: %w", err)
 	}
-
-	now := time.Now()
-	if !d.now.IsZero() {
-		now = d.now
+	var claims map[string]any
+	if err := jsonv2.Unmarshal(payloadJSON, &claims); err != nil {
+		return nil, fmt.Errorf("decoding DPoP claims: %w", err)
+	}
+	if claims == nil {
+		return nil, fmt.Errorf("DPoP payload is not an object")
 	}
 
-	if !verifiedJWT.HasExpiration() {
-		iat, err := verifiedJWT.IssuedAt()
+	clockSkew, err := v.clockSkew()
+	if err != nil {
+		return nil, err
+	}
+	proof, err := validateProofClaims(claims, validator.opts, v.validationTime(), v.validity(), clockSkew)
+	if err != nil {
+		return nil, err
+	}
+	proof.Thumbprint = thumbprint
+	proof.CertificateChain = slices.Clone(certificateChain)
+	return proof, nil
+}
+
+func (v *Verifier) validationTime() time.Time {
+	if !v.now.IsZero() {
+		return v.now
+	}
+	return time.Now()
+}
+
+func (v *Verifier) validity() time.Duration {
+	if v.ValidityAfterIssue == 0 {
+		return DefaultValidityAfterIssue
+	}
+	return v.ValidityAfterIssue
+}
+
+func (v *Verifier) clockSkew() (time.Duration, error) {
+	if v.ClockSkew < 0 || v.ClockSkew > MaxClockSkew {
+		return 0, fmt.Errorf("dpop: ClockSkew must be between 0 and %s", MaxClockSkew)
+	}
+	if v.ClockSkew == 0 {
+		return DefaultClockSkew, nil
+	}
+	return v.ClockSkew, nil
+}
+
+func validateProofClaims(claims map[string]any, opts ValidatorOpts, now time.Time, validity, clockSkew time.Duration) (*Proof, error) {
+	if validity < 0 {
+		return nil, fmt.Errorf("dpop: ValidityAfterIssue must not be negative")
+	}
+	jti, err := requiredStringClaim(claims, "jti")
+	if err != nil {
+		return nil, err
+	}
+	iat, err := requiredNumericDate(claims, "iat")
+	if err != nil {
+		return nil, err
+	}
+	if iat.After(now.Add(clockSkew)) {
+		return nil, fmt.Errorf("iat claim is in the future")
+	}
+	if now.After(iat.Add(validity).Add(clockSkew)) {
+		return nil, fmt.Errorf("token expired")
+	}
+
+	proof := &Proof{JWTID: jti, IssuedAt: iat}
+	if value, ok := claims["exp"]; ok {
+		expiresAt, err := numericDate(value, "exp")
 		if err != nil {
-			return nil, fmt.Errorf("getting issued at: %w", err)
+			return nil, err
 		}
-		vp := d.ValidityAfterIssue
-		if vp == 0 {
-			vp = DefaultValidityAfterIssue
-		}
-		if now.After(iat.Add(vp)) {
+		if now.After(expiresAt.Add(clockSkew)) {
 			return nil, fmt.Errorf("token expired")
 		}
+		proof.ExpiresAt = &expiresAt
 	}
-
-	if validator.opts.ExpectedHTM != nil {
-		if !verifiedJWT.HasStringClaim("htm") {
-			if !validator.opts.AllowUnsetHTMHTU {
-				return nil, fmt.Errorf("htm claim missing")
-			}
-			// If AllowUnsetHTMHTU is true, we allow the claim to be missing
-		} else {
-			// Claim exists, so we must validate it matches
-			htm, err := verifiedJWT.StringClaim("htm")
-			if err != nil {
-				return nil, fmt.Errorf("getting htm claim: %w", err)
-			}
-			if htm != *validator.opts.ExpectedHTM {
-				return nil, fmt.Errorf("htm claim mismatch: got %q, want %q", htm, *validator.opts.ExpectedHTM)
-			}
+	proof.HTTPMethod, err = requiredStringClaim(claims, "htm")
+	if err != nil {
+		return nil, err
+	}
+	proof.HTTPURI, err = requiredStringClaim(claims, "htu")
+	if err != nil {
+		return nil, err
+	}
+	proof.Nonce, err = optionalStringClaim(claims, "nonce")
+	if err != nil {
+		return nil, err
+	}
+	proof.AccessTokenHash, err = optionalStringClaim(claims, "ath")
+	if err != nil {
+		return nil, err
+	}
+	if opts.ExpectedHTM != nil {
+		if proof.HTTPMethod != *opts.ExpectedHTM {
+			return nil, fmt.Errorf("htm claim mismatch: got %q, want %q", proof.HTTPMethod, *opts.ExpectedHTM)
 		}
 	}
-
-	if validator.opts.ExpectedHTU != nil {
-		if !verifiedJWT.HasStringClaim("htu") {
-			if !validator.opts.AllowUnsetHTMHTU {
-				return nil, fmt.Errorf("htu claim missing")
-			}
-			// If AllowUnsetHTMHTU is true, we allow the claim to be missing
-		} else {
-			// Claim exists, so we must validate it matches
-			htu, err := verifiedJWT.StringClaim("htu")
-			if err != nil {
-				return nil, fmt.Errorf("getting htu claim: %w", err)
-			}
-			if htu != *validator.opts.ExpectedHTU {
-				return nil, fmt.Errorf("htu claim mismatch: got %q, want %q", htu, *validator.opts.ExpectedHTU)
-			}
+	if opts.ExpectedHTU != nil {
+		if proof.HTTPURI != *opts.ExpectedHTU {
+			return nil, fmt.Errorf("htu claim mismatch: got %q, want %q", proof.HTTPURI, *opts.ExpectedHTU)
 		}
 	}
-
-	return &Proof{
-		VerifiedJWT:      verifiedJWT,
-		Thumbprint:       thumbprint,
-		CertificateChain: certChain,
-	}, nil
+	return proof, nil
 }
 
-func headerAlg(header *structpb.Struct) (string, error) {
-	if !hasClaimOfKind(header, "alg", &structpb.Value{Kind: &structpb.Value_StringValue{}}) {
-		return "", fmt.Errorf("alg header is missing")
+func requiredHeaderString(header map[string]any, name string) (string, error) {
+	value, ok := header[name]
+	if !ok {
+		return "", fmt.Errorf("%s header is missing", name)
 	}
-	alg := header.GetFields()["alg"].GetStringValue()
-	if alg == "" {
-		return "", fmt.Errorf("alg header is empty")
+	text, ok := value.(string)
+	if !ok || text == "" {
+		return "", fmt.Errorf("%s header is not a non-empty string", name)
 	}
-	return alg, nil
+	return text, nil
 }
 
-func keysetHandleFromJWKWithAlg(jwk map[string]any, alg string) (*keyset.Handle, error) {
-	jwkForTink := make(map[string]any)
-	maps.Copy(jwkForTink, jwk)
-	jwkForTink["alg"] = alg
-	jwkWithAlgJSON, err := json.Marshal(jwkForTink)
+func requiredStringClaim(claims map[string]any, name string) (string, error) {
+	value, err := optionalStringClaim(claims, name)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling jwk with alg: %w", err)
+		return "", err
 	}
-	handle, err := jwt.JWKSetToPublicKeysetHandle(fmt.Appendf(nil, `{"keys":[%s]}`, string(jwkWithAlgJSON)))
-	if err != nil {
-		return nil, fmt.Errorf("creating keyset handle from JWK: %w", err)
+	if value == "" {
+		return "", fmt.Errorf("%s claim is required", name)
 	}
-	return handle, nil
+	return value, nil
 }
 
-func verifyMaterialFromJWK(header *structpb.Struct) (thumbprint string, handle *keyset.Handle, err error) {
-	if !hasClaimOfKind(header, "jwk", &structpb.Value{Kind: &structpb.Value_StructValue{}}) {
-		return "", nil, fmt.Errorf("jwk header is missing")
+func optionalStringClaim(claims map[string]any, name string) (string, error) {
+	value, ok := claims[name]
+	if !ok {
+		return "", nil
 	}
-	jwk := header.GetFields()["jwk"].GetStructValue().AsMap()
-	if len(jwk) == 0 {
-		return "", nil, fmt.Errorf("jwk header is missing")
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%s claim is not a string", name)
 	}
+	return text, nil
+}
 
-	thumbprint, err = calculateJWKThumbprint(jwk)
+func requiredNumericDate(claims map[string]any, name string) (time.Time, error) {
+	value, ok := claims[name]
+	if !ok {
+		return time.Time{}, fmt.Errorf("%s claim is required", name)
+	}
+	return numericDate(value, name)
+}
+
+func numericDate(value any, name string) (time.Time, error) {
+	number, ok := value.(float64)
+	if !ok || math.IsNaN(number) || math.IsInf(number, 0) {
+		return time.Time{}, fmt.Errorf("%s claim is not a JSON number", name)
+	}
+	seconds, fraction := math.Modf(number)
+	if seconds < math.MinInt64 || seconds >= math.MaxInt64 {
+		return time.Time{}, fmt.Errorf("%s claim is outside the supported range", name)
+	}
+	return time.Unix(int64(seconds), int64(fraction*float64(time.Second))), nil
+}
+
+func parsePublicJWK(value any) (*jose.JSONWebKey, error) {
+	object, ok := value.(map[string]any)
+	if !ok || len(object) == 0 {
+		return nil, fmt.Errorf("jwk header is missing")
+	}
+	encoded, err := jsonv2.Marshal(object)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling jwk: %w", err)
+	}
+	var key jose.JSONWebKey
+	if err := jsonv2.Unmarshal(encoded, &key); err != nil {
+		return nil, fmt.Errorf("parsing jwk: %w", err)
+	}
+	if !key.Valid() || !key.IsPublic() {
+		return nil, fmt.Errorf("jwk must be a valid public key")
+	}
+	return &key, nil
+}
+
+func jwkThumbprint(key *jose.JSONWebKey) (string, error) {
+	thumbprint, err := key.Thumbprint(crypto.SHA256)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(thumbprint), nil
+}
+
+func verifyMaterialFromJWK(header map[string]any) (string, any, error) {
+	key, err := parsePublicJWK(header["jwk"])
+	if err != nil {
+		return "", nil, err
+	}
+	thumbprint, err := jwkThumbprint(key)
 	if err != nil {
 		return "", nil, fmt.Errorf("calculating JWK thumbprint: %w", err)
 	}
-
-	alg, err := headerAlg(header)
-	if err != nil {
-		return "", nil, err
-	}
-
-	handle, err = keysetHandleFromJWKWithAlg(jwk, alg)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return thumbprint, handle, nil
+	return thumbprint, key.Key, nil
 }
 
-func (d *Verifier) verifyMaterialFromX5C(header *structpb.Struct) (thumbprint string, handle *keyset.Handle, chain []*x509.Certificate, err error) {
-	if !hasClaimOfKind(header, "x5c", &structpb.Value{Kind: &structpb.Value_ListValue{}}) {
+func (v *Verifier) verifyMaterialFromX5C(header map[string]any) (string, any, []*x509.Certificate, error) {
+	x5c, ok := header["x5c"].([]any)
+	if !ok || len(x5c) == 0 {
 		return "", nil, nil, fmt.Errorf("x5c header is required when Verifier.TrustedRoots is set")
 	}
-	x5c := header.GetFields()["x5c"].GetListValue().AsSlice()
-	if len(x5c) == 0 {
-		return "", nil, nil, fmt.Errorf("x5c header is missing or empty")
-	}
-
-	certChain, err := parseAndVerifyCertChain(d.TrustedRoots, x5c)
+	chain, err := parseAndVerifyCertChain(v.TrustedRoots, x5c)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("verifying certificate chain: %w", err)
 	}
-
-	leafCert := certChain[0]
-	leafJWK, err := publicKeyToJWK(leafCert.PublicKey)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("leaf certificate public key: %w", err)
-	}
-
-	thumbprint, err = calculateJWKThumbprint(leafJWK)
+	leafJWK := &jose.JSONWebKey{Key: chain[0].PublicKey}
+	thumbprint, err := jwkThumbprint(leafJWK)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("calculating JWK thumbprint: %w", err)
 	}
-
-	if hasClaimOfKind(header, "jwk", &structpb.Value{Kind: &structpb.Value_StructValue{}}) {
-		hdrJWK := header.GetFields()["jwk"].GetStructValue().AsMap()
-		if len(hdrJWK) > 0 {
-			hdrTP, err := calculateJWKThumbprint(hdrJWK)
-			if err != nil {
-				return "", nil, nil, fmt.Errorf("calculating header jwk thumbprint: %w", err)
-			}
-			if hdrTP != thumbprint {
-				return "", nil, nil, fmt.Errorf("jwk does not match x5c leaf certificate public key")
-			}
+	if value, ok := header["jwk"]; ok {
+		headerJWK, err := parsePublicJWK(value)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		headerThumbprint, err := jwkThumbprint(headerJWK)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		if headerThumbprint != thumbprint {
+			return "", nil, nil, fmt.Errorf("jwk does not match x5c leaf certificate public key")
 		}
 	}
-
-	alg, err := headerAlg(header)
-	if err != nil {
-		return "", nil, nil, err
-	}
-
-	handle, err = keysetHandleFromJWKWithAlg(leafJWK, alg)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("creating keyset handle from leaf certificate: %w", err)
-	}
-
-	return thumbprint, handle, certChain, nil
+	return thumbprint, chain[0].PublicKey, chain, nil
 }
 
-func parseAndVerifyCertChain(roots *x509.CertPool, x5c []any) ([]*x509.Certificate, error) {
+func validateAlgorithmKey(algorithm string, key any) error {
+	switch publicKey := key.(type) {
+	case *rsa.PublicKey:
+		if algorithm != "RS256" && algorithm != "RS384" && algorithm != "RS512" {
+			return fmt.Errorf("algorithm %q does not match RSA key", algorithm)
+		}
+		if _, err := determineAlgorithmFromKey(publicKey); err != nil {
+			return err
+		}
+	case *ecdsa.PublicKey:
+		want, err := determineAlgorithmFromKey(publicKey)
+		if err != nil {
+			return err
+		}
+		if algorithm != want {
+			return fmt.Errorf("algorithm %q does not match ECDSA key; want %q", algorithm, want)
+		}
+	default:
+		return fmt.Errorf("unsupported DPoP public key type %T", key)
+	}
+	return nil
+}
+
+func parseAndVerifyCertChain(roots *x509.CertPool, encoded []any) ([]*x509.Certificate, error) {
 	if roots == nil {
 		return nil, fmt.Errorf("trusted roots are not set")
 	}
-
-	certs := make([]*x509.Certificate, 0, len(x5c))
-	for i, certB64 := range x5c {
-		certStr, ok := certB64.(string)
+	certificates := make([]*x509.Certificate, 0, len(encoded))
+	for i, value := range encoded {
+		text, ok := value.(string)
 		if !ok {
 			return nil, fmt.Errorf("x5c[%d] is not a string", i)
 		}
-
-		certDER, err := base64.StdEncoding.DecodeString(certStr)
+		der, err := base64.StdEncoding.DecodeString(text)
 		if err != nil {
 			return nil, fmt.Errorf("decoding x5c[%d]: %w", i, err)
 		}
-
-		cert, err := x509.ParseCertificate(certDER)
+		certificate, err := x509.ParseCertificate(der)
 		if err != nil {
 			return nil, fmt.Errorf("parsing x5c[%d]: %w", i, err)
 		}
-
-		certs = append(certs, cert)
+		certificates = append(certificates, certificate)
 	}
-
-	if len(certs) == 0 {
-		return nil, fmt.Errorf("no certificates in x5c chain")
+	intermediates := x509.NewCertPool()
+	for _, certificate := range certificates[1:] {
+		intermediates.AddCert(certificate)
 	}
-
-	leafCert := certs[0]
-	intermediates := certs[1:]
-
-	opts := x509.VerifyOptions{
-		Intermediates: x509.NewCertPool(),
+	if _, err := certificates[0].Verify(x509.VerifyOptions{
+		Intermediates: intermediates,
 		Roots:         roots,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-	}
-	for _, intermediate := range intermediates {
-		opts.Intermediates.AddCert(intermediate)
-	}
-
-	if _, err := leafCert.Verify(opts); err != nil {
+	}); err != nil {
 		return nil, fmt.Errorf("certificate chain verification failed: %w", err)
 	}
-
-	return certs, nil
+	return certificates, nil
 }

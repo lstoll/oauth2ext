@@ -1,209 +1,239 @@
 package token
 
 import (
-	"bytes"
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
-
-	aeadsubtle "github.com/tink-crypto/tink-go/v2/aead/subtle"
-	"github.com/tink-crypto/tink-go/v2/keyset"
-	tinksubtle "github.com/tink-crypto/tink-go/v2/subtle"
-	"github.com/tink-crypto/tink-go/v2/tink"
-	"google.golang.org/protobuf/proto"
+	"unicode/utf8"
 )
 
-const o2asPrefix = "o2as"
+const (
+	tokenNamespace     = "o2as"
+	tokenVersion       = "1"
+	secretSize         = 32
+	maxTokenLength     = 512
+	maxTokenIDSize     = 128
+	maxUsageNameSize   = 64
+	maxUsagePrefixSize = 16
+)
 
 var (
-	// these were generated with salt.go. we use fixed salts to domain separate
-	// key derivation from tokens.
-	encSalt    = []byte{4, 50, 41, 133, 73, 226, 110, 54, 6, 66, 16, 110, 19, 220, 42, 77, 247, 197, 203, 135, 83, 136, 72, 116, 39, 173, 26, 144, 215, 47, 234, 71}
-	storedSalt = []byte{65, 2, 216, 144, 128, 170, 60, 8, 133, 174, 56, 168, 86, 87, 200, 184, 244, 39, 252, 45, 194, 114, 212, 236, 142, 241, 64, 71, 34, 106, 209, 42}
-
-	tokenEncoding = base64.RawURLEncoding
+	tokenEncoding   = base64.RawURLEncoding.Strict()
+	tokenKDFSaltV1  = []byte("lds.li/oauth2ext/oauth2as/token-kdf/v1")
+	errInvalidToken = errors.New("invalid token")
 )
 
 type Usage struct {
-	// Name is the full name of the usage, mixed in to the key derivation.
+	// Name is the full name of the usage, included in key derivation.
 	Name string
-	// Prefix is used on the user representation of this token.
+	// Prefix is the short value included in the user-token envelope.
 	Prefix string
 }
 
 type ParsedToken struct {
-	usage   Usage
-	payload *TokenData
-	user    []byte
+	usage  Usage
+	id     string
+	secret [secretSize]byte
 }
 
-// ID returns the ID from the token, to lookup the token in the datastore.
-func (p *ParsedToken) ID() string {
-	return p.payload.GetTokenId()
-}
+// ID returns the record ID used to look up the token in storage.
+func (p *ParsedToken) ID() string { return p.id }
 
-// Payload returns the payload from the token.
-func (p *ParsedToken) Payload() *TokenData {
-	return p.payload
-}
-
-// ParseUserToken creates a Token struct from a user token string.
-// Error messages are intentionally generic to avoid leaking information
-// about token structure to potential attackers.
-func ParseUserToken(userToken string, usage Usage) (*ParsedToken, error) {
-	prefix, encodedProto, ok := strings.Cut(userToken, "_")
-	if !ok {
-		return nil, errors.New("malformed user token")
+// Verify authenticates a parsed token against the stored verifier and binds it
+// to its grant and subject.
+func (p *ParsedToken) Verify(storedValue []byte, grantID, subject string) (*Token, error) {
+	if p == nil || len(storedValue) != sha256.Size {
+		return nil, errInvalidToken
 	}
-
-	if prefix != o2asPrefix+usage.Prefix {
-		return nil, fmt.Errorf("invalid prefix for usage: %s", prefix)
-	}
-
-	protoBytes, err := tokenEncoding.DecodeString(encodedProto)
+	stored, kek, context, err := deriveTokenMaterial(p.secret, p.usage, p.id, grantID, subject)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode user token: %v", err)
+		return nil, fmt.Errorf("deriving token material: %w", err)
 	}
-
-	var td TokenData
-	if err := proto.Unmarshal(protoBytes, &td); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal user token: %v", err)
+	if subtle.ConstantTimeCompare(stored[:], storedValue) != 1 {
+		return nil, errInvalidToken
 	}
-
-	return &ParsedToken{
-		usage:   usage,
-		payload: &td,
-		user:    td.GetSecret(),
-	}, nil
-}
-
-// Verify verifies the parsed token against the stored value, returning the
-// verified token if successful.
-func (p *ParsedToken) Verify(usage Usage, storedValue []byte, expectedTokenID, expectedGrantID string) (*Token, error) {
-	info := fmt.Sprintf("%s:%s:%s", usage.Name, expectedTokenID, expectedGrantID)
-
-	stored, err := hkdf.Key(sha256.New, p.user, storedSalt, info, keyLength)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate stored token: %v", err)
-	}
-
-	if subtle.ConstantTimeCompare(stored, storedValue) != 1 {
-		return nil, errors.New("token does not match stored value")
-	}
-
-	encryption, err := hkdf.Key(sha256.New, p.user, encSalt, info, keyLength)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate encryption key: %v", err)
-	}
-
 	return &Token{
-		user:       p.user,
-		stored:     stored,
-		encryption: encryption,
-		usage:      usage,
-		payload:    p.payload,
+		usage:   p.usage,
+		id:      p.id,
+		secret:  p.secret,
+		stored:  stored,
+		kek:     kek,
+		context: context,
 	}, nil
 }
 
-// Token represents a token in it's active state.
+// Token is an authenticated opaque authorization code or refresh token.
 type Token struct {
-	usage   Usage
-	payload *TokenData
-	// User is the value that is exposed to the user.
-	user []byte
-	// Stored is the value that should be stored in the datastore. It can be
-	// looked up one-way by the user token.
-	stored []byte
-	// Encryption is an encryption key bound to this token. It can be generated
-	// from the user token, but not from the stored token or any other source.
-	// Suitable for AES-256.
-	encryption []byte
+	usage  Usage
+	id     string
+	secret [secretSize]byte
+	stored [sha256.Size]byte
+	kek    [32]byte
+
+	// context is the canonical usage/token/grant/subject binding used as AEAD
+	// associated data when wrapping a grant key.
+	context []byte
 }
 
-// ToUser returns the value that should be exposed and used by the user.
-func (t Token) ToUser(tokenID string) string {
-	builder := TokenData_builder{
-		TokenId: &tokenID,
-		Secret:  t.user,
+// New generates a token bound to its storage record, grant, and subject.
+func New(usage Usage, tokenID, grantID, subject string) (Token, error) {
+	if err := validateUsage(usage); err != nil {
+		return Token{}, err
 	}
-	td := builder.Build()
-	protoBytes, err := proto.Marshal(td)
+	if err := validateTokenID(tokenID); err != nil {
+		return Token{}, err
+	}
+	var secret [secretSize]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		return Token{}, fmt.Errorf("generating token secret: %w", err)
+	}
+	stored, kek, context, err := deriveTokenMaterial(secret, usage, tokenID, grantID, subject)
 	if err != nil {
-		panic(fmt.Sprintf("failed to marshal token payload: %v", err))
+		return Token{}, fmt.Errorf("deriving token material: %w", err)
 	}
-	return o2asPrefix + t.usage.Prefix + "_" + tokenEncoding.EncodeToString(protoBytes)
-}
-
-// ID returns the token ID.
-func (t Token) ID() string {
-	return t.payload.GetTokenId()
-}
-
-// Stored returns the value that should be stored in the datastore, for lookups.
-func (t Token) Stored() []byte {
-	return t.stored
-}
-
-// New creates a new token.
-func New(usage Usage, tokenID, grantID string) Token {
-	var tok = make([]byte, 32)
-
-	if n, err := rand.Read(tok); err != nil || n != 32 {
-		panic(fmt.Sprintf("failed to generate random token: %v", err))
-	}
-
-	info := fmt.Sprintf("%s:%s:%s", usage.Name, tokenID, grantID)
-
-	stored, err := tinksubtle.ComputeHKDF("SHA256", tok, storedSalt, []byte(info), keyLength)
-	if err != nil {
-		panic(fmt.Sprintf("failed to generate stored token: %v", err))
-	}
-
-	encryption, err := tinksubtle.ComputeHKDF("SHA256", tok, encSalt, []byte(info), keyLength)
-	if err != nil {
-		panic(fmt.Sprintf("failed to generate encryption key: %v", err))
-	}
-
 	return Token{
-		user:       tok,
-		stored:     stored,
-		encryption: encryption,
-		usage:      usage,
-		payload:    TokenData_builder{}.Build(),
-	}
-}
-
-// DEKHandle returns a handle to the encrypted DEK decrypted from this token, to
-// perform operations with it and re-encrypt it to a new token.
-func (t *Token) DEKHandle(encryptedDEK []byte) (*DEKHandle, error) {
-	kek, err := newKEK(t.encryption)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create KEK: %w", err)
-	}
-
-	kh, err := keyset.Read(keyset.NewBinaryReader(bytes.NewReader(encryptedDEK)), kek)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read keyset: %w", err)
-	}
-
-	return &DEKHandle{
-		kh:    kh,
-		usage: t.usage,
+		usage:   usage,
+		id:      tokenID,
+		secret:  secret,
+		stored:  stored,
+		kek:     kek,
+		context: context,
 	}, nil
 }
 
-const keyLength = 32
-
-// newKEK creates a new AEAD for the KEK from the provided key.
-func newKEK(key []byte) (tink.AEAD, error) {
-	if len(key) != keyLength {
-		return nil, fmt.Errorf("encryption key is not the correct length")
+// UserToken returns the value presented to the OAuth client. Token deliberately
+// does not implement fmt.Stringer to reduce accidental secret logging.
+func (t *Token) UserToken() string {
+	if t == nil {
+		return ""
 	}
+	return strings.Join([]string{
+		tokenNamespace,
+		t.usage.Prefix,
+		tokenVersion,
+		tokenEncoding.EncodeToString([]byte(t.id)),
+		tokenEncoding.EncodeToString(t.secret[:]),
+	}, ".")
+}
 
-	return aeadsubtle.NewAESGCM(key)
+// ID returns the token's storage record ID.
+func (t *Token) ID() string {
+	if t == nil {
+		return ""
+	}
+	return t.id
+}
+
+// Stored returns the verifier stored with the token record.
+func (t *Token) Stored() []byte {
+	if t == nil {
+		return nil
+	}
+	return append([]byte(nil), t.stored[:]...)
+}
+
+// ParseUserToken parses the versioned public envelope. Errors are deliberately
+// generic because callers handle untrusted token input.
+func ParseUserToken(userToken string, expected Usage) (*ParsedToken, error) {
+	if len(userToken) == 0 || len(userToken) > maxTokenLength || validateUsage(expected) != nil {
+		return nil, errInvalidToken
+	}
+	parts := strings.Split(userToken, ".")
+	if len(parts) != 5 || parts[0] != tokenNamespace || parts[1] != expected.Prefix || parts[2] != tokenVersion {
+		return nil, errInvalidToken
+	}
+	id, err := tokenEncoding.DecodeString(parts[3])
+	if err != nil || len(id) == 0 || len(id) > maxTokenIDSize || !utf8.Valid(id) || tokenEncoding.EncodeToString(id) != parts[3] {
+		return nil, errInvalidToken
+	}
+	secret, err := tokenEncoding.DecodeString(parts[4])
+	if err != nil || len(secret) != secretSize || tokenEncoding.EncodeToString(secret) != parts[4] {
+		return nil, errInvalidToken
+	}
+	parsed := &ParsedToken{usage: expected, id: string(id)}
+	copy(parsed.secret[:], secret)
+	clear(secret)
+	return parsed, nil
+}
+
+func deriveTokenMaterial(secret [secretSize]byte, usage Usage, tokenID, grantID, subject string) (stored, kek [32]byte, context []byte, err error) {
+	context, err = encodeContext("token-binding", tokenVersion, usage.Name, usage.Prefix, tokenID, grantID, subject)
+	if err != nil {
+		return stored, kek, nil, err
+	}
+	storedInfo, err := encodeContext("stored-verifier", string(context))
+	if err != nil {
+		return stored, kek, nil, err
+	}
+	kekInfo, err := encodeContext("grant-key-encryption", string(context))
+	if err != nil {
+		return stored, kek, nil, err
+	}
+	derived, err := hkdf.Key(sha256.New, secret[:], tokenKDFSaltV1, string(storedInfo), len(stored))
+	if err != nil {
+		return stored, kek, nil, err
+	}
+	copy(stored[:], derived)
+	clear(derived)
+	derived, err = hkdf.Key(sha256.New, secret[:], tokenKDFSaltV1, string(kekInfo), len(kek))
+	if err != nil {
+		return stored, kek, nil, err
+	}
+	copy(kek[:], derived)
+	clear(derived)
+	return stored, kek, context, nil
+}
+
+func validateUsage(usage Usage) error {
+	if usage.Name == "" || len(usage.Name) > maxUsageNameSize {
+		return fmt.Errorf("token usage name must be between 1 and %d bytes", maxUsageNameSize)
+	}
+	if usage.Prefix == "" || len(usage.Prefix) > maxUsagePrefixSize || !isTokenPrefix(usage.Prefix) {
+		return fmt.Errorf("token usage prefix must be between 1 and %d URL-safe ASCII characters", maxUsagePrefixSize)
+	}
+	return nil
+}
+
+func isTokenPrefix(prefix string) bool {
+	for _, char := range []byte(prefix) {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '-' && char != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func validateTokenID(tokenID string) error {
+	if tokenID == "" || len(tokenID) > maxTokenIDSize || !utf8.ValidString(tokenID) {
+		return fmt.Errorf("token ID must be valid UTF-8 between 1 and %d bytes", maxTokenIDSize)
+	}
+	return nil
+}
+
+// encodeContext provides an unambiguous encoding for cryptographic domain and
+// record bindings. Values are uint32-length-prefixed UTF-8 byte strings.
+func encodeContext(fields ...string) ([]byte, error) {
+	size := 0
+	for _, field := range fields {
+		if uint64(len(field)) > math.MaxUint32 {
+			return nil, fmt.Errorf("context field is too large")
+		}
+		if size > math.MaxInt-4-len(field) {
+			return nil, fmt.Errorf("context is too large")
+		}
+		size += 4 + len(field)
+	}
+	result := make([]byte, 0, size)
+	for _, field := range fields {
+		result = binary.BigEndian.AppendUint32(result, uint32(len(field)))
+		result = append(result, field...)
+	}
+	return result, nil
 }

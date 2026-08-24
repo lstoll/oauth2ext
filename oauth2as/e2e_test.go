@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as"
 	"lds.li/oauth2ext/oauth2as/discovery"
 	"lds.li/oauth2ext/oauth2as/internal"
@@ -270,13 +270,13 @@ func TestE2E(t *testing.T) {
 }
 
 var (
-	testSigner     *internal.TestSigner
+	testSigner     *oauth2as.LocalJWTSigner
 	testSignerOnce sync.Once
 )
 
-func getTestSigner(t *testing.T) (oauth2as.AlgorithmSigner, jwt.Verifier) {
+func getTestSigner(t *testing.T) (oauth2as.JWTSigner, oauth2as.JWTVerifier) {
 	testSignerOnce.Do(func() {
-		testSigner = internal.NewTestSigner(t, "RS256", "ES256")
+		testSigner = internal.NewTestSigner(t, jwt.RS256, jwt.ES256)
 	})
 	return testSigner, testSigner
 }

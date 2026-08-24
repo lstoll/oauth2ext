@@ -2,8 +2,13 @@ package oauth2as
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -17,8 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tink-crypto/tink-go/v2/jwt"
-	"lds.li/oauth2ext/oauth2as/internal"
+	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
 	"lds.li/oauth2ext/oidc"
@@ -40,9 +44,9 @@ func TestCodeToken(t *testing.T) {
 		otherClientSecret   = "other-secret"
 		otherClientRedirect = "https://other"
 
-		es256ClientID       = "es256-client"
-		es256ClientSecret   = "es256-secret"
-		es256ClientRedirect = "https://es256"
+		rs256ClientID       = "rs256-client"
+		rs256ClientSecret   = "rs256-secret"
+		rs256ClientRedirect = "https://rs256"
 	)
 
 	newOIDC := func() *Server {
@@ -76,10 +80,10 @@ func TestCodeToken(t *testing.T) {
 						Opts:         []ClientOpt{ClientOptSkipPKCE()},
 					},
 					{
-						ID:           es256ClientID,
-						Secrets:      []string{es256ClientSecret},
-						RedirectURLs: []string{es256ClientRedirect},
-						Opts:         []ClientOpt{ClientOptSkipPKCE(), ClientOptSigningAlg("ES256")},
+						ID:           rs256ClientID,
+						Secrets:      []string{rs256ClientSecret},
+						RedirectURLs: []string{rs256ClientRedirect},
+						Opts:         []ClientOpt{ClientOptSkipPKCE(), ClientOptIDTokenSigningAlgorithm(jwt.RS256)},
 					},
 				},
 			},
@@ -213,13 +217,13 @@ func TestCodeToken(t *testing.T) {
 		// Create a StoredGrant with the auth code
 		grant := &StoredGrant{
 			UserID:        "testsub",
-			ClientID:      es256ClientID,
+			ClientID:      rs256ClientID,
 			GrantedScopes: []string{oidc.ScopeOfflineAccess},
 			GrantedAt:     time.Now(),
 			ExpiresAt:     time.Now().Add(1 * time.Minute),
 			Request: &AuthRequest{
-				ClientID:    es256ClientID,
-				RedirectURI: es256ClientRedirect,
+				ClientID:    rs256ClientID,
+				RedirectURI: rs256ClientRedirect,
 				State:       "",
 				Scopes:      []string{oidc.ScopeOfflineAccess},
 			},
@@ -230,8 +234,11 @@ func TestCodeToken(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		newToken := token.New(tokenUsageAuthCode, grantID, grant.UserID)
 		authCodeID := newUUIDv4()
+		newToken, err := token.New(tokenUsageAuthCode, authCodeID, grantID, grant.UserID)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Create token entry for the auth code
 		err = o.config.Storage.CreateAuthCode(context.Background(), authCodeID, &StoredAuthCode{
@@ -243,14 +250,14 @@ func TestCodeToken(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		authCodeStr := newToken.ToUser(authCodeID)
+		authCodeStr := newToken.UserToken()
 
 		treq := &oauth2proto.TokenRequest{
 			GrantType:    oauth2proto.GrantTypeAuthorizationCode,
 			Code:         authCodeStr,
-			RedirectURI:  es256ClientRedirect,
-			ClientID:     es256ClientID,
-			ClientSecret: es256ClientSecret,
+			RedirectURI:  rs256ClientRedirect,
+			ClientID:     rs256ClientID,
+			ClientSecret: rs256ClientSecret,
 		}
 
 		tresp, err := o.codeToken(context.TODO(), httptest.NewRequest(http.MethodPost, "/token", nil), treq)
@@ -283,8 +290,23 @@ func TestCodeToken(t *testing.T) {
 			t.Fatalf("alg not found in id_token header")
 		}
 
-		if alg != "ES256" {
-			t.Fatalf("want alg to be ES256, got: %s", alg)
+		if alg != "RS256" {
+			t.Fatalf("want ID token alg to be RS256, got: %s", alg)
+		}
+
+		parts = strings.Split(tresp.AccessToken, ".")
+		if len(parts) != 3 {
+			t.Fatalf("access token should have 3 parts, got: %v", parts)
+		}
+		header, err = base64.RawURLEncoding.DecodeString(parts[0])
+		if err != nil {
+			t.Fatalf("failed to decode access token header: %v", err)
+		}
+		if err := json.Unmarshal(header, &headerMap); err != nil {
+			t.Fatalf("failed to unmarshal access token header: %v", err)
+		}
+		if alg, _ := headerMap["alg"].(string); alg != "ES256" {
+			t.Fatalf("want access token alg to remain ES256, got: %q", alg)
 		}
 	})
 
@@ -488,17 +510,18 @@ func TestUserinfo(t *testing.T) {
 		return nil
 	}
 
-	signAccessToken := func(cl *jwt.RawJWTOptions) string {
-		cl.TypeHeader = new("at+jwt")
-
+	signAccessToken := func(tokenIssuer string, expiresAt time.Time) string {
 		signer, _ := testSignerVerifier(t)
-
-		rjwt, err := jwt.NewRawJWT(cl)
+		payload, err := jsonv2.Marshal(map[string]any{
+			"iss": tokenIssuer,
+			"sub": "sub",
+			"iat": time.Now().Unix(),
+			"exp": expiresAt.Unix(),
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
-
-		compact, err := signer.SignAndEncode(rjwt)
+		compact, err := signer.SignJWT(t.Context(), jwt.ES256, JWTSigningInput{Type: "at+jwt", Payload: payload})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -522,11 +545,7 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Simple output, valid session",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(&jwt.RawJWTOptions{
-					Issuer:    &issuer,
-					Subject:   new("sub"),
-					ExpiresAt: new(time.Now().Add(1 * time.Minute)),
-				})
+				return signAccessToken(issuer, time.Now().Add(time.Minute))
 			},
 			Handler: echoHandler,
 			WantJSON: map[string]any{
@@ -536,11 +555,7 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Token for other issuer",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(&jwt.RawJWTOptions{
-					Issuer:    new("http://other"),
-					Subject:   new("sub"),
-					ExpiresAt: new(time.Now().Add(1 * time.Minute)),
-				})
+				return signAccessToken("http://other", time.Now().Add(time.Minute))
 			},
 			Handler: echoHandler,
 			WantErr: true,
@@ -548,11 +563,7 @@ func TestUserinfo(t *testing.T) {
 		{
 			Name: "Expired access token",
 			Setup: func(t *testing.T) (accessToken string) {
-				return signAccessToken(&jwt.RawJWTOptions{
-					Issuer:    &issuer,
-					Subject:   new("sub"),
-					ExpiresAt: new(time.Now().Add(-1 * time.Minute)),
-				})
+				return signAccessToken(issuer, time.Now().Add(-time.Minute))
 			},
 			Handler: echoHandler,
 			WantErr: true,
@@ -618,13 +629,27 @@ func TestUserinfo(t *testing.T) {
 }
 
 var (
-	signer     *internal.TestSigner
+	signer     *LocalJWTSigner
 	signerOnce sync.Once
 )
 
-func testSignerVerifier(t *testing.T) (AlgorithmSigner, jwt.Verifier) {
+func testSignerVerifier(t *testing.T) (JWTSigner, JWTVerifier) {
 	signerOnce.Do(func() {
-		signer = internal.NewTestSigner(t, "RS256", "ES256")
+		ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signer, err = NewLocalJWTSigner(LocalJWTSignerConfig{SigningKeys: []SigningKey{
+			{Algorithm: jwt.ES256, Key: ecKey},
+			{Algorithm: jwt.RS256, Key: rsaKey},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 	return signer, signer
 }
@@ -644,8 +669,11 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		t.Fatal(err)
 	}
 
-	newToken := token.New(tokenUsageRefresh, grantID, grant.UserID)
 	refreshTokenID := newUUIDv4()
+	newToken, err := token.New(tokenUsageRefresh, refreshTokenID, grantID, grant.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Create token entry for the refresh token
 	err = smgr.CreateRefreshToken(context.Background(), refreshTokenID, &StoredRefreshToken{
@@ -658,7 +686,7 @@ func newRefreshGrant(t *testing.T, smgr Storage) (refreshToken string) {
 		t.Fatal(err)
 	}
 
-	return newToken.ToUser(refreshTokenID)
+	return newToken.UserToken()
 }
 
 func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
@@ -682,8 +710,11 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		t.Fatal(err)
 	}
 
-	newToken := token.New(tokenUsageAuthCode, grantID, grant.UserID)
 	authCodeID := newUUIDv4()
+	newToken, err := token.New(tokenUsageAuthCode, authCodeID, grantID, grant.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Create token entry for the auth code
 	err = smgr.CreateAuthCode(context.Background(), authCodeID, &StoredAuthCode{
@@ -696,7 +727,7 @@ func newCodeGrant(t *testing.T, smgr Storage) (authCode string) {
 		t.Fatal(err)
 	}
 
-	return newToken.ToUser(authCodeID)
+	return newToken.UserToken()
 }
 
 type staticClient struct {

@@ -26,8 +26,8 @@ func TestCookiestore_SaveGetOIDCSession(t *testing.T) {
 	savedSessionData := &SessionData{
 		Token: &oidc.TokenWithID{Token: token},
 		Logins: []SessionDataLogin{
-			{State: "state1", PKCEChallenge: "challenge1", ReturnTo: "/return1", Expires: int(now.Add(10 * time.Minute).Unix())},
-			{State: "state2", PKCEChallenge: "challenge2", ReturnTo: "/return2", Expires: int(now.Add(20 * time.Minute).Unix())},
+			{State: "state1", Nonce: "nonce1", PKCEChallenge: "challenge1", ReturnTo: "/return1", Expires: int(now.Add(10 * time.Minute).Unix())},
+			{State: "state2", Nonce: "nonce2", PKCEChallenge: "challenge2", ReturnTo: "/return2", Expires: int(now.Add(20 * time.Minute).Unix())},
 			// will be dropped as it's expired
 			{State: "state3", Expires: int(now.Add(-10 * time.Minute).Unix())},
 		},
@@ -35,8 +35,8 @@ func TestCookiestore_SaveGetOIDCSession(t *testing.T) {
 	expectedSessionData := &SessionData{
 		Token: &oidc.TokenWithID{Token: token},
 		Logins: []SessionDataLogin{
-			{State: "state1", PKCEChallenge: "challenge1", ReturnTo: "/return1", Expires: int(now.Add(10 * time.Minute).Unix())},
-			{State: "state2", PKCEChallenge: "challenge2", ReturnTo: "/return2", Expires: int(now.Add(20 * time.Minute).Unix())},
+			{State: "state1", Nonce: "nonce1", PKCEChallenge: "challenge1", ReturnTo: "/return1", Expires: int(now.Add(10 * time.Minute).Unix())},
+			{State: "state2", Nonce: "nonce2", PKCEChallenge: "challenge2", ReturnTo: "/return2", Expires: int(now.Add(20 * time.Minute).Unix())},
 		},
 	}
 
