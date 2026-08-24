@@ -31,8 +31,9 @@ const (
 type Config struct {
 	// Issuer is the issuer we are serving for.
 	Issuer string
-	// Storage is the storage backend to use for the server.
-	Storage Storage
+	// Storage is the storage backend to use for the server. The logical storage
+	// instance must be scoped to this issuer.
+	Storage *Storage
 	Clients ClientSource
 	// Signer signs ID and access tokens using explicit algorithms.
 	Signer JWTSigner
@@ -117,7 +118,7 @@ func NewServer(c Config) (*Server, error) {
 		return nil, fmt.Errorf("invalid issuer URL %s: %w", c.Issuer, err)
 	}
 
-	if c.Storage == nil {
+	if c.Storage == nil || c.Storage.backend == nil {
 		return nil, fmt.Errorf("storage is required")
 	}
 	if c.Clients == nil {
@@ -175,6 +176,9 @@ func NewServer(c Config) (*Server, error) {
 	}
 	if c.IDTokenValidity < 0 {
 		return nil, fmt.Errorf("ID token validity must be positive")
+	}
+	if c.RefreshTokenValidity < 0 {
+		return nil, fmt.Errorf("refresh token validity must be positive or zero")
 	}
 	if c.CodeValidityTime < 0 {
 		return nil, fmt.Errorf("code validity time must be positive")

@@ -171,7 +171,7 @@ func (s *Server) GrantAuth(ctx context.Context, grant *AuthGrant) (redirectURI s
 		return "", fmt.Errorf("authentication time must not be in the future")
 	}
 
-	sg := &StoredGrant{
+	sg := &storedGrant{
 		UserID:          grant.UserID,
 		ClientID:        grant.Request.ClientID,
 		GrantedScopes:   grant.GrantedScopes,

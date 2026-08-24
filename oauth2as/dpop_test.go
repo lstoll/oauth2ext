@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+	"uuid"
 
 	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/oauth2as/internal/token"
@@ -36,7 +37,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 		t.Fatalf("failed to create signer: %v", err)
 	}
 
-	s := NewMemStorage()
+	s := NewMemoryStorage()
 	signer, verifier := testSignerVerifier(t)
 
 	var capturedTokenRequest *TokenRequest
@@ -98,7 +99,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 		}
 
 		// Verify grant was updated with thumbprint
-		grant, err := server.config.Storage.GetGrant(context.Background(), capturedTokenRequest.GrantID)
+		grant, err := server.config.Storage.getGrant(context.Background(), capturedTokenRequest.GrantID)
 		if err != nil {
 			t.Fatalf("failed to get grant: %v", err)
 		}
@@ -130,7 +131,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 		}
 		addStateBytes, _ := json.Marshal(addState)
 
-		grant := &StoredGrant{
+		grant := &storedGrant{
 			UserID:          userID,
 			ClientID:        clientID,
 			GrantedScopes:   []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
@@ -139,19 +140,19 @@ func TestDPoPTokenFlow(t *testing.T) {
 			AdditionalState: addStateBytes,
 		}
 
-		grantID, err := server.config.Storage.CreateGrant(context.Background(), grant)
+		grantID, err := server.config.Storage.createGrant(context.Background(), grant)
 		if err != nil {
 			t.Fatalf("failed to create grant: %v", err)
 		}
 
-		refreshTokenID := newUUIDv4()
+		refreshTokenID := uuid.NewV4().String()
 		refreshToken, err := token.New(tokenUsageRefresh, refreshTokenID, grantID, userID)
 		if err != nil {
 			t.Fatalf("failed to generate refresh token: %v", err)
 		}
 
 		// Create token entry for the refresh token
-		err = server.config.Storage.CreateRefreshToken(context.Background(), refreshTokenID, &StoredRefreshToken{
+		err = server.config.Storage.createRefreshToken(context.Background(), refreshTokenID, &storedRefreshToken{
 			Token:            refreshToken.Stored(),
 			GrantID:          grantID,
 			ValidUntil:       time.Now().Add(24 * time.Hour),
@@ -190,7 +191,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 		addStateBytes, _ = json.Marshal(addState)
 		grant.AdditionalState = addStateBytes
 
-		if err := server.config.Storage.UpdateGrant(context.Background(), grantID, grant); err != nil {
+		if err := server.config.Storage.updateGrant(context.Background(), grantID, grant); err != nil {
 			t.Fatalf("failed to update grant: %v", err)
 		}
 
@@ -225,7 +226,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 			}
 			addStateBytes, _ := json.Marshal(addState)
 
-			grant2 := &StoredGrant{
+			grant2 := &storedGrant{
 				UserID:          userID,
 				ClientID:        clientID,
 				GrantedScopes:   []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
@@ -233,19 +234,19 @@ func TestDPoPTokenFlow(t *testing.T) {
 				ExpiresAt:       time.Now().Add(24 * time.Hour),
 				AdditionalState: addStateBytes,
 			}
-			grantID2, err := server.config.Storage.CreateGrant(context.Background(), grant2)
+			grantID2, err := server.config.Storage.createGrant(context.Background(), grant2)
 			if err != nil {
 				t.Fatalf("failed to create grant: %v", err)
 			}
 
-			refreshTokenID2 := newUUIDv4()
+			refreshTokenID2 := uuid.NewV4().String()
 			refreshToken2, err := token.New(tokenUsageRefresh, refreshTokenID2, grantID2, userID)
 			if err != nil {
 				t.Fatalf("failed to generate refresh token: %v", err)
 			}
 
 			// Create token entry for the refresh token
-			err = server.config.Storage.CreateRefreshToken(context.Background(), refreshTokenID2, &StoredRefreshToken{
+			err = server.config.Storage.createRefreshToken(context.Background(), refreshTokenID2, &storedRefreshToken{
 				Token:            refreshToken2.Stored(),
 				GrantID:          grantID2,
 				ValidUntil:       time.Now().Add(24 * time.Hour),
@@ -295,7 +296,7 @@ func TestDPoPTokenFlow(t *testing.T) {
 			}
 			addStateBytes, _ := json.Marshal(addState)
 
-			grant3 := &StoredGrant{
+			grant3 := &storedGrant{
 				UserID:          userID,
 				ClientID:        clientID,
 				GrantedScopes:   []string{oidc.ScopeOpenID, oidc.ScopeOfflineAccess},
@@ -303,19 +304,19 @@ func TestDPoPTokenFlow(t *testing.T) {
 				ExpiresAt:       time.Now().Add(24 * time.Hour),
 				AdditionalState: addStateBytes,
 			}
-			grantID3, err := server.config.Storage.CreateGrant(context.Background(), grant3)
+			grantID3, err := server.config.Storage.createGrant(context.Background(), grant3)
 			if err != nil {
 				t.Fatalf("failed to create grant: %v", err)
 			}
 
-			refreshTokenID3 := newUUIDv4()
+			refreshTokenID3 := uuid.NewV4().String()
 			refreshToken3, err := token.New(tokenUsageRefresh, refreshTokenID3, grantID3, userID)
 			if err != nil {
 				t.Fatalf("failed to generate refresh token: %v", err)
 			}
 
 			// Create token entry for the refresh token
-			err = server.config.Storage.CreateRefreshToken(context.Background(), refreshTokenID3, &StoredRefreshToken{
+			err = server.config.Storage.createRefreshToken(context.Background(), refreshTokenID3, &storedRefreshToken{
 				Token:            refreshToken3.Stored(),
 				GrantID:          grantID3,
 				ValidUntil:       time.Now().Add(24 * time.Hour),

@@ -15,7 +15,7 @@ linters:
       - path: (.+)\.go$
         text: exported \w+ (\S*['.]*)([a-zA-Z'.*]*) should have comment( \(or a comment on this block\))? or be unexported
       - path: (.+)\.go$
-        text: Error return value of .((os\.)?std(out|err)\..*|.*Close|.*Flush|os\.Remove(All)?|.*printf?|os\.(Un)?Setenv). is not checked
+        text: Error return value of .((os\.)?std(out|err)\..*|.*Close|.*Flush|.*Rollback|os\.Remove(All)?|.*printf?|os\.(Un)?Setenv). is not checked
       - path: (.+)\.go$
         text: 'package-comments: should have a package comment'
       - path: (.+)\.go$
