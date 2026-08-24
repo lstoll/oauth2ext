@@ -189,6 +189,98 @@ func TestJWKSReturnsCopy(t *testing.T) {
 	}
 }
 
+func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
+	local := jwttest.NewSigner(t)
+	var discoveryRequests atomic.Int64
+	var jwksRequests atomic.Int64
+
+	svr := httptest.NewTLSServer(nil)
+	t.Cleanup(svr.Close)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		discoveryRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&OIDCProviderMetadata{
+			Issuer:                           svr.URL,
+			JWKSURI:                          svr.URL + "/jwks",
+			IDTokenSigningAlgValuesSupported: []string{"ES256"},
+		})
+	})
+	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, r *http.Request) {
+		jwksRequests.Add(1)
+		http.Error(w, "must not be fetched", http.StatusInternalServerError)
+	})
+	svr.Config.Handler = mux
+
+	keys, err := jwt.ParseJWKSet(local.JWKS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sourceCalls atomic.Int64
+	source := jwt.KeySetSourceFunc(func(context.Context) (*jwt.KeySet, error) {
+		sourceCalls.Add(1)
+		return keys, nil
+	})
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, svr.Client())
+	p, err := DiscoverOIDCProvider(ctx, svr.URL, WithVerificationKeys(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.CacheDuration = -1 // Force metadata refreshes during verification.
+
+	now := time.Now()
+	compact, err := local.SignClaims(map[string]any{
+		"iss": svr.URL,
+		"sub": "subject",
+		"aud": "client",
+		"iat": now.Unix(),
+		"exp": now.Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := jwt.ValidationPolicy{
+		ExpectedAudiences: []string{"client"},
+		RequireIssuedAt:   true,
+		AllowedAlgorithms: []jwt.Algorithm{jwt.ES256},
+	}
+	if _, err := p.VerifyJWT(ctx, compact, policy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.VerifyJWT(ctx, compact, policy); err != nil {
+		t.Fatal(err)
+	}
+	if got := jwksRequests.Load(); got != 0 {
+		t.Fatalf("JWKS requests = %d, want 0", got)
+	}
+	if got := discoveryRequests.Load(); got < 3 {
+		t.Fatalf("discovery requests = %d, want at least 3", got)
+	}
+	if got := sourceCalls.Load(); got < 3 {
+		t.Fatalf("source calls = %d, want at least 3", got)
+	}
+
+	first, err := p.JWKS(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Clone(first)
+	first[0] ^= 0xff
+	second, err := p.JWKS(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(second, want) {
+		t.Fatal("mutating returned JWKS changed provider result")
+	}
+}
+
+func TestWithVerificationKeysRejectsNilSource(t *testing.T) {
+	if _, err := DiscoverOIDCProvider(t.Context(), "https://issuer.example", WithVerificationKeys(nil)); err == nil {
+		t.Fatal("expected nil verification key source error")
+	}
+}
+
 func TestUserinfo(t *testing.T) {
 	type userinforClaims struct {
 		Subject string `json:"sub"`
