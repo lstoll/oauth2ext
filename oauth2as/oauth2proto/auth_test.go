@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,10 +12,31 @@ import (
 )
 
 func TestParseAuthRequest(t *testing.T) {
+	completeQuery := fmt.Sprintf(
+		"response_type=code&client_id=client&redirect_uri=%s&scope=%s&state=state",
+		url.QueryEscape("https://redirect"), url.QueryEscape("openid groups"),
+	)
+	completeReq := &AuthRequest{
+		ClientID:     "client",
+		RedirectURI:  "https://redirect",
+		State:        "state",
+		Scopes:       []string{"openid", "groups"},
+		ResponseType: ResponseTypeCode,
+		Raw: url.Values{
+			"client_id":     {"client"},
+			"redirect_uri":  {"https://redirect"},
+			"response_type": {"code"},
+			"scope":         {"openid groups"},
+			"state":         {"state"},
+		},
+	}
+
 	for _, tc := range []struct {
 		Name        string
 		Method      string
 		Query       string
+		Body        string
+		ContentType string
 		WantErr     bool
 		WantErrCode AuthErrorCode
 		CmpReq      *AuthRequest
@@ -37,25 +59,9 @@ func TestParseAuthRequest(t *testing.T) {
 			WantErrCode: AuthErrorCodeInvalidRequest,
 		},
 		{
-			Name: "Complete request",
-			Query: fmt.Sprintf(
-				"response_type=code&client_id=client&redirect_uri=%s&scope=%s&state=state",
-				url.QueryEscape("https://redirect"), url.QueryEscape("openid groups"),
-			),
-			CmpReq: &AuthRequest{
-				ClientID:     "client",
-				RedirectURI:  "https://redirect",
-				State:        "state",
-				Scopes:       []string{"openid", "groups"},
-				ResponseType: ResponseTypeCode,
-				Raw: url.Values{
-					"client_id":     {"client"},
-					"redirect_uri":  {"https://redirect"},
-					"response_type": {"code"},
-					"scope":         {"openid groups"},
-					"state":         {"state"},
-				},
-			},
+			Name:   "Complete request",
+			Query:  completeQuery,
+			CmpReq: completeReq,
 		},
 		{
 			Name: "Invalid PKCE type",
@@ -106,6 +112,44 @@ func TestParseAuthRequest(t *testing.T) {
 				},
 			},
 		},
+		{
+			Name:        "Reject repeated query parameters",
+			Query:       completeQuery + "&redirect_uri=" + url.QueryEscape("https://evil"),
+			WantErr:     true,
+			WantErrCode: AuthErrorCodeInvalidRequest,
+		},
+		{
+			Name:        "POST complete request",
+			Method:      "POST",
+			Body:        completeQuery,
+			ContentType: "application/x-www-form-urlencoded",
+			CmpReq:      completeReq,
+		},
+		{
+			Name:        "Reject POST query parameters",
+			Method:      "POST",
+			Query:       "redirect_uri=" + url.QueryEscape("https://evil"),
+			Body:        completeQuery,
+			ContentType: "application/x-www-form-urlencoded",
+			WantErr:     true,
+			WantErrCode: AuthErrorCodeInvalidRequest,
+		},
+		{
+			Name:        "Reject repeated POST parameters",
+			Method:      "POST",
+			Body:        completeQuery + "&client_id=other",
+			ContentType: "application/x-www-form-urlencoded",
+			WantErr:     true,
+			WantErrCode: AuthErrorCodeInvalidRequest,
+		},
+		{
+			Name:        "Reject POST without form content type",
+			Method:      "POST",
+			Body:        completeQuery,
+			ContentType: "application/json",
+			WantErr:     true,
+			WantErrCode: AuthErrorCodeInvalidRequest,
+		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
 			meth := tc.Method
@@ -113,7 +157,11 @@ func TestParseAuthRequest(t *testing.T) {
 				meth = "GET"
 			}
 
-			req := httptest.NewRequest(meth, "https://test/auth?"+tc.Query, nil)
+			req := httptest.NewRequest(meth, "https://test/auth", strings.NewReader(tc.Body))
+			req.URL.RawQuery = tc.Query
+			if tc.ContentType != "" {
+				req.Header.Set("Content-Type", tc.ContentType)
+			}
 
 			preq, err := ParseAuthRequest(req)
 			if err == nil && tc.WantErr {
@@ -126,8 +174,7 @@ func TestParseAuthRequest(t *testing.T) {
 				aerr, ok := err.(*AuthError)
 				if !ok {
 					t.Errorf("want error of type *authError, got %T", err)
-				}
-				if tc.WantErrCode != aerr.Code {
+				} else if tc.WantErrCode != aerr.Code {
 					t.Errorf("want err code %s, got: %s", tc.WantErrCode, aerr.Code)
 				}
 			}

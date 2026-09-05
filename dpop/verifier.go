@@ -1,15 +1,18 @@
 package dpop
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	jsonv2 "encoding/json/v2"
 	"fmt"
 	"math"
 	"slices"
+	"sync"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -24,6 +27,10 @@ const (
 	MaxClockSkew = 10 * time.Minute
 )
 
+// Verifier validates DPoP proofs and records accepted proofs for replay
+// protection. Configure a Verifier before its first use. It is safe for
+// concurrent use after configuration, but must not be copied or mutated after
+// verification begins.
 type Verifier struct {
 	// ValidityAfterIssue is the maximum age of a DPoP proof. It defaults to
 	// DefaultValidityAfterIssue.
@@ -36,7 +43,22 @@ type Verifier struct {
 	// nil, the proof is verified with its embedded jwk header.
 	TrustedRoots *x509.CertPool
 
-	now time.Time
+	// ReplayStore atomically detects reused proofs. Nil uses a bounded,
+	// process-local in-memory store; multi-replica deployments must provide a
+	// shared store for cross-node replay protection.
+	ReplayStore ReplayStore
+	// ReplayCacheMaxEntries bounds the default in-memory ReplayStore. It
+	// defaults to DefaultReplayCacheMaxEntries and is used on first verification.
+	// Size it for the maximum proofs accepted during the configured validity
+	// window; reaching the limit fails closed.
+	ReplayCacheMaxEntries int
+	// DisableReplayProtection explicitly permits proof reuse. It should only be
+	// used where replay protection is provided by another trusted layer.
+	DisableReplayProtection bool
+
+	now                time.Time
+	replayMu           sync.Mutex
+	defaultReplayStore ReplayStore
 }
 
 // Proof is a verified DPoP proof.
@@ -58,6 +80,10 @@ type ValidatorOpts struct {
 	IgnoreThumbprint   bool
 	ExpectedHTM        *string
 	ExpectedHTU        *string
+	// ExpectedAccessToken, when non-empty, requires ath to be the SHA-256
+	// hash of this exact access token. Resource servers should set this when
+	// validating a DPoP-bound access token.
+	ExpectedAccessToken string
 }
 
 type Validator struct {
@@ -82,13 +108,26 @@ func NewValidator(opts *ValidatorOpts) (*Validator, error) {
 		cloned.ExpectedHTM = new(*opts.ExpectedHTM)
 	}
 	if opts.ExpectedHTU != nil {
-		cloned.ExpectedHTU = new(*opts.ExpectedHTU)
+		normalized, err := normalizeHTU(*opts.ExpectedHTU)
+		if err != nil {
+			return nil, fmt.Errorf("dpop: invalid ExpectedHTU: %w", err)
+		}
+		cloned.ExpectedHTU = new(normalized)
+	}
+	if opts.ExpectedAccessToken != "" {
+		cloned.ExpectedAccessToken = opts.ExpectedAccessToken
 	}
 	return &Validator{opts: cloned}, nil
 }
 
 // VerifyAndDecode verifies a compact DPoP proof and applies validator.
 func (v *Verifier) VerifyAndDecode(compact string, validator *Validator) (*Proof, error) {
+	return v.VerifyAndDecodeContext(context.Background(), compact, validator)
+}
+
+// VerifyAndDecodeContext verifies a compact DPoP proof, applies validator,
+// and atomically records it for replay protection.
+func (v *Verifier) VerifyAndDecodeContext(ctx context.Context, compact string, validator *Validator) (*Proof, error) {
 	if v == nil {
 		return nil, fmt.Errorf("dpop: verifier is nil")
 	}
@@ -161,7 +200,47 @@ func (v *Verifier) VerifyAndDecode(compact string, validator *Validator) (*Proof
 	}
 	proof.Thumbprint = thumbprint
 	proof.CertificateChain = slices.Clone(certificateChain)
+	if !v.DisableReplayProtection {
+		deadline := proof.IssuedAt.Add(v.validity()).Add(clockSkew)
+		if proof.ExpiresAt != nil {
+			expiryDeadline := proof.ExpiresAt.Add(clockSkew)
+			if expiryDeadline.Before(deadline) {
+				deadline = expiryDeadline
+			}
+		}
+		if err := v.replayStore().CheckAndRecord(ctx, proof.Thumbprint, proof.JWTID, deadline); err != nil {
+			return nil, fmt.Errorf("recording DPoP proof for replay protection: %w", err)
+		}
+	}
 	return proof, nil
+}
+
+func (v *Verifier) replayStore() ReplayStore {
+	if v.ReplayStore != nil {
+		return v.ReplayStore
+	}
+	v.replayMu.Lock()
+	defer v.replayMu.Unlock()
+	if v.defaultReplayStore == nil {
+		maxEntries := v.ReplayCacheMaxEntries
+		if maxEntries == 0 {
+			maxEntries = DefaultReplayCacheMaxEntries
+		}
+		// A non-positive configured capacity cannot safely provide replay
+		// protection, so install a store that fails closed.
+		if maxEntries < 0 {
+			v.defaultReplayStore = replayStoreError{fmt.Errorf("dpop: ReplayCacheMaxEntries must be positive")}
+		} else {
+			v.defaultReplayStore = newInMemoryReplayStore(maxEntries)
+		}
+	}
+	return v.defaultReplayStore
+}
+
+type replayStoreError struct{ err error }
+
+func (s replayStoreError) CheckAndRecord(context.Context, string, string, time.Time) error {
+	return s.err
 }
 
 func (v *Verifier) validationTime() time.Time {
@@ -240,8 +319,18 @@ func validateProofClaims(claims map[string]any, opts ValidatorOpts, now time.Tim
 		}
 	}
 	if opts.ExpectedHTU != nil {
-		if proof.HTTPURI != *opts.ExpectedHTU {
+		normalized, err := normalizeHTU(proof.HTTPURI)
+		if err != nil {
+			return nil, fmt.Errorf("invalid htu claim: %w", err)
+		}
+		if normalized != *opts.ExpectedHTU {
 			return nil, fmt.Errorf("htu claim mismatch: got %q, want %q", proof.HTTPURI, *opts.ExpectedHTU)
+		}
+	}
+	if opts.ExpectedAccessToken != "" {
+		want := hashAccessToken(opts.ExpectedAccessToken)
+		if proof.AccessTokenHash == "" || subtle.ConstantTimeCompare([]byte(proof.AccessTokenHash), []byte(want)) != 1 {
+			return nil, fmt.Errorf("ath claim mismatch")
 		}
 	}
 	return proof, nil

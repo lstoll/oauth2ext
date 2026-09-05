@@ -47,8 +47,9 @@ type Config struct {
 	// OAuth client. Defaults to ES256.
 	AccessTokenSigningAlgorithm jwt.Algorithm
 
-	// DPoPVerifier is used for verifying DPoP proofs on token requests. This is
-	// optional - if not provided, DPoP proofs will not be verified or enforced.
+	// DPoPVerifier is used for verifying DPoP proofs on token and UserInfo
+	// requests. It is optional for bearer-only deployments. When absent, DPoP
+	// proofs are rejected and DPoP-bound access tokens fail closed at UserInfo.
 	DPoPVerifier *dpop.Verifier
 
 	Logger *slog.Logger

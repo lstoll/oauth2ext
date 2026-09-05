@@ -59,19 +59,48 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	authSp := strings.SplitN(req.Header.Get("authorization"), " ", 2)
-	if !strings.EqualFold(authSp[0], "bearer") || len(authSp) != 2 {
+	authorization := req.Header.Values("Authorization")
+	if len(authorization) != 1 {
 		be := &oauth2proto.BearerError{} // no content, just request auth
+		herr := &oauth2proto.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), CauseMsg: "exactly one Authorization header is required"}
+		_ = oauth2proto.WriteError(w, req, herr)
+		return
+	}
+	authScheme, accessToken, ok := strings.Cut(authorization[0], " ")
+	if !ok || accessToken == "" || strings.ContainsAny(accessToken, " \t") || (!strings.EqualFold(authScheme, "bearer") && !strings.EqualFold(authScheme, "dpop")) {
+		be := &oauth2proto.BearerError{}
 		herr := &oauth2proto.HTTPError{Code: http.StatusUnauthorized, WWWAuthenticate: be.String(), CauseMsg: "malformed Authorization header"}
 		_ = oauth2proto.WriteError(w, req, herr)
 		return
 	}
 
-	atJWT, err := s.verifyAccessToken(req.Context(), authSp[1])
+	atJWT, err := s.verifyAccessToken(req.Context(), accessToken)
 	if err != nil {
 		slog.ErrorContext(req.Context(), "invalid access token", "error", err)
 		writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", err)
 		return
+	}
+	dpopThumbprint, err := accessTokenDPoPThumbprint(atJWT)
+	if err != nil {
+		slog.ErrorContext(req.Context(), "invalid access token confirmation claim", "error", err)
+		writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid access token", err)
+		return
+	}
+	if dpopThumbprint == "" {
+		if !strings.EqualFold(authScheme, "bearer") {
+			writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "DPoP authorization is only valid for DPoP-bound tokens", nil)
+			return
+		}
+	} else {
+		if !strings.EqualFold(authScheme, "dpop") {
+			writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "DPoP-bound token requires DPoP authorization", nil)
+			return
+		}
+		if _, err := s.verifyDPoPProof(s.config.Issuer, req, &dpopThumbprint, accessToken); err != nil {
+			slog.ErrorContext(req.Context(), "invalid DPoP proof for userinfo", "error", err)
+			writeUserinfoBearerError(w, req, oauth2proto.BearerErrorCodeInvalidToken, "invalid DPoP proof", err)
+			return
+		}
 	}
 
 	atSub, err := atJWT.Subject()
@@ -150,6 +179,21 @@ func (s *Server) UserinfoHandler(w http.ResponseWriter, req *http.Request) {
 		_ = oauth2proto.WriteError(w, req, err)
 		return
 	}
+}
+
+func accessTokenDPoPThumbprint(atJWT *jwt.VerifiedJWT) (string, error) {
+	if !atJWT.Has("cnf") {
+		return "", nil
+	}
+	cnf, err := atJWT.Object("cnf")
+	if err != nil {
+		return "", err
+	}
+	jkt, ok := cnf["jkt"].(string)
+	if !ok || jkt == "" || len(cnf) != 1 {
+		return "", fmt.Errorf("invalid cnf.jkt claim")
+	}
+	return jkt, nil
 }
 
 func writeUserinfoBearerError(w http.ResponseWriter, req *http.Request, code oauth2proto.BearerErrorCode, description string, cause error) { // nolint:unparam // code may vary in future.

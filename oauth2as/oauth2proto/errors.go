@@ -265,6 +265,9 @@ const (
 	// TokenErrorCodeInvalidScope: The requested scope is invalid, unknown,
 	// malformed, or exceeds the scope granted by the resource owner.
 	TokenErrorCodeInvalidScope TokenErrorCode = "invalid_scope"
+	// TokenErrorCodeInvalidDPoPProof indicates that a DPoP proof was invalid,
+	// including because it was replayed (RFC 9449 section 5).
+	TokenErrorCodeInvalidDPoPProof TokenErrorCode = "invalid_dpop_proof"
 )
 
 // TokenError represents an error returned from calling the token endpoint.

@@ -8,7 +8,6 @@ import (
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -168,17 +167,6 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidRequest, Description: "code is required"}
 	}
 
-	// Verify DPoP proof if present. In the code flow, we allow any thumbprint -
-	// the result is what we'll bind the grant to.
-	dpopProof, err := s.verifyDPoPProof(s.config.Issuer, req, nil)
-	if err != nil {
-		return nil, err
-	}
-	var dpopThumbprint string
-	if dpopProof != nil {
-		dpopThumbprint = dpopProof.Thumbprint
-	}
-
 	loadedGrant, err := s.getGrantFromAuthCode(ctx, treq.Code)
 	if err != nil {
 		if errors.Is(err, errGrantTokenInvalid) {
@@ -230,6 +218,22 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 		if !verifyCodeChallenge(treq.CodeVerifier, loadedGrant.grant.Request.CodeChallenge) {
 			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "PKCE verification failed"}
 		}
+	}
+
+	// Verify DPoP only after validating the code, client, redirect URI, and
+	// PKCE. Otherwise unauthenticated invalid-code requests could fill the
+	// bounded replay cache. Recording still occurs before handlers or storage
+	// mutations, so a valid proof is consumed even if later work fails.
+	dpopProof, err := s.verifyDPoPProof(s.config.Issuer, req, nil, "")
+	if err != nil {
+		if errors.Is(err, dpop.ErrProofReplay) {
+			return nil, invalidDPoPProofError(err)
+		}
+		return nil, err
+	}
+	var dpopThumbprint string
+	if dpopProof != nil {
+		dpopThumbprint = dpopProof.Thumbprint
 	}
 
 	// Update the grant with DPoP thumbprint if present
@@ -337,8 +341,11 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 	var dpopProof *dpop.Proof
 	if storedThumbprint != "" {
 		var err error
-		dpopProof, err = s.verifyDPoPProof(s.config.Issuer, req, &storedThumbprint)
+		dpopProof, err = s.verifyDPoPProof(s.config.Issuer, req, &storedThumbprint, "")
 		if err != nil {
+			if errors.Is(err, dpop.ErrProofReplay) {
+				return nil, invalidDPoPProofError(err)
+			}
 			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "DPoP proof key mismatch"}
 		}
 		if dpopProof == nil || dpopProof.Thumbprint == "" {
@@ -422,6 +429,10 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		return nil, fmt.Errorf("committing refresh token rotation: %w", err)
 	}
 	return prepared.response, nil
+}
+
+func invalidDPoPProofError(cause error) *oauth2proto.TokenError {
+	return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidDPoPProof, Description: "invalid DPoP proof", Cause: cause}
 }
 
 type preparedTokenResponse struct {
@@ -657,29 +668,42 @@ func verifyCodeChallenge(codeVerifier, storedCodeChallenge string) bool {
 // verifyDPoPProof extracts and verifies the DPoP header from a request. Returns
 // a verified [dpop.Proof] if a valid DPoP proof is provided, nil if no DPoP
 // header is present (and none is required), or an error if the proof is invalid.
-// When expectedThumbprint is non-nil, the proof's thumbprint must match it.
-func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbprint *string) (proof *dpop.Proof, err error) {
-	dpopHeader := req.Header.Get("DPoP")
-	if dpopHeader == "" {
+// A supplied proof is rejected when DPoP is not configured. When
+// expectedThumbprint is non-nil, the proof's thumbprint must match it. When
+// expectedAccessToken is non-empty, the proof's ath claim must bind that exact
+// compact access token.
+func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbprint *string, expectedAccessToken string) (proof *dpop.Proof, err error) {
+	dpopHeaders := req.Header.Values("DPoP")
+	if len(dpopHeaders) == 0 || dpopHeaders[0] == "" {
 		if expectedThumbprint != nil {
 			return nil, fmt.Errorf("DPoP header required")
 		}
 		return nil, nil
 	}
+	if len(dpopHeaders) != 1 {
+		return nil, fmt.Errorf("exactly one DPoP header is required")
+	}
+	dpopHeader := dpopHeaders[0]
 
 	if s.config.DPoPVerifier == nil {
-		slog.DebugContext(req.Context(), "DPoP proof provided but DPoP is not supported")
-		return nil, nil
+		return nil, fmt.Errorf("DPoP is not supported")
 	}
 
 	issURL, err := url.Parse(iss)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse issuer: %w", err)
 	}
+	expectedHTU := (&url.URL{
+		Scheme:  issURL.Scheme,
+		Host:    issURL.Host,
+		Path:    req.URL.Path,
+		RawPath: req.URL.RawPath,
+	}).String()
 
 	opts := &dpop.ValidatorOpts{
-		ExpectedHTM: new(req.Method),
-		ExpectedHTU: new(fmt.Sprintf("%s://%s%s", issURL.Scheme, issURL.Host, req.URL.Path)),
+		ExpectedHTM:         new(req.Method),
+		ExpectedHTU:         new(expectedHTU),
+		ExpectedAccessToken: expectedAccessToken,
 	}
 	if expectedThumbprint == nil {
 		opts.IgnoreThumbprint = true
@@ -692,7 +716,7 @@ func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbpri
 	if err != nil {
 		return nil, fmt.Errorf("failed to create validator: %w", err)
 	}
-	res, err := s.config.DPoPVerifier.VerifyAndDecode(dpopHeader, validator)
+	res, err := s.config.DPoPVerifier.VerifyAndDecodeContext(req.Context(), dpopHeader, validator)
 	if err != nil {
 		return nil, fmt.Errorf("failed to verify DPoP proof: %w", err)
 	}

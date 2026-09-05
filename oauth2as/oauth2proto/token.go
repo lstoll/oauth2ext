@@ -3,6 +3,7 @@ package oauth2proto
 import (
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -36,18 +37,47 @@ func ParseTokenRequest(req *http.Request) (*TokenRequest, error) {
 		return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "method must be POST"}
 	}
 
-	tr := &TokenRequest{
-		RedirectURI:  req.FormValue("redirect_uri"),
-		Code:         req.FormValue("code"),
-		RefreshToken: req.FormValue("refresh_token"),
-		CodeVerifier: req.FormValue("code_verifier"),
+	contentType, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	if err != nil || contentType != "application/x-www-form-urlencoded" {
+		return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "content type must be application/x-www-form-urlencoded"}
+	}
+	if req.URL.RawQuery != "" {
+		return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "query parameters are not allowed"}
+	}
+	if err := req.ParseForm(); err != nil {
+		return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "invalid form encoding"}
+	}
+	for parameter, values := range req.PostForm {
+		if len(values) > 1 {
+			return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: fmt.Sprintf("%s must not be repeated", parameter)}
+		}
 	}
 
-	// Auth the request
+	tr := &TokenRequest{
+		RedirectURI:  req.PostForm.Get("redirect_uri"),
+		Code:         req.PostForm.Get("code"),
+		RefreshToken: req.PostForm.Get("refresh_token"),
+		CodeVerifier: req.PostForm.Get("code_verifier"),
+	}
+
+	// Auth the request. Exactly one authentication method is permitted.
 	// https://tools.ietf.org/html/rfc6749#section-2.3
+	authorization := req.Header.Values("Authorization")
+	if len(authorization) > 1 {
+		return nil, invalidClientAuthentication("multiple Authorization headers")
+	}
 	cid, cs, isBasic := req.BasicAuth()
+	if len(authorization) == 1 && !isBasic {
+		return nil, invalidClientAuthentication("malformed HTTP Basic authentication")
+	}
 	if isBasic {
-		var err error
+		if _, bodyClientID := req.PostForm["client_id"]; bodyClientID {
+			return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "client_id must not be sent with HTTP Basic authentication"}
+		}
+		if _, bodyClientSecret := req.PostForm["client_secret"]; bodyClientSecret {
+			return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "client_secret must not be sent with HTTP Basic authentication"}
+		}
+
 		tr.ClientID, err = url.QueryUnescape(cid)
 		if err != nil {
 			return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "invalid encoding for client id"}
@@ -58,11 +88,11 @@ func ParseTokenRequest(req *http.Request) (*TokenRequest, error) {
 		}
 
 	} else {
-		tr.ClientID = req.FormValue("client_id")
-		tr.ClientSecret = req.FormValue("client_secret")
+		tr.ClientID = req.PostForm.Get("client_id")
+		tr.ClientSecret = req.PostForm.Get("client_secret")
 	}
 
-	switch req.FormValue("grant_type") {
+	switch req.PostForm.Get("grant_type") {
 	case string(GrantTypeAuthorizationCode):
 		if tr.Code == "" {
 			return nil, &TokenError{ErrorCode: TokenErrorCodeInvalidRequest, Description: "code is required for authorization_code grant"}
@@ -84,6 +114,14 @@ func ParseTokenRequest(req *http.Request) (*TokenRequest, error) {
 	}
 
 	return tr, nil
+}
+
+func invalidClientAuthentication(description string) *TokenError {
+	return &TokenError{
+		ErrorCode:       TokenErrorCodeInvalidClient,
+		Description:     description,
+		WWWAuthenticate: `Basic realm="token"`,
+	}
 }
 
 // TokenResponse ref: https://tools.ietf.org/html/rfc6749#section-5.1

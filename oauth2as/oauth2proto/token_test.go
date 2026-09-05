@@ -2,6 +2,7 @@ package oauth2proto
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,6 +27,77 @@ func TestParseToken(t *testing.T) {
 				return httptest.NewRequest("HEAD", "/", nil)
 			},
 			WantErr: true,
+		},
+		{
+			Name: "Reject query parameters",
+			Req: func() *http.Request {
+				req := queryReq(map[string]string{"grant_type": "authorization_code"})()
+				req.URL.RawQuery = "code=acode&redirect_uri=https%3A%2F%2Fredirect"
+				return req
+			},
+			WantErr:     true,
+			WantErrCode: TokenErrorCodeInvalidRequest,
+		},
+		{
+			Name: "Reject repeated parameters",
+			Req: func() *http.Request {
+				req := queryReq(map[string]string{
+					"code":         "acode",
+					"redirect_uri": "https://redirect",
+					"grant_type":   "authorization_code",
+				})()
+				req.Body = io.NopCloser(strings.NewReader("code=acode&code=another&redirect_uri=https%3A%2F%2Fredirect&grant_type=authorization_code"))
+				return req
+			},
+			WantErr:     true,
+			WantErrCode: TokenErrorCodeInvalidRequest,
+		},
+		{
+			Name: "Reject non-form content type",
+			Req: func() *http.Request {
+				req := queryReq(map[string]string{"grant_type": "refresh_token", "refresh_token": "token"})()
+				req.Header.Set("Content-Type", "application/json")
+				return req
+			},
+			WantErr:     true,
+			WantErrCode: TokenErrorCodeInvalidRequest,
+		},
+		{
+			Name: "Reject body credentials with basic authentication",
+			Req: func() *http.Request {
+				req := queryReq(map[string]string{
+					"code":          "acode",
+					"redirect_uri":  "https://redirect",
+					"grant_type":    "authorization_code",
+					"client_id":     "body-client",
+					"client_secret": "body-secret",
+				})()
+				req.SetBasicAuth("basic-client", "basic-secret")
+				return req
+			},
+			WantErr:     true,
+			WantErrCode: TokenErrorCodeInvalidRequest,
+		},
+		{
+			Name: "Reject multiple authorization headers",
+			Req: func() *http.Request {
+				req := queryReq(map[string]string{"grant_type": "refresh_token", "refresh_token": "token"})()
+				req.Header.Add("Authorization", "Basic Y2xpZW50OnNlY3JldA==")
+				req.Header.Add("Authorization", "Basic Y2xpZW50OnNlY3JldA==")
+				return req
+			},
+			WantErr:     true,
+			WantErrCode: TokenErrorCodeInvalidClient,
+		},
+		{
+			Name: "Reject malformed authorization instead of falling back to body credentials",
+			Req: func() *http.Request {
+				req := queryReq(map[string]string{"grant_type": "refresh_token", "refresh_token": "token", "client_id": "client", "client_secret": "secret"})()
+				req.Header.Set("Authorization", "Bearer token")
+				return req
+			},
+			WantErr:     true,
+			WantErrCode: TokenErrorCodeInvalidClient,
 		},
 		{
 			Name: "Good query",
