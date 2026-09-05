@@ -2,6 +2,7 @@ package oauth2proto
 
 import (
 	"fmt"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -42,7 +43,8 @@ type AuthRequest struct {
 // ParseAuthRequest can be used to process an oauth2 authentication request,
 // returning information about it. It can handle both the code and implicit auth
 // types. If an error is returned, it should be passed to the user via
-// writeError
+// writeError. Parameters must not be repeated. POST requests must send
+// parameters in the form body only.
 //
 // https://tools.ietf.org/html/rfc6749#section-4.1.1
 // https://tools.ietf.org/html/rfc6749#section-4.2.1
@@ -51,15 +53,20 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 		return nil, &HTTPError{Code: http.StatusBadRequest, Message: "method must be POST or GET"}
 	}
 
-	rts := req.FormValue("response_type")
-	cid := req.FormValue("client_id")
-	ruri := req.FormValue("redirect_uri")
-	scope := req.FormValue("scope")
-	state := req.FormValue("state")
-	codeChallenge := req.FormValue("code_challenge")
-	codeChallengeMethod := req.FormValue("code_challenge_method")
-	nonce := req.FormValue("nonce")
-	maxAgeRaw := req.FormValue("max_age")
+	values, err := parseAuthRequestValues(req)
+	if err != nil {
+		return nil, err
+	}
+
+	rts := values.Get("response_type")
+	cid := values.Get("client_id")
+	ruri := values.Get("redirect_uri")
+	scope := values.Get("scope")
+	state := values.Get("state")
+	codeChallenge := values.Get("code_challenge")
+	codeChallengeMethod := values.Get("code_challenge_method")
+	nonce := values.Get("nonce")
+	maxAgeRaw := values.Get("max_age")
 
 	var rt ResponseType
 	switch rts {
@@ -89,7 +96,6 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 			Code:        AuthErrorCodeInvalidRequest,
 			Description: fmt.Sprintf(`only code_challenge type "%s" supported`, CodeChallengeMethodS256),
 		}
-
 	}
 
 	var scopes []string
@@ -99,7 +105,7 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 	}
 
 	var maxAge *int
-	if req.Form.Has("max_age") {
+	if _, hasMaxAge := values["max_age"]; hasMaxAge {
 		ma, err := strconv.Atoi(maxAgeRaw)
 		if err != nil || ma < 0 {
 			return nil, &AuthError{
@@ -117,11 +123,51 @@ func ParseAuthRequest(req *http.Request) (authReq *AuthRequest, err error) {
 		State:         state,
 		Scopes:        scopes,
 		ResponseType:  rt,
-		Raw:           req.Form,
+		Raw:           values,
 		CodeChallenge: codeChallenge,
 		Nonce:         nonce,
 		MaxAge:        maxAge,
 	}, nil
+}
+
+func parseAuthRequestValues(req *http.Request) (url.Values, error) {
+	if req.Method == http.MethodGet {
+		values, err := url.ParseQuery(req.URL.RawQuery)
+		if err != nil {
+			return nil, &AuthError{Code: AuthErrorCodeInvalidRequest, Description: "invalid query encoding"}
+		}
+		if err := rejectRepeatedParams(values); err != nil {
+			return nil, err
+		}
+		return values, nil
+	}
+
+	contentType, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	if err != nil || contentType != "application/x-www-form-urlencoded" {
+		return nil, &AuthError{Code: AuthErrorCodeInvalidRequest, Description: "content type must be application/x-www-form-urlencoded"}
+	}
+	if req.URL.RawQuery != "" {
+		return nil, &AuthError{Code: AuthErrorCodeInvalidRequest, Description: "query parameters are not allowed"}
+	}
+	if err := req.ParseForm(); err != nil {
+		return nil, &AuthError{Code: AuthErrorCodeInvalidRequest, Description: "invalid form encoding"}
+	}
+	if err := rejectRepeatedParams(req.PostForm); err != nil {
+		return nil, err
+	}
+	return req.PostForm, nil
+}
+
+func rejectRepeatedParams(values url.Values) error {
+	for parameter, parameterValues := range values {
+		if len(parameterValues) > 1 {
+			return &AuthError{
+				Code:        AuthErrorCodeInvalidRequest,
+				Description: fmt.Sprintf("%s must not be repeated", parameter),
+			}
+		}
+	}
+	return nil
 }
 
 type CodeAuthResponse struct {
