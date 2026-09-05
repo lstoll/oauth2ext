@@ -74,10 +74,10 @@ func TestIsValidRedirectURI(t *testing.T) {
 			description: "A different port on a registered IPv6 loopback URI should be valid.",
 		},
 		{
-			name:        "Valid Loopback, mixed IPv4 and IPv6",
+			name:        "Invalid Loopback, mixed IPv4 and IPv6",
 			redirectURI: "http://127.0.0.1:51004/cb6",
-			expected:    true,
-			description: "A different port on a registered IPv4 loopback URI should be valid.",
+			expected:    false,
+			description: "The loopback exception permits a variable port, not a different address literal.",
 		},
 
 		{

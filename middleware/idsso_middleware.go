@@ -41,6 +41,14 @@ type IDSSOHandler[IDClaims any] struct {
 	// Provider is used for PKCE (CodeChallengeMethodsSupported). Set by
 	// NewIDSSOHandlerFromDiscovery when using discovery.
 	Provider *provider.Provider
+	// DisablePKCE explicitly disables PKCE for confidential clients whose
+	// providers do not support S256. It must not be used for public clients,
+	// which always require PKCE.
+	//
+	// PKCE with S256 is the default. When discovery metadata is available, the
+	// handler fails closed if S256 is not advertised. For a handler constructed
+	// without discovery, S256 support is assumed unless explicitly disabled.
+	DisablePKCE bool
 	// OAuth2Config are the options used for the oauth2 flow. Required.
 	OAuth2Config *oauth2.Config
 	// AuthCodeOptions options that can be passed when creating the auth code
@@ -141,6 +149,13 @@ func (h *IDSSOHandler[IDClaims]) Wrap(next http.Handler) http.Handler {
 		// Check for an authentication request finishing
 		returnTo, err := h.authenticateCallback(r, session)
 		if err != nil {
+			// A callback consumes its matching login transaction before exchanging
+			// the code. Persist that removal even when the exchange or verification
+			// fails, so a code/state pair cannot be retried.
+			if err := h.SessionStore.SaveOIDCSession(w, r, session); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		} else if returnTo != "" {
@@ -253,18 +268,36 @@ func (h *IDSSOHandler[IDClaims]) authenticateCallback(r *http.Request, session *
 		return "", nil
 	}
 
-	var foundLogin *SessionDataLogin
-	for _, sl := range session.Logins {
-		if state != "" && sl.State == state {
-			foundLogin = &sl
+	var foundLogin SessionDataLogin
+	found := false
+	for i, sl := range session.Logins {
+		if sl.State != state {
+			continue
 		}
+		// Consume a matching transaction before using its authorization code.
+		// This also removes expired state from SessionStores that do not enforce
+		// SessionDataLogin.Expires themselves.
+		session.Logins = append(session.Logins[:i], session.Logins[i+1:]...)
+		foundLogin = sl
+		found = true
+		break
 	}
-	if foundLogin == nil {
+	if !found {
 		return "", fmt.Errorf("state did not match")
+	}
+	if !time.Now().Before(time.Unix(int64(foundLogin.Expires), 0)) {
+		return "", fmt.Errorf("login state expired")
 	}
 
 	opts := h.AuthCodeOptions
-	if h.Provider != nil && slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
+	pkceEnabled, err := h.pkceEnabled()
+	if err != nil {
+		return "", err
+	}
+	if pkceEnabled && foundLogin.PKCEChallenge == "" {
+		return "", fmt.Errorf("login state is missing the required PKCE verifier")
+	}
+	if foundLogin.PKCEChallenge != "" {
 		opts = append(opts, oauth2.VerifierOption(foundLogin.PKCEChallenge))
 	}
 
@@ -288,10 +321,6 @@ func (h *IDSSOHandler[IDClaims]) authenticateCallback(r *http.Request, session *
 
 	returnTo := resolveReturnTo(foundLogin.ReturnTo, h.BaseURL)
 
-	session.Logins = slices.DeleteFunc(session.Logins, func(sl SessionDataLogin) bool {
-		return sl.State == state
-	})
-
 	return returnTo, nil
 }
 
@@ -306,7 +335,11 @@ func (h *IDSSOHandler[IDClaims]) startAuthentication(r *http.Request, session *S
 	)
 
 	opts := append(slices.Clone(h.AuthCodeOptions), oauth2.SetAuthURLParam("nonce", nonce))
-	if h.Provider != nil && slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
+	pkceEnabled, err := h.pkceEnabled()
+	if err != nil {
+		return "", err
+	}
+	if pkceEnabled {
 		pkceChallenge = oauth2.GenerateVerifier()
 		opts = append(opts, oauth2.S256ChallengeOption(pkceChallenge))
 	}
@@ -327,6 +360,23 @@ func (h *IDSSOHandler[IDClaims]) startAuthentication(r *http.Request, session *S
 		return "", err
 	}
 	return o2cfg.AuthCodeURL(state, opts...), nil
+}
+
+func (h *IDSSOHandler[IDClaims]) pkceEnabled() (bool, error) {
+	publicClient := h.OAuth2Config != nil && h.OAuth2Config.ClientSecret == ""
+	if h.DisablePKCE {
+		if publicClient {
+			return false, fmt.Errorf("PKCE cannot be disabled for a public client")
+		}
+		return false, nil
+	}
+	if h.Provider == nil {
+		return true, nil
+	}
+	if slices.Contains(h.Provider.CodeChallengeMethodsSupported(), provider.CodeChallengeMethodS256) {
+		return true, nil
+	}
+	return false, fmt.Errorf("provider does not advertise PKCE S256 support; set DisablePKCE only for a confidential client")
 }
 
 func (h *IDSSOHandler[IDClaims]) getOAuth2Config() (oauth2.Config, error) {

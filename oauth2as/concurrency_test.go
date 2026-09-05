@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -89,8 +90,8 @@ func TestRefreshTokenConcurrency(t *testing.T) {
 			v.Set("client_id", "test-client")
 			v.Set("client_secret", "test-secret")
 
-			req := httptest.NewRequest("POST", "/token", nil)
-			req.Form = v
+			req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(v.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 			w := httptest.NewRecorder()
 			srv.TokenHandler(w, req)

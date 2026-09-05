@@ -21,10 +21,25 @@ import (
 	"lds.li/oauth2ext/claims"
 	"lds.li/oauth2ext/jwttest"
 	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/provider"
 )
 
 type rejectingIDTokenVerifier struct {
 	calls int
+}
+
+type memorySessionStore struct {
+	session *SessionData
+	saves   int
+}
+
+func (s *memorySessionStore) GetOIDCSession(*http.Request) (*SessionData, error) {
+	return s.session, nil
+}
+
+func (s *memorySessionStore) SaveOIDCSession(http.ResponseWriter, *http.Request, *SessionData) error {
+	s.saves++
+	return nil
 }
 
 func (v *rejectingIDTokenVerifier) Verify(context.Context, string, claims.IDTokenValidationInput) (struct{}, error) {
@@ -309,6 +324,110 @@ func TestAuthenticateExistingDoesNotRetryVerificationFailure(t *testing.T) {
 	}
 	if verifier.calls != 1 {
 		t.Fatalf("verification calls: got %d, want 1", verifier.calls)
+	}
+}
+
+func TestStartAuthenticationPublicClientRequiresPKCES256(t *testing.T) {
+	h := &IDSSOHandler[struct{}]{
+		OAuth2Config: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		Provider:     &provider.Provider{Metadata: &provider.OIDCProviderMetadata{}},
+	}
+	if _, err := h.startAuthentication(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}); err == nil {
+		t.Fatal("public client started without provider PKCE S256 support")
+	}
+}
+
+func TestStartAuthenticationConfidentialClientRequiresExplicitPKCEOptOut(t *testing.T) {
+	h := &IDSSOHandler[struct{}]{
+		OAuth2Config: &oauth2.Config{ClientID: "confidential-client", ClientSecret: "secret", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		Provider:     &provider.Provider{Metadata: &provider.OIDCProviderMetadata{}},
+	}
+	if _, err := h.startAuthentication(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}); err == nil {
+		t.Fatal("confidential client started without provider PKCE S256 support or an explicit opt-out")
+	}
+	h.DisablePKCE = true
+	if _, err := h.startAuthentication(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}); err != nil {
+		t.Fatalf("confidential client explicit PKCE opt-out failed: %v", err)
+	}
+}
+
+func TestStartAuthenticationUsesPKCEWithoutDiscovery(t *testing.T) {
+	h := &IDSSOHandler[struct{}]{
+		OAuth2Config: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+	}
+	session := &SessionData{}
+	authURL, err := h.startAuthentication(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("code_challenge_method") != "S256" || u.Query().Get("code_challenge") == "" {
+		t.Fatalf("authorization URL did not enable S256 PKCE: %s", authURL)
+	}
+	if len(session.Logins) != 1 || session.Logins[0].PKCEChallenge == "" {
+		t.Fatal("login state did not retain the PKCE verifier")
+	}
+}
+
+func TestStartAuthenticationCannotDisablePKCEForPublicClient(t *testing.T) {
+	h := &IDSSOHandler[struct{}]{
+		OAuth2Config: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		DisablePKCE:  true,
+	}
+	if _, err := h.startAuthentication(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}); err == nil {
+		t.Fatal("public client disabled PKCE")
+	}
+}
+
+func TestAuthenticateCallbackRejectsAndConsumesExpiredLogin(t *testing.T) {
+	h := &IDSSOHandler[struct{}]{}
+	session := &SessionData{Logins: []SessionDataLogin{{State: "expired-state", Expires: int(time.Now().Add(-time.Minute).Unix())}}}
+	r := httptest.NewRequest(http.MethodGet, "https://rp.example/callback?state=expired-state&code=code", nil)
+	if _, err := h.authenticateCallback(r, session); err == nil {
+		t.Fatal("expired login state was accepted")
+	}
+	if len(session.Logins) != 0 {
+		t.Fatalf("expired login state was not consumed: %#v", session.Logins)
+	}
+}
+
+func TestAuthenticateCallbackPublicClientRejectsMissingPKCE(t *testing.T) {
+	h := &IDSSOHandler[struct{}]{
+		OAuth2Config: &oauth2.Config{ClientID: "public-client"},
+	}
+	session := &SessionData{Logins: []SessionDataLogin{{
+		State:   "state-without-pkce",
+		Expires: int(time.Now().Add(time.Minute).Unix()),
+	}}}
+	r := httptest.NewRequest(http.MethodGet, "https://rp.example/callback?state=state-without-pkce&code=code", nil)
+	if _, err := h.authenticateCallback(r, session); err == nil || !strings.Contains(err.Error(), "PKCE") {
+		t.Fatalf("missing PKCE verifier error = %v", err)
+	}
+	if len(session.Logins) != 0 {
+		t.Fatalf("invalid login state was not consumed: %#v", session.Logins)
+	}
+}
+
+func TestWrapPersistsConsumedExpiredLogin(t *testing.T) {
+	store := &memorySessionStore{session: &SessionData{Logins: []SessionDataLogin{{
+		State:   "expired-state",
+		Expires: int(time.Now().Add(-time.Minute).Unix()),
+	}}}}
+	h := &IDSSOHandler[struct{}]{
+		Verifier:     &rejectingIDTokenVerifier{},
+		SessionStore: store,
+	}
+	r := httptest.NewRequest(http.MethodGet, "https://rp.example/callback?state=expired-state&code=code", nil)
+	w := httptest.NewRecorder()
+	h.Wrap(http.NotFoundHandler()).ServeHTTP(w, r)
+	if store.saves != 1 {
+		t.Fatalf("SaveOIDCSession calls = %d, want 1", store.saves)
+	}
+	if len(store.session.Logins) != 0 {
+		t.Fatalf("expired login state was not persisted as consumed: %#v", store.session.Logins)
 	}
 }
 

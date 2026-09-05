@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	jsonv2 "encoding/json/v2"
@@ -58,6 +59,10 @@ type ValidatorOpts struct {
 	IgnoreThumbprint   bool
 	ExpectedHTM        *string
 	ExpectedHTU        *string
+	// ExpectedAccessToken, when non-empty, requires ath to be the SHA-256
+	// hash of this exact access token. Resource servers should set this when
+	// validating a DPoP-bound access token.
+	ExpectedAccessToken string
 }
 
 type Validator struct {
@@ -83,6 +88,9 @@ func NewValidator(opts *ValidatorOpts) (*Validator, error) {
 	}
 	if opts.ExpectedHTU != nil {
 		cloned.ExpectedHTU = new(*opts.ExpectedHTU)
+	}
+	if opts.ExpectedAccessToken != "" {
+		cloned.ExpectedAccessToken = opts.ExpectedAccessToken
 	}
 	return &Validator{opts: cloned}, nil
 }
@@ -242,6 +250,12 @@ func validateProofClaims(claims map[string]any, opts ValidatorOpts, now time.Tim
 	if opts.ExpectedHTU != nil {
 		if proof.HTTPURI != *opts.ExpectedHTU {
 			return nil, fmt.Errorf("htu claim mismatch: got %q, want %q", proof.HTTPURI, *opts.ExpectedHTU)
+		}
+	}
+	if opts.ExpectedAccessToken != "" {
+		want := hashAccessToken(opts.ExpectedAccessToken)
+		if proof.AccessTokenHash == "" || subtle.ConstantTimeCompare([]byte(proof.AccessTokenHash), []byte(want)) != 1 {
+			return nil, fmt.Errorf("ath claim mismatch")
 		}
 	}
 	return proof, nil

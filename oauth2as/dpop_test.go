@@ -13,6 +13,7 @@ import (
 	"uuid"
 
 	"lds.li/oauth2ext/dpop"
+	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as/internal/token"
 	"lds.li/oauth2ext/oauth2as/oauth2proto"
 	"lds.li/oauth2ext/oidc"
@@ -361,4 +362,110 @@ func TestDPoPTokenFlow(t *testing.T) {
 			}
 		})
 	})
+}
+
+func TestUserinfoDPoPSenderConstraint(t *testing.T) {
+	const issuer = "https://issuer.example"
+	storage := NewMemoryStorage()
+	grantID, err := storage.createGrant(t.Context(), &storedGrant{
+		UserID: "sub", ClientID: "client", GrantedScopes: []string{oidc.ScopeOpenID},
+		GrantedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerSigner, verifier := testSignerVerifier(t)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofSigner, err := dpop.NewSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thumbprint, err := proofSigner.Thumbprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessToken := signDPoPAccessToken(t, issuerSigner, issuer, grantID, "client", thumbprint)
+	server, err := NewServer(Config{
+		Issuer: issuer, Storage: storage, Signer: issuerSigner, Verifier: verifier, DPoPVerifier: &dpop.Verifier{}, Clients: staticClientSource{},
+		TokenHandler: func(context.Context, *TokenRequest) (*TokenResponse, error) { return &TokenResponse{}, nil },
+		UserinfoHandler: func(context.Context, *UserinfoRequest) (*UserinfoResponse, error) {
+			return &UserinfoResponse{Identity: map[string]string{"sub": "sub"}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(scheme string, proof string) *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+		req.Header.Set("Authorization", scheme+" "+accessToken)
+		if proof != "" {
+			req.Header.Set("DPoP", proof)
+		}
+		server.UserinfoHandler(recorder, req)
+		return recorder
+	}
+	if recorder := request("Bearer", ""); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("bound token with Bearer: got %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+	proof, err := proofSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo", AccessToken: accessToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorder := request("DPoP", proof); recorder.Code != http.StatusOK {
+		t.Fatalf("valid DPoP: got %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	missingATH, err := proofSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorder := request("DPoP", missingATH); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("missing ath: got %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+	wrongATH, err := proofSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo", AccessToken: "different-access-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorder := request("DPoP", wrongATH); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong ath: got %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+	wrongKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongSigner, err := dpop.NewSigner(wrongKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongProof, err := wrongSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo", AccessToken: accessToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorder := request("DPoP", wrongProof); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong DPoP key: got %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+	server.config.DPoPVerifier = nil
+	if recorder := request("DPoP", proof); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("bound token without configured verifier: got %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
+func signDPoPAccessToken(t *testing.T, signer JWTSigner, issuer, grantID, clientID, thumbprint string) string {
+	t.Helper()
+	input, err := marshalSigningInput("at+jwt", map[string]any{
+		"iss": issuer, "sub": "sub", "client_id": clientID, claimGrantID: grantID,
+		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix(), "cnf": map[string]any{"jkt": thumbprint},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := signer.SignJWT(t.Context(), jwt.ES256, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compact
 }

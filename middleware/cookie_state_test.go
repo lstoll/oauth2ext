@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,5 +124,40 @@ func TestCookiestore_GetOIDCSession_NoCookies(t *testing.T) {
 	}
 	if len(sd.Logins) != 0 {
 		t.Errorf("Expected no logins, got %v", sd.Logins)
+	}
+}
+
+func TestDefaultCookieOptsUseHostPrefix(t *testing.T) {
+	if err := validateCookieOpts(&DefaultCookieOpts); err != nil {
+		t.Fatalf("default cookie options are not host-only: %v", err)
+	}
+	if !strings.HasPrefix(DefaultCookieOpts.TokenCookieName, "__Host-") {
+		t.Errorf("token cookie name = %q, want __Host- prefix", DefaultCookieOpts.TokenCookieName)
+	}
+	if !strings.HasPrefix(DefaultCookieOpts.LoginStateCookiePrefix, "__Host-") {
+		t.Errorf("login state cookie prefix = %q, want __Host- prefix", DefaultCookieOpts.LoginStateCookiePrefix)
+	}
+}
+
+func TestCookiestoreRejectsUnsafeCookieOpts(t *testing.T) {
+	tests := []struct {
+		name string
+		opts CookieOpts
+	}{
+		{"insecure", CookieOpts{TokenCookieName: "__Host-auth", LoginStateCookiePrefix: "__Host-state-", Path: "/", Secure: false}},
+		{"non-root-path", CookieOpts{TokenCookieName: "__Host-auth", LoginStateCookiePrefix: "__Host-state-", Path: "/oidc", Secure: true}},
+		{"wrong-token-prefix", CookieOpts{TokenCookieName: "auth", LoginStateCookiePrefix: "__Host-state-", Path: "/", Secure: true}},
+		{"wrong-state-prefix", CookieOpts{TokenCookieName: "__Host-auth", LoginStateCookiePrefix: "state-", Path: "/", Secure: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &Cookiestore{CookieOpts: &tt.opts}
+			if _, err := store.GetOIDCSession(httptest.NewRequest("GET", "https://rp.example/", nil)); err == nil {
+				t.Fatal("GetOIDCSession accepted unsafe cookie options")
+			}
+			if err := store.SaveOIDCSession(httptest.NewRecorder(), httptest.NewRequest("GET", "https://rp.example/", nil), &SessionData{}); err == nil {
+				t.Fatal("SaveOIDCSession accepted unsafe cookie options")
+			}
+		})
 	}
 }

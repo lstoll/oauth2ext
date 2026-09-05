@@ -31,8 +31,8 @@ type CookieOpts struct {
 }
 
 var DefaultCookieOpts = CookieOpts{
-	TokenCookieName:        "__HOST-auth",
-	LoginStateCookiePrefix: "__HOST-lstate-", // Note the trailing hyphen for separation
+	TokenCookieName:        "__Host-auth",
+	LoginStateCookiePrefix: "__Host-lstate-", // Note the trailing hyphen for separation
 	Path:                   "/",
 	Secure:                 true,
 	SameSite:               http.SameSiteLaxMode,
@@ -57,6 +57,9 @@ type Cookiestore struct {
 func (c *Cookiestore) GetOIDCSession(r *http.Request) (*SessionData, error) {
 	sd := &SessionData{}
 	opts := c.getCookieOpts()
+	if err := validateCookieOpts(opts); err != nil {
+		return nil, err
+	}
 
 	idtc, err := r.Cookie(opts.TokenCookieName)
 	if err != nil && !errors.Is(err, http.ErrNoCookie) {
@@ -122,6 +125,9 @@ func (c *expiresClaim) Time() time.Time {
 }
 
 func (c *Cookiestore) SaveOIDCSession(w http.ResponseWriter, r *http.Request, d *SessionData) error {
+	if err := validateCookieOpts(c.getCookieOpts()); err != nil {
+		return err
+	}
 
 	// Save or delete the main token cookie
 	if d.Token != nil {
@@ -252,6 +258,29 @@ func (c *Cookiestore) getCookieOpts() *CookieOpts {
 		return c.CookieOpts
 	}
 	return &DefaultCookieOpts
+}
+
+// validateCookieOpts makes the unauthenticated cookie-backed login state safe
+// from sibling subdomains. __Host- cookies are host-only by definition, but
+// only when Secure and Path=/ are also set. CookieOpts deliberately has no
+// Domain field so callers cannot weaken that invariant.
+func validateCookieOpts(opts *CookieOpts) error {
+	if opts == nil {
+		return errors.New("cookie options must not be nil")
+	}
+	if !opts.Secure {
+		return errors.New("cookie options must set Secure for __Host- cookies")
+	}
+	if opts.Path != "/" {
+		return errors.New("cookie options must set Path=/ for __Host- cookies")
+	}
+	if !strings.HasPrefix(opts.TokenCookieName, "__Host-") || len(opts.TokenCookieName) == len("__Host-") {
+		return fmt.Errorf("token cookie name %q must use the __Host- prefix", opts.TokenCookieName)
+	}
+	if !strings.HasPrefix(opts.LoginStateCookiePrefix, "__Host-") || len(opts.LoginStateCookiePrefix) == len("__Host-") {
+		return fmt.Errorf("login state cookie prefix %q must use the __Host- prefix", opts.LoginStateCookiePrefix)
+	}
+	return nil
 }
 
 func setCookieIfNotSet(w http.ResponseWriter, r *http.Request, c *http.Cookie) error {
