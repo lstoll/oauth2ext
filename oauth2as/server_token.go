@@ -167,17 +167,6 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 		return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidRequest, Description: "code is required"}
 	}
 
-	// Verify DPoP proof if present. In the code flow, we allow any thumbprint -
-	// the result is what we'll bind the grant to.
-	dpopProof, err := s.verifyDPoPProof(s.config.Issuer, req, nil, "")
-	if err != nil {
-		return nil, err
-	}
-	var dpopThumbprint string
-	if dpopProof != nil {
-		dpopThumbprint = dpopProof.Thumbprint
-	}
-
 	loadedGrant, err := s.getGrantFromAuthCode(ctx, treq.Code)
 	if err != nil {
 		if errors.Is(err, errGrantTokenInvalid) {
@@ -229,6 +218,22 @@ func (s *Server) codeToken(ctx context.Context, req *http.Request, treq *oauth2p
 		if !verifyCodeChallenge(treq.CodeVerifier, loadedGrant.grant.Request.CodeChallenge) {
 			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeUnauthorizedClient, Description: "PKCE verification failed"}
 		}
+	}
+
+	// Verify DPoP only after validating the code, client, redirect URI, and
+	// PKCE. Otherwise unauthenticated invalid-code requests could fill the
+	// bounded replay cache. Recording still occurs before handlers or storage
+	// mutations, so a valid proof is consumed even if later work fails.
+	dpopProof, err := s.verifyDPoPProof(s.config.Issuer, req, nil, "")
+	if err != nil {
+		if errors.Is(err, dpop.ErrProofReplay) {
+			return nil, invalidDPoPProofError(err)
+		}
+		return nil, err
+	}
+	var dpopThumbprint string
+	if dpopProof != nil {
+		dpopThumbprint = dpopProof.Thumbprint
 	}
 
 	// Update the grant with DPoP thumbprint if present
@@ -338,6 +343,9 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		var err error
 		dpopProof, err = s.verifyDPoPProof(s.config.Issuer, req, &storedThumbprint, "")
 		if err != nil {
+			if errors.Is(err, dpop.ErrProofReplay) {
+				return nil, invalidDPoPProofError(err)
+			}
 			return nil, &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidGrant, Description: "DPoP proof key mismatch"}
 		}
 		if dpopProof == nil || dpopProof.Thumbprint == "" {
@@ -421,6 +429,10 @@ func (s *Server) refreshToken(ctx context.Context, req *http.Request, treq *oaut
 		return nil, fmt.Errorf("committing refresh token rotation: %w", err)
 	}
 	return prepared.response, nil
+}
+
+func invalidDPoPProofError(cause error) *oauth2proto.TokenError {
+	return &oauth2proto.TokenError{ErrorCode: oauth2proto.TokenErrorCodeInvalidDPoPProof, Description: "invalid DPoP proof", Cause: cause}
 }
 
 type preparedTokenResponse struct {
@@ -698,7 +710,7 @@ func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbpri
 	if err != nil {
 		return nil, fmt.Errorf("failed to create validator: %w", err)
 	}
-	res, err := s.config.DPoPVerifier.VerifyAndDecode(dpopHeader, validator)
+	res, err := s.config.DPoPVerifier.VerifyAndDecodeContext(req.Context(), dpopHeader, validator)
 	if err != nil {
 		return nil, fmt.Errorf("failed to verify DPoP proof: %w", err)
 	}

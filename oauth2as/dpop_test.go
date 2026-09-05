@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -121,6 +122,16 @@ func TestDPoPTokenFlow(t *testing.T) {
 		if dpopThumbprintFromMetadata == "" {
 			t.Error("expected grant to have DPoP thumbprint in metadata")
 		}
+
+		// A new authorization code avoids the one-time-code check and exercises
+		// the token endpoint's DPoP replay classification.
+		replayed := *treq
+		replayed.Code = newCodeGrant(t, server.config.Storage)
+		_, err = server.codeToken(context.Background(), req, &replayed)
+		var tokenErr *oauth2proto.TokenError
+		if !errors.As(err, &tokenErr) || tokenErr.ErrorCode != oauth2proto.TokenErrorCodeInvalidDPoPProof {
+			t.Fatalf("replayed proof error = %v, want invalid_dpop_proof", err)
+		}
 	})
 
 	t.Run("Refresh with DPoP enforcement", func(t *testing.T) {
@@ -172,20 +183,12 @@ func TestDPoPTokenFlow(t *testing.T) {
 			t.Fatalf("failed to create DPoP proof: %v", err)
 		}
 
-		// Calculate expected thumbprint by verifying the proof
-		validator, err := dpop.NewValidator(&dpop.ValidatorOpts{
-			ExpectedHTM:      new(http.MethodPost),
-			ExpectedHTU:      new(issuer + "/token"),
-			IgnoreThumbprint: true,
-		})
+		// Derive the key thumbprint directly. Verifying this proof here would
+		// consume it before the request under test.
+		expectedThumbprint, err := dpopSigner.Thumbprint()
 		if err != nil {
-			t.Fatalf("failed to create validator: %v", err)
+			t.Fatalf("failed to calculate DPoP thumbprint: %v", err)
 		}
-		result, err := server.config.DPoPVerifier.VerifyAndDecode(dpopProof, validator)
-		if err != nil {
-			t.Fatalf("failed to verify proof: %v", err)
-		}
-		expectedThumbprint := result.Thumbprint
 
 		// Update grant with correct thumbprint in metadata
 		addState.DPoPThumbprint = &expectedThumbprint
@@ -364,6 +367,38 @@ func TestDPoPTokenFlow(t *testing.T) {
 	})
 }
 
+func TestInvalidAuthorizationCodeDoesNotConsumeDPoPProof(t *testing.T) {
+	const issuer = "https://issuer"
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofSigner, err := dpop.NewSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := proofSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodPost, HTTPURI: issuer + "/token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dpopVerifier := &dpop.Verifier{ReplayCacheMaxEntries: 1}
+	server := &Server{config: Config{Issuer: issuer, Storage: NewMemoryStorage(), DPoPVerifier: dpopVerifier}}
+	req := httptest.NewRequest(http.MethodPost, "/token", nil)
+	req.Header.Set("DPoP", proof)
+	if _, err := server.codeToken(t.Context(), req, &oauth2proto.TokenRequest{Code: "not-an-auth-code"}); err == nil {
+		t.Fatal("invalid authorization code accepted")
+	}
+	validator, err := dpop.NewValidator(&dpop.ValidatorOpts{
+		IgnoreThumbprint: true, ExpectedHTM: new(http.MethodPost), ExpectedHTU: new(issuer + "/token"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dpopVerifier.VerifyAndDecode(proof, validator); err != nil {
+		t.Fatalf("invalid-code request consumed DPoP proof: %v", err)
+	}
+}
+
 func TestUserinfoDPoPSenderConstraint(t *testing.T) {
 	const issuer = "https://issuer.example"
 	storage := NewMemoryStorage()
@@ -418,6 +453,9 @@ func TestUserinfoDPoPSenderConstraint(t *testing.T) {
 	}
 	if recorder := request("DPoP", proof); recorder.Code != http.StatusOK {
 		t.Fatalf("valid DPoP: got %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if recorder := request("DPoP", proof); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed DPoP proof: got %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
 	missingATH, err := proofSigner.SignAndEncode(dpop.ProofOptions{HTTPMethod: http.MethodGet, HTTPURI: issuer + "/userinfo"})
 	if err != nil {
