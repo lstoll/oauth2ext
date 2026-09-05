@@ -338,36 +338,36 @@ func TestAuthenticateExistingDoesNotRetryVerificationFailure(t *testing.T) {
 	}
 }
 
-func TestStartAuthenticationPublicClientRequiresPKCES256(t *testing.T) {
+func TestPrepareLoginPublicClientRequiresPKCES256(t *testing.T) {
 	h := &IDSSOHandler[struct{}]{
 		OAuth2Config: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
 		Provider:     &provider.Provider{Metadata: &provider.OIDCProviderMetadata{}},
 	}
-	if _, err := h.startAuthentication(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}); err == nil {
+	if _, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}, ""); err == nil {
 		t.Fatal("public client started without provider PKCE S256 support")
 	}
 }
 
-func TestStartAuthenticationConfidentialClientRequiresExplicitPKCEOptOut(t *testing.T) {
+func TestPrepareLoginConfidentialClientRequiresExplicitPKCEOptOut(t *testing.T) {
 	h := &IDSSOHandler[struct{}]{
 		OAuth2Config: &oauth2.Config{ClientID: "confidential-client", ClientSecret: "secret", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
 		Provider:     &provider.Provider{Metadata: &provider.OIDCProviderMetadata{}},
 	}
-	if _, err := h.startAuthentication(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}); err == nil {
+	if _, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}, ""); err == nil {
 		t.Fatal("confidential client started without provider PKCE S256 support or an explicit opt-out")
 	}
 	h.DisablePKCE = true
-	if _, err := h.startAuthentication(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}); err != nil {
+	if _, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}, ""); err != nil {
 		t.Fatalf("confidential client explicit PKCE opt-out failed: %v", err)
 	}
 }
 
-func TestStartAuthenticationUsesPKCEWithoutDiscovery(t *testing.T) {
+func TestPrepareLoginUsesPKCEWithoutDiscovery(t *testing.T) {
 	h := &IDSSOHandler[struct{}]{
 		OAuth2Config: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
 	}
 	session := &SessionData{}
-	authURL, err := h.startAuthentication(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), session)
+	authURL, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), session, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,12 +383,12 @@ func TestStartAuthenticationUsesPKCEWithoutDiscovery(t *testing.T) {
 	}
 }
 
-func TestStartAuthenticationCannotDisablePKCEForPublicClient(t *testing.T) {
+func TestPrepareLoginCannotDisablePKCEForPublicClient(t *testing.T) {
 	h := &IDSSOHandler[struct{}]{
 		OAuth2Config: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
 		DisablePKCE:  true,
 	}
-	if _, err := h.startAuthentication(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}); err == nil {
+	if _, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}, ""); err == nil {
 		t.Fatal("public client disabled PKCE")
 	}
 }
