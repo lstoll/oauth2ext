@@ -399,6 +399,32 @@ func TestInvalidAuthorizationCodeDoesNotConsumeDPoPProof(t *testing.T) {
 	}
 }
 
+func TestVerifyDPoPProofPreservesEscapedRequestPath(t *testing.T) {
+	const issuer = "https://issuer.example"
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofSigner, err := dpop.NewSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := proofSigner.SignAndEncode(dpop.ProofOptions{
+		HTTPMethod: http.MethodPost,
+		HTTPURI:    issuer + "/token%2Fsubresource",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{config: Config{DPoPVerifier: &dpop.Verifier{}}}
+	req := httptest.NewRequest(http.MethodPost, "https://internal/token%2Fsubresource", nil)
+	req.Header.Set("DPoP", proof)
+	if _, err := server.verifyDPoPProof(issuer, req, nil, ""); err != nil {
+		t.Fatalf("verification failed: %v", err)
+	}
+}
+
 func TestUserinfoDPoPSenderConstraint(t *testing.T) {
 	const issuer = "https://issuer.example"
 	storage := NewMemoryStorage()

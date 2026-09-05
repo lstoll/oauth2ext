@@ -330,6 +330,23 @@ func TestDPoPVerifier_HTM_HTU_Validation(t *testing.T) {
 		}
 	})
 
+	t.Run("Equivalent normalized HTU", func(t *testing.T) {
+		equivalentHTU := "HTTPS://SERVER.EXAMPLE.COM:443/token"
+		validator, err := NewValidator(&ValidatorOpts{
+			ExpectedThumbprint: expectedThumbprint,
+			ExpectedHTM:        &htm,
+			ExpectedHTU:        &equivalentHTU,
+		})
+		if err != nil {
+			t.Fatalf("failed to create validator: %v", err)
+		}
+
+		verifier := &Verifier{}
+		if _, err := verifier.VerifyAndDecode(token, validator); err != nil {
+			t.Fatalf("verification failed: %v", err)
+		}
+	})
+
 	t.Run("HTM mismatch", func(t *testing.T) {
 		wrongHTM := "GET"
 		validator, err := NewValidator(&ValidatorOpts{
@@ -384,6 +401,29 @@ func TestDPoPVerifier_HTM_HTU_Validation(t *testing.T) {
 		_, err = verifier.VerifyAndDecode(token, validator)
 		if err != nil {
 			t.Fatalf("verification failed: %v", err)
+		}
+	})
+
+	t.Run("Malformed percent-encoding in htu", func(t *testing.T) {
+		validator, err := NewValidator(&ValidatorOpts{
+			ExpectedThumbprint: expectedThumbprint,
+			ExpectedHTM:        &htm,
+			ExpectedHTU:        &htu,
+		})
+		if err != nil {
+			t.Fatalf("failed to create validator: %v", err)
+		}
+		compact, err := signer.signPayload(map[string]any{
+			"jti": uuid.NewV4().String(),
+			"iat": now.Unix(),
+			"htm": "POST",
+			"htu": "https://server.example.com/token%",
+		}, nil, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := new(Verifier).VerifyAndDecode(compact, validator); err == nil {
+			t.Fatal("expected error for malformed htu percent-encoding")
 		}
 	})
 }

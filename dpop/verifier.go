@@ -108,7 +108,11 @@ func NewValidator(opts *ValidatorOpts) (*Validator, error) {
 		cloned.ExpectedHTM = new(*opts.ExpectedHTM)
 	}
 	if opts.ExpectedHTU != nil {
-		cloned.ExpectedHTU = new(*opts.ExpectedHTU)
+		normalized, err := normalizeHTU(*opts.ExpectedHTU)
+		if err != nil {
+			return nil, fmt.Errorf("dpop: invalid ExpectedHTU: %w", err)
+		}
+		cloned.ExpectedHTU = new(normalized)
 	}
 	if opts.ExpectedAccessToken != "" {
 		cloned.ExpectedAccessToken = opts.ExpectedAccessToken
@@ -315,7 +319,11 @@ func validateProofClaims(claims map[string]any, opts ValidatorOpts, now time.Tim
 		}
 	}
 	if opts.ExpectedHTU != nil {
-		if proof.HTTPURI != *opts.ExpectedHTU {
+		normalized, err := normalizeHTU(proof.HTTPURI)
+		if err != nil {
+			return nil, fmt.Errorf("invalid htu claim: %w", err)
+		}
+		if normalized != *opts.ExpectedHTU {
 			return nil, fmt.Errorf("htu claim mismatch: got %q, want %q", proof.HTTPURI, *opts.ExpectedHTU)
 		}
 	}

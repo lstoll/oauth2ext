@@ -693,10 +693,16 @@ func (s *Server) verifyDPoPProof(iss string, req *http.Request, expectedThumbpri
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse issuer: %w", err)
 	}
+	expectedHTU := (&url.URL{
+		Scheme:  issURL.Scheme,
+		Host:    issURL.Host,
+		Path:    req.URL.Path,
+		RawPath: req.URL.RawPath,
+	}).String()
 
 	opts := &dpop.ValidatorOpts{
 		ExpectedHTM:         new(req.Method),
-		ExpectedHTU:         new(fmt.Sprintf("%s://%s%s", issURL.Scheme, issURL.Host, req.URL.Path)),
+		ExpectedHTU:         new(expectedHTU),
 		ExpectedAccessToken: expectedAccessToken,
 	}
 	if expectedThumbprint == nil {
