@@ -12,6 +12,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -49,6 +50,16 @@ func (v *rejectingIDTokenVerifier) Verify(context.Context, string, claims.IDToke
 func (v *rejectingIDTokenVerifier) VerifyTokenResponse(context.Context, *oauth2.Token, claims.IDTokenValidationInput) (struct{}, error) {
 	v.calls++
 	return struct{}{}, errors.New("rejected")
+}
+
+type unusedIDVerifier struct{}
+
+func (unusedIDVerifier) Verify(context.Context, string, claims.IDTokenValidationInput) (*claims.VerifiedID, error) {
+	return nil, errors.New("unused")
+}
+
+func (unusedIDVerifier) VerifyTokenResponse(context.Context, *oauth2.Token, claims.IDTokenValidationInput) (*claims.VerifiedID, error) {
+	return nil, errors.New("unused")
 }
 
 // mockOIDCServer mocks out just enough of an OIDC server for tests. It accepts
@@ -493,6 +504,227 @@ func TestContext(t *testing.T) {
 
 	if gotSub != "valid-subject" {
 		t.Errorf("want jwt sub valid-subject, got: %s", gotSub)
+	}
+}
+
+type memSessStore struct {
+	mu sync.Mutex
+	s  *SessionData
+}
+
+func (m *memSessStore) GetOIDCSession(r *http.Request) (*SessionData, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := SessionData{}
+	if m.s != nil {
+		out.Token = m.s.Token
+		if m.s.Logins != nil {
+			out.Logins = slices.Clone(m.s.Logins)
+		}
+	}
+	return &out, nil
+}
+
+func (m *memSessStore) SaveOIDCSession(w http.ResponseWriter, r *http.Request, d *SessionData) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if d == nil {
+		m.s = nil
+		return nil
+	}
+	cp := *d
+	if d.Logins != nil {
+		cp.Logins = slices.Clone(d.Logins)
+	}
+	m.s = &cp
+	return nil
+}
+
+func TestServeLogout_clearsSessionAndRedirects(t *testing.T) {
+	store := &memSessStore{}
+	store.mu.Lock()
+	store.s = &SessionData{
+		Logins: []SessionDataLogin{{State: "pending", Expires: int(time.Now().Add(time.Hour).Unix())}},
+	}
+	store.mu.Unlock()
+
+	h := IDSSOHandler[*claims.VerifiedID]{
+		SessionStore: store,
+		Verifier:     unusedIDVerifier{},
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	h.ServeLogout(rr, req, "")
+
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("code %d", rr.Code)
+	}
+	if got := rr.Header().Get("Location"); got != "/" {
+		t.Fatalf("Location = %q, want /", got)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.s == nil {
+		t.Fatal("nil session after logout")
+	}
+	if store.s.Token != nil || len(store.s.Logins) != 0 {
+		t.Fatalf("want cleared session, got token=%v logins=%d", store.s.Token, len(store.s.Logins))
+	}
+}
+
+func TestServeLogout_redirectExplicitReturnTo(t *testing.T) {
+	store := &memSessStore{}
+	h := IDSSOHandler[*claims.VerifiedID]{
+		SessionStore: store,
+		Verifier:     unusedIDVerifier{},
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/logout", nil)
+	h.ServeLogout(rr, req, "/goodbye")
+
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("code %d", rr.Code)
+	}
+	if got := rr.Header().Get("Location"); got != "/goodbye" {
+		t.Fatalf("Location = %q", got)
+	}
+}
+
+func TestMiddleware_AllowUnauthenticated(t *testing.T) {
+	oidcServer, oidcHTTPServer := startMockOIDCServer(t)
+
+	httpServer := httptest.NewTLSServer(nil)
+	t.Cleanup(httpServer.Close)
+
+	oidcServer.validClientID = "valid-client-id"
+	oidcServer.validClientSecret = "valid-client-secret"
+	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
+	oidcServer.claims = map[string]any{
+		"sub": "valid-subject",
+	}
+
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
+	handler, err := NewFromDiscovery(ctx, &memSessStore{}, oidcServer.baseURL, oidcServer.validClientID, oidcServer.validClientSecret, oidcServer.validRedirectURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.AllowUnauthenticated = true
+
+	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := handler.IDClaimsFromContext(r.Context()); ok {
+			http.Error(w, "unexpected claims", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte("anonymous"))
+	})
+
+	httpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(context.WithValue(r.Context(), oauth2.HTTPClient, oidcHTTPServer.Client()))
+		handler.Wrap(protected).ServeHTTP(w, r)
+	})
+
+	client := httpServer.Client()
+	resp, err := client.Get(httpServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	if string(body) != "anonymous" {
+		t.Fatalf("body = %q, want anonymous", body)
+	}
+}
+
+func TestMiddleware_AJAXUnauth401(t *testing.T) {
+	oidcServer, oidcHTTPServer := startMockOIDCServer(t)
+
+	httpServer := httptest.NewTLSServer(nil)
+	t.Cleanup(httpServer.Close)
+
+	oidcServer.validClientID = "valid-client-id"
+	oidcServer.validClientSecret = "valid-client-secret"
+	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
+	oidcServer.claims = map[string]any{
+		"sub": "valid-subject",
+	}
+
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
+	handler, err := NewFromDiscovery(ctx, &memSessStore{}, oidcServer.baseURL, oidcServer.validClientID, oidcServer.validClientSecret, oidcServer.validRedirectURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.AJAXUnauth401 = true
+
+	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(context.WithValue(r.Context(), oauth2.HTTPClient, oidcHTTPServer.Client()))
+		handler.Wrap(protected).ServeHTTP(w, r)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "application/json")
+	rr := httptest.NewRecorder()
+	wrapped.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+	if got := rr.Header().Get("Location"); got != "" {
+		t.Fatalf("Location = %q, want empty", got)
+	}
+}
+
+func TestServeLogin_storesReturnToAndRedirects(t *testing.T) {
+	oidcServer, oidcHTTPServer := startMockOIDCServer(t)
+	store := &memSessStore{}
+
+	httpServer := httptest.NewTLSServer(nil)
+	t.Cleanup(httpServer.Close)
+
+	oidcServer.validClientID = "valid-client-id"
+	oidcServer.validClientSecret = "valid-client-secret"
+	oidcServer.validRedirectURL = fmt.Sprintf("%s/callback", httpServer.URL)
+	oidcServer.claims = map[string]any{
+		"sub": "valid-subject",
+	}
+
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, oidcHTTPServer.Client())
+	handler, err := NewFromDiscovery(ctx, store, oidcServer.baseURL, oidcServer.validClientID, oidcServer.validClientSecret, oidcServer.validRedirectURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	req = req.WithContext(context.WithValue(req.Context(), oauth2.HTTPClient, oidcHTTPServer.Client()))
+	handler.ServeLogin(rr, req, "/after")
+
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("status %d", rr.Code)
+	}
+	loc := rr.Header().Get("Location")
+	if !strings.HasPrefix(loc, oidcServer.baseURL+"/auth") {
+		t.Fatalf("Location = %q", loc)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.s == nil || len(store.s.Logins) != 1 {
+		t.Fatalf("logins = %v", store.s)
+	}
+	if got := store.s.Logins[0].ReturnTo; got != "/after" {
+		t.Fatalf("ReturnTo = %q", got)
 	}
 }
 
