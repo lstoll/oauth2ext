@@ -34,7 +34,10 @@ func TestDiscovery(t *testing.T) {
 	pm.TokenEndpoint = ts.URL + "/token"
 	pm.IDTokenSigningAlgValuesSupported = []string{"ES256"}
 
-	ch, err := discovery.NewOIDCConfigurationHandlerWithVerificationKeys(pm, verificationKeys)
+	ch, err := discovery.NewOIDCConfigurationHandler(discovery.ConfigurationHandlerConfig{
+		Metadata:         pm,
+		VerificationKeys: verificationKeys,
+	})
 	if err != nil {
 		t.Fatalf("error creating handler: %v", err)
 	}
@@ -46,7 +49,27 @@ func TestDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to discover provider: %v", err)
 	}
-	_ = p
-
-	// TODO - instpect what was discovered?
+	if got := p.Issuer(); got != ts.URL {
+		t.Fatalf("discovered issuer = %q, want %q", got, ts.URL)
+	}
+	if got := p.Endpoint(); got.AuthURL != pm.AuthorizationEndpoint || got.TokenURL != pm.TokenEndpoint {
+		t.Fatalf("discovered endpoints = %#v", got)
+	}
+	verifier, err := p.Verifier(discCtx, jwt.ValidationPolicy{
+		ExpectedAudiences: []string{"client"},
+		AllowedAlgorithms: []jwt.Algorithm{jwt.ES256},
+		Type:              jwt.TypeJWTOrAbsent,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := testSigner.Sign(ctx, map[string]any{
+		"iss": ts.URL, "aud": "client", "exp": time.Now().Add(time.Minute).Unix(),
+	}, jwt.SignOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(compact); err != nil {
+		t.Fatalf("discovered keys did not verify issuer token: %v", err)
+	}
 }

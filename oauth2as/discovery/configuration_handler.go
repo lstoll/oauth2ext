@@ -1,41 +1,59 @@
 package discovery
 
 import (
-	"context"
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oidc"
 )
 
-const DefaultCacheFor = 1 * time.Minute
+const (
+	DefaultMetadataMaxAge = time.Hour
+	DefaultJWKSMaxAge     = 5 * time.Minute
+)
 
 var _ http.Handler = (*OIDCConfigurationHandler)(nil)
 
-// OIDCConfigurationHandler is a http.ConfigurationHandler that can serve the
-// OIDC provider metadata endpoint, and keys from a source.
+// OIDCConfigurationHandler is an http.Handler that serves the OIDC provider
+// metadata endpoint and its current verification keys.
 //
 // It should be mounted at `GET /.well-known/openid-configuration`, and `GET
 // /.well-known/jwks.json` (unless overridden)
 type OIDCConfigurationHandler struct {
-	md         *oidc.ProviderMetadata
-	jwksSource JWKSSource
+	metadata         representation
+	verificationKeys *jwt.VerificationKeySet
+	mux              *http.ServeMux
+	jwksMaxAge       time.Duration
+}
 
-	mux *http.ServeMux
+// ConfigurationHandlerConfig configures an OIDCConfigurationHandler.
+//
+// Publish a new signing key and wait for previously served JWKS responses to
+// expire or revalidate before using it. Retain old verification keys until all
+// tokens signed by them have expired, including any accepted clock skew. An
+// ETag cannot revoke a still-fresh cached response.
+type ConfigurationHandlerConfig struct {
+	Metadata         *oidc.ProviderMetadata
+	VerificationKeys *jwt.VerificationKeySet
+	MetadataMaxAge   time.Duration
+	JWKSMaxAge       time.Duration
+}
 
-	cacheFor time.Duration
-
-	currJWKS   []byte
-	currJWKSMu sync.Mutex
-
-	lastKeysUpdate time.Time
+type representation struct {
+	body         []byte
+	etag         string
+	contentType  string
+	cacheControl string
 }
 
 // DefaultCoreMetadata returns a ProviderMetadata instance with defaults
@@ -57,43 +75,43 @@ func DefaultCoreMetadata(issuer string) *oidc.ProviderMetadata {
 	}
 }
 
-type keysetJWKSSource struct {
-	keyset *jwt.VerificationKeySet
-}
-
-func (s *keysetJWKSSource) GetJWKS(ctx context.Context) ([]byte, error) {
-	return s.keyset.JWKS()
-}
-
-// JWKSSource can be used to return a JWKS to serve on the discovery endpoint.
-// No verification will be done on the JWKS.
-type JWKSSource interface {
-	GetJWKS(context.Context) ([]byte, error)
-}
-
-// NewOIDCConfigurationHandlerWithVerificationKeys is the same as
-// NewOIDCConfigurationHandlerWithJWKSSource, but takes a stable verification
-// key set for direct dynamic publication.
-func NewOIDCConfigurationHandlerWithVerificationKeys(metadata *oidc.ProviderMetadata, keyset *jwt.VerificationKeySet) (*OIDCConfigurationHandler, error) {
-	if keyset == nil {
-		return nil, fmt.Errorf("verification keys are required")
-	}
-	jwksSource := &keysetJWKSSource{keyset: keyset}
-	return NewOIDCConfigurationHandlerWithJWKSSource(metadata, jwksSource)
-}
-
-// NewOIDCConfigurationHandlerWithJWKSSource configures and returns a
-// ConfigurationHandler for the given provider metadata and keyset.
+// NewOIDCConfigurationHandler configures and returns an OIDC configuration
+// handler for the given provider metadata and stable verification key set.
 //
 // The handler should be configured to serve the following paths:
 // GET /.well-known/openid-configuration
 // GET /.well-known/jwks.json (unless overridden)
-func NewOIDCConfigurationHandlerWithJWKSSource(metadata *oidc.ProviderMetadata, jwksSource JWKSSource) (*OIDCConfigurationHandler, error) {
-	h := &OIDCConfigurationHandler{
-		md:         metadata,
-		jwksSource: jwksSource,
-		mux:        http.NewServeMux(),
-		cacheFor:   DefaultCacheFor,
+func NewOIDCConfigurationHandler(config ConfigurationHandlerConfig) (*OIDCConfigurationHandler, error) {
+	if config.Metadata == nil {
+		return nil, fmt.Errorf("metadata is required")
+	}
+	if config.VerificationKeys == nil {
+		return nil, fmt.Errorf("verification keys are required")
+	}
+	metadataMaxAge := config.MetadataMaxAge
+	if metadataMaxAge == 0 {
+		metadataMaxAge = DefaultMetadataMaxAge
+	}
+	jwksMaxAge := config.JWKSMaxAge
+	if jwksMaxAge == 0 {
+		jwksMaxAge = DefaultJWKSMaxAge
+	}
+	if metadataMaxAge < 0 {
+		return nil, fmt.Errorf("metadata max age must not be negative")
+	}
+	if jwksMaxAge < 0 {
+		return nil, fmt.Errorf("jwks max age must not be negative")
+	}
+	if metadataMaxAge%time.Second != 0 {
+		return nil, fmt.Errorf("metadata max age must be a whole number of seconds")
+	}
+	if jwksMaxAge%time.Second != 0 {
+		return nil, fmt.Errorf("jwks max age must be a whole number of seconds")
+	}
+
+	metadata, err := cloneMetadata(config.Metadata)
+	if err != nil {
+		return nil, err
 	}
 
 	jwksPath := `/.well-known/jwks.json`
@@ -109,12 +127,20 @@ func NewOIDCConfigurationHandlerWithJWKSSource(metadata *oidc.ProviderMetadata, 
 		metadata.JWKSURI = metadata.Issuer + jwksPath
 	}
 
-	if err := validateMetadata(h.md); err != nil {
+	if err := validateMetadata(metadata); err != nil {
 		return nil, err
 	}
 
-	if err := h.getJWKS(context.Background()); err != nil {
-		return nil, fmt.Errorf("initial jwks get: %w", err)
+	metadataBytes, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling provider metadata: %w", err)
+	}
+
+	h := &OIDCConfigurationHandler{
+		metadata:         newRepresentation(metadataBytes, "application/json", metadataMaxAge),
+		verificationKeys: config.VerificationKeys,
+		mux:              http.NewServeMux(),
+		jwksMaxAge:       jwksMaxAge,
 	}
 
 	h.mux.HandleFunc("GET /.well-known/openid-configuration", h.serveConfig)
@@ -128,46 +154,47 @@ func (h *OIDCConfigurationHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *OIDCConfigurationHandler) serveConfig(w http.ResponseWriter, req *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	if err := json.NewEncoder(w).Encode(h.md); err != nil {
-		http.Error(w, "Internal Error", http.StatusInternalServerError)
-		return
-	}
+	serveRepresentation(w, req, h.metadata)
 }
 
 func (h *OIDCConfigurationHandler) serveKeys(w http.ResponseWriter, req *http.Request) {
-	if err := h.getJWKS(req.Context()); err != nil {
+	jwks, err := h.verificationKeys.JWKS()
+	if err != nil {
 		slog.ErrorContext(req.Context(), "getting jwks", "err", err.Error())
+		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
 		return
 	}
-	jwks := h.currJWKS
+	serveRepresentation(w, req, newRepresentation(jwks, "application/jwk-set+json", h.jwksMaxAge))
+}
 
-	w.Header().Set("Content-Type", "application/jwk-set+json")
-	if _, err := w.Write(jwks); err != nil {
-		slog.ErrorContext(req.Context(), "failed to write jwks", "err", err.Error())
-		http.Error(w, "Internal Error", http.StatusInternalServerError)
-		return
+func newRepresentation(body []byte, contentType string, maxAge time.Duration) representation {
+	sum := sha256.Sum256(body)
+	return representation{
+		body:         body,
+		etag:         `"` + base64.RawURLEncoding.EncodeToString(sum[:]) + `"`,
+		contentType:  contentType,
+		cacheControl: "public, max-age=" + strconv.FormatInt(int64(maxAge/time.Second), 10) + ", must-revalidate",
 	}
 }
 
-// getJWKS reads the keyset from the handle, and stores it on this instance.
-func (h *OIDCConfigurationHandler) getJWKS(ctx context.Context) error {
-	h.currJWKSMu.Lock()
-	defer h.currJWKSMu.Unlock()
+func serveRepresentation(w http.ResponseWriter, req *http.Request, rep representation) {
+	w.Header().Set("Content-Type", rep.contentType)
+	w.Header().Set("Cache-Control", rep.cacheControl)
+	w.Header().Set("ETag", rep.etag)
+	http.ServeContent(w, req, "", time.Time{}, bytes.NewReader(rep.body))
+}
 
-	if h.currJWKS == nil || time.Now().After(h.lastKeysUpdate.Add(h.cacheFor)) {
-		jwks, err := h.jwksSource.GetJWKS(ctx)
-		if err != nil {
-			return fmt.Errorf("getting jwks: %w", err)
-		}
-		h.currJWKS = jwks
-
-		h.lastKeysUpdate = time.Now()
+func cloneMetadata(metadata *oidc.ProviderMetadata) (*oidc.ProviderMetadata, error) {
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("cloning provider metadata: %w", err)
 	}
-
-	return nil
+	var clone oidc.ProviderMetadata
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		return nil, fmt.Errorf("cloning provider metadata: %w", err)
+	}
+	return &clone, nil
 }
 
 func validateMetadata(p *oidc.ProviderMetadata) error {
