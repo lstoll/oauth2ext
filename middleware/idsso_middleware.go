@@ -76,8 +76,8 @@ type IDSSOHandler[IDClaims any] struct {
 // NewIDSSOHandlerFromDiscovery constructs a handler by discovering the
 // configuration from the issuer. If sessStore is nil, cookies will be used.
 // The handler can be customized after calling this.
-func NewIDSSOHandlerFromDiscovery(ctx context.Context, sessStore SessionStore, issuer, clientID, clientSecret, redirectURL string) (*IDSSOHandler[*claims.VerifiedID], error) {
-	prov, err := provider.DiscoverOIDCProvider(ctx, issuer)
+func NewIDSSOHandlerFromDiscovery(ctx context.Context, sessStore SessionStore, issuer, clientID, clientSecret, redirectURL string, configs ...provider.DiscoveryConfig) (*IDSSOHandler[*claims.VerifiedID], error) {
+	prov, err := provider.DiscoverOIDCProvider(ctx, issuer, configs...)
 	if err != nil {
 		return nil, fmt.Errorf("discovering provider: %w", err)
 	}
@@ -112,8 +112,8 @@ func NewIDSSOHandlerFromDiscovery(ctx context.Context, sessStore SessionStore, i
 // NewFromDiscovery is an alias for NewIDSSOHandlerFromDiscovery for backward
 // compatibility. It returns a handler configured for standard OIDC ID claims
 // (*claims.VerifiedID).
-func NewFromDiscovery(ctx context.Context, sessStore SessionStore, issuer, clientID, clientSecret, redirectURL string) (*IDSSOHandler[*claims.VerifiedID], error) {
-	return NewIDSSOHandlerFromDiscovery(ctx, sessStore, issuer, clientID, clientSecret, redirectURL)
+func NewFromDiscovery(ctx context.Context, sessStore SessionStore, issuer, clientID, clientSecret, redirectURL string, configs ...provider.DiscoveryConfig) (*IDSSOHandler[*claims.VerifiedID], error) {
+	return NewIDSSOHandlerFromDiscovery(ctx, sessStore, issuer, clientID, clientSecret, redirectURL, configs...)
 }
 
 // Wrap returns an http.Handler that wraps the given http.Handler and
