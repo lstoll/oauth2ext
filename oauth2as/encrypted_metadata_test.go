@@ -106,7 +106,10 @@ func TestEncryptedMetadataFlow(t *testing.T) {
 	pmd.UserinfoEndpoint = oidcSvr.URL + "/userinfo"
 	pmd.IDTokenSigningAlgValuesSupported = []string{string("RS256"), string("ES256")}
 
-	ch, err := discovery.NewOIDCConfigurationHandlerWithVerificationKeys(pmd, jwtVerifier)
+	ch, err := discovery.NewOIDCConfigurationHandler(discovery.ConfigurationHandlerConfig{
+		Metadata:         pmd,
+		VerificationKeys: jwtVerifier,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

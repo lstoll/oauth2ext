@@ -34,7 +34,10 @@ func TestDiscovery(t *testing.T) {
 	pm.TokenEndpoint = ts.URL + "/token"
 	pm.IDTokenSigningAlgValuesSupported = []string{"ES256"}
 
-	ch, err := discovery.NewOIDCConfigurationHandlerWithVerificationKeys(pm, verificationKeys)
+	ch, err := discovery.NewOIDCConfigurationHandler(discovery.ConfigurationHandlerConfig{
+		Metadata:         pm,
+		VerificationKeys: verificationKeys,
+	})
 	if err != nil {
 		t.Fatalf("error creating handler: %v", err)
 	}
