@@ -4,164 +4,160 @@ import (
 	"context"
 	jsonv2 "encoding/json/v2"
 	"fmt"
-	"io"
-	"mime"
 	"net/http"
 	"strings"
 	"time"
 
-	"lds.li/oauth2ext/internal"
+	"lds.li/oauth2ext/internal/httprevalidate"
 	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/jwt/remotejwks"
 )
 
-// Option configures a discovered provider.
-type Option func(*Provider) error
+const DefaultRequestTimeout = 30 * time.Second
 
-// WithVerificationKeys overrides keys advertised by discovery. The stable set
-// is used from initial discovery onwards, while discovery metadata and issuer
-// validation still take place. Callers may update it with Replace as keys
-// rotate; publish new keys before signing with them and retain old keys until
-// tokens signed with them expire.
-func WithVerificationKeys(keys *jwt.VerificationKeySet) Option {
-	return func(p *Provider) error {
-		if keys == nil {
-			return fmt.Errorf("provider verification keys are required")
-		}
-		p.VerificationKeys = keys
-		return nil
-	}
+// DiscoveryConfig contains optional discovery settings.
+type DiscoveryConfig struct {
+	HTTPClient *http.Client
+	// FallbackRefreshInterval applies when discovery or JWKS responses provide
+	// neither Cache-Control freshness nor Expires. Zero uses
+	// DefaultRefreshInterval; negative values are rejected.
+	FallbackRefreshInterval time.Duration
+	// RequestTimeout bounds each discovery and JWKS request. Zero uses the
+	// package default.
+	RequestTimeout time.Duration
+	// VerificationKeys overrides keys advertised by discovery. Discovery and
+	// issuer validation still run. Keep this handle stable and update it with
+	// Replace when trusted keys rotate.
+	VerificationKeys *jwt.VerificationKeySet
 }
 
-func DiscoverOIDCProvider(ctx context.Context, issuer string, options ...Option) (*Provider, error) {
+// DiscoverOIDCProvider eagerly discovers issuer metadata and initial keys.
+// Ordinary provider operations lazily call EnsureFresh according to HTTP
+// freshness, while Run enables active refresh. VerificationKeys, when
+// supplied, disables remote JWKS retrieval.
+func DiscoverOIDCProvider(ctx context.Context, issuer string, configs ...DiscoveryConfig) (*Provider, error) {
+	if len(configs) > 1 {
+		return nil, fmt.Errorf("at most one discovery config may be supplied")
+	}
+	var config DiscoveryConfig
+	if len(configs) == 1 {
+		config = configs[0]
+	}
+	fallback := config.FallbackRefreshInterval
+	if fallback == 0 {
+		fallback = DefaultRefreshInterval
+	}
+	if fallback < 0 {
+		return nil, fmt.Errorf("fallback refresh interval must not be negative")
+	}
+	requestTimeout := config.RequestTimeout
+	if requestTimeout == 0 {
+		requestTimeout = DefaultRequestTimeout
+	}
+	if requestTimeout < 0 {
+		return nil, fmt.Errorf("request timeout must not be negative")
+	}
 	p := &Provider{
-		oidcDiscoveryURL: strings.TrimSuffix(issuer, "/") + "/.well-known/openid-configuration",
-		discoveryIssuer:  issuer,
+		oidcDiscoveryURL:        strings.TrimSuffix(issuer, "/") + "/.well-known/openid-configuration",
+		discoveryIssuer:         issuer,
+		VerificationKeys:        config.VerificationKeys,
+		httpClient:              config.HTTPClient,
+		fallbackRefreshInterval: config.FallbackRefreshInterval,
+		requestTimeout:          requestTimeout,
+		metadataResource: httprevalidate.New(httprevalidate.Config{
+			URL:                strings.TrimSuffix(issuer, "/") + "/.well-known/openid-configuration",
+			HTTPClient:         config.HTTPClient,
+			AcceptedMediaTypes: []string{"application/json"},
+			MaxBodyBytes:       maxProviderResponseBytes,
+			RequestTimeout:     requestTimeout,
+		}, fallback),
 	}
-	for _, option := range options {
-		if option == nil {
-			return nil, fmt.Errorf("provider option is nil")
-		}
-		if err := option(p); err != nil {
-			return nil, err
-		}
-	}
-
 	if err := p.refreshIfNeeded(ctx); err != nil {
 		return nil, fmt.Errorf("error performing initial metadata discovery: %w", err)
 	}
-
 	return p, nil
 }
 
 const maxProviderResponseBytes = 1 << 20
 
 func (p *Provider) refreshIfNeeded(ctx context.Context) error {
-	cacheFor := p.CacheDuration
-	if cacheFor == 0 {
-		cacheFor = DefaultCacheDuration
-	}
-	if p.cacheIsFresh(cacheFor) {
-		return nil
+	return p.refresh(ctx, false)
+}
+
+func (p *Provider) refresh(ctx context.Context, force bool) error {
+	if p.metadataResource != nil {
+		apply := func(body []byte) error {
+			var discovered OIDCProviderMetadata
+			if err := jsonv2.Unmarshal(body, &discovered); err != nil {
+				return fmt.Errorf("error decoding discovery metadata response: %w", err)
+			}
+			if discovered.Issuer != p.discoveryIssuer {
+				return fmt.Errorf("discovery issuer %q does not match requested issuer %q", discovered.Issuer, p.discoveryIssuer)
+			}
+			p.metadataMu.Lock()
+			p.Metadata = &discovered
+			p.metadataMu.Unlock()
+			return nil
+		}
+		var err error
+		if force {
+			_, err = p.metadataResource.Revalidate(ctx, apply)
+		} else {
+			_, err = p.metadataResource.Refresh(ctx, apply)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to get discovery metadata from %s: %w", p.oidcDiscoveryURL, err)
+		}
 	}
 
 	p.refreshMu.Lock()
 	defer p.refreshMu.Unlock()
-	if p.cacheIsFresh(cacheFor) {
-		return nil
-	}
-
-	// if we are a discovered provider, refresh the discovery metadata too.
-	md, _ := p.snapshot()
-	if p.oidcDiscoveryURL != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.oidcDiscoveryURL, nil)
-		if err != nil {
-			return fmt.Errorf("creating request for %s: %w", p.oidcDiscoveryURL, err)
-		}
-		req = req.WithContext(ctx)
-		res, err := internal.HTTPClientFromContext(ctx, p.HTTPClient).Do(req)
-		if err != nil {
-			return fmt.Errorf("failed to get discovery metadata from %s: %v", p.oidcDiscoveryURL, err)
-		}
-		if res.StatusCode != http.StatusOK {
-			_ = res.Body.Close()
-			return fmt.Errorf("expected status %d, got: %d", http.StatusOK, res.StatusCode)
-		}
-		mediaType, _, err := mime.ParseMediaType(res.Header.Get("Content-Type"))
-		if err != nil || mediaType != "application/json" {
-			_ = res.Body.Close()
-			return fmt.Errorf("expected content type %s, got: %s", "application/json", res.Header.Get("Content-Type"))
-		}
-
-		body, err := readBounded(res.Body, maxProviderResponseBytes)
-		_ = res.Body.Close()
-		if err != nil {
-			return fmt.Errorf("reading discovery metadata response: %w", err)
-		}
-		var discovered OIDCProviderMetadata
-		if err := jsonv2.Unmarshal(body, &discovered); err != nil {
-			return fmt.Errorf("error decoding discovery metadata response: %v", err)
-		}
-		if discovered.Issuer != p.discoveryIssuer {
-			return fmt.Errorf("discovery issuer %q does not match requested issuer %q", discovered.Issuer, p.discoveryIssuer)
-		}
-		md = &discovered
-	}
+	md := p.snapshot()
 	if md == nil {
 		return fmt.Errorf("provider metadata is required")
 	}
-
-	p.cacheMu.RLock()
 	override := p.VerificationKeys
 	refresher := p.keyRefresher
-	p.cacheMu.RUnlock()
-	var keys *jwt.VerificationKeySet
+	currentKeys := p.keys
 	if override != nil {
-		keys = override
-	} else {
-		jwksURI := md.jwksuri()
-		if refresher == nil || refresher.URL != jwksURI {
-			refresher = &remotejwks.Source{
-				URL:           jwksURI,
-				HTTPClient:    p.HTTPClient,
-				CacheDuration: cacheFor,
-			}
+		return nil
+	}
+
+	jwksURI := md.jwksuri()
+	if refresher == nil || p.keyRefresherURL != jwksURI {
+		var target *jwt.VerificationKeySet
+		if refresher != nil {
+			target = currentKeys
 		}
 		var err error
-		keys, err = refresher.Refresh(ctx)
+		refresher, err = remotejwks.Open(ctx, remotejwks.Config{
+			URL:                     jwksURI,
+			HTTPClient:              p.httpClient,
+			FallbackRefreshInterval: p.fallbackRefreshInterval,
+			VerificationKeySet:      target,
+			RequestTimeout:          p.requestTimeout,
+		})
 		if err != nil {
 			return fmt.Errorf("getting provider verification keys: %w", err)
 		}
+	} else if err := refreshSource(ctx, refresher, force); err != nil {
+		return fmt.Errorf("getting provider verification keys: %w", err)
 	}
+	keys := refresher.VerificationKeySet()
 	if keys == nil {
 		return fmt.Errorf("provider has no verification keys")
 	}
-	p.cacheMu.Lock()
-	p.Metadata = md
-	if p.VerificationKeys == nil {
+	if p.keys == nil {
 		p.keys = keys
-		p.keyRefresher = refresher
 	}
-	p.cacheLastFetched = time.Now()
-	p.cacheMu.Unlock()
-
+	p.keyRefresher = refresher
+	p.keyRefresherURL = jwksURI
 	return nil
 }
 
-func (p *Provider) cacheIsFresh(cacheFor time.Duration) bool {
-	p.cacheMu.RLock()
-	lastFetched := p.cacheLastFetched
-	p.cacheMu.RUnlock()
-	return !lastFetched.IsZero() && time.Since(lastFetched) < cacheFor
-}
-
-func readBounded(r io.Reader, limit int64) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(r, limit+1))
-	if err != nil {
-		return nil, err
+func refreshSource(ctx context.Context, source *remotejwks.Source, force bool) error {
+	if force {
+		return source.Refresh(ctx)
 	}
-	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("response exceeds %d byte limit", limit)
-	}
-	return body, nil
+	return source.EnsureFresh(ctx)
 }

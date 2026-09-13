@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +15,9 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/internal/httprevalidate"
 	"lds.li/oauth2ext/jwt"
+	"lds.li/oauth2ext/jwt/remotejwks"
 	"lds.li/oauth2ext/jwttest"
 )
 
@@ -25,6 +29,125 @@ func TestProviderDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = signer
+}
+
+func TestDiscoverOIDCProviderRejectsMultipleConfigs(t *testing.T) {
+	_, err := DiscoverOIDCProvider(t.Context(), "https://issuer.example", DiscoveryConfig{}, DiscoveryConfig{})
+	if err == nil || !strings.Contains(err.Error(), "at most one") {
+		t.Fatalf("error = %v, want multiple-config error", err)
+	}
+}
+
+func TestDiscoverOIDCProviderRejectsNegativeFallbackRefreshInterval(t *testing.T) {
+	_, err := DiscoverOIDCProvider(t.Context(), "https://issuer.example", DiscoveryConfig{FallbackRefreshInterval: -1})
+	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Fatalf("error = %v, want negative-interval error", err)
+	}
+}
+
+func TestDiscoverOIDCProviderRejectsNegativeRequestTimeout(t *testing.T) {
+	_, err := DiscoverOIDCProvider(t.Context(), "https://issuer.example", DiscoveryConfig{RequestTimeout: -1})
+	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Fatalf("error = %v, want negative-timeout error", err)
+	}
+}
+
+func TestRefreshAfterPreservesImmediateMetadataDeadline(t *testing.T) {
+	signer := jwttest.NewSigner(t)
+	client := &http.Client{Transport: roundTripper(func(*http.Request) *http.Response {
+		header := make(http.Header)
+		header.Set("Content-Type", "application/jwk-set+json")
+		header.Set("Cache-Control", "max-age=60")
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(string(signer.JWKS())))}
+	})}
+	source, err := remotejwks.Open(t.Context(), remotejwks.Config{URL: "https://issuer.example/jwks", HTTPClient: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Provider{
+		metadataResource: httprevalidate.New(httprevalidate.Config{
+			URL:                "https://issuer.example/discovery",
+			HTTPClient:         client,
+			AcceptedMediaTypes: []string{"application/json"},
+			MaxBodyBytes:       1024,
+		}, 0),
+		keyRefresher: source,
+	}
+	if got := p.refreshAfter(); got != 0 {
+		t.Fatalf("refreshAfter = %v, want immediate metadata deadline", got)
+	}
+}
+
+func TestProviderRefreshForcesDiscoveryAndJWKSRevalidation(t *testing.T) {
+	signer := jwttest.NewSigner(t)
+	server := httptest.NewTLSServer(nil)
+	t.Cleanup(server.Close)
+	var discoveryHits, jwksHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		discoveryHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "max-age=60")
+		_ = json.NewEncoder(w).Encode(OIDCProviderMetadata{Issuer: server.URL, JWKSURI: server.URL + "/jwks"})
+	})
+	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, r *http.Request) {
+		jwksHits.Add(1)
+		w.Header().Set("Content-Type", "application/jwk-set+json")
+		w.Header().Set("Cache-Control", "max-age=60")
+		_, _ = w.Write(signer.JWKS())
+	})
+	server.Config.Handler = mux
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, server.Client())
+	p, err := DiscoverOIDCProvider(ctx, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if discoveryHits.Load() != 2 || jwksHits.Load() != 2 {
+		t.Fatalf("hits: discovery=%d jwks=%d, want 2 each", discoveryHits.Load(), jwksHits.Load())
+	}
+}
+
+func TestProviderRunRefreshesDiscoveryAndJWKSWhenDue(t *testing.T) {
+	signer := jwttest.NewSigner(t)
+	server := httptest.NewTLSServer(nil)
+	t.Cleanup(server.Close)
+	var discoveryHits, jwksHits atomic.Int64
+	refreshed := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		discoveryHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(OIDCProviderMetadata{Issuer: server.URL, JWKSURI: server.URL + "/jwks"})
+	})
+	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, r *http.Request) {
+		if jwksHits.Add(1) == 2 && discoveryHits.Load() >= 2 {
+			close(refreshed)
+		}
+		w.Header().Set("Content-Type", "application/jwk-set+json")
+		_, _ = w.Write(signer.JWKS())
+	})
+	server.Config.Handler = mux
+	requestCtx := context.WithValue(t.Context(), oauth2.HTTPClient, server.Client())
+	p, err := DiscoverOIDCProvider(requestCtx, server.URL, DiscoveryConfig{FallbackRefreshInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(requestCtx)
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Run(runCtx) }()
+	select {
+	case <-refreshed:
+		cancel()
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("Run did not refresh discovery and JWKS")
+	}
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context cancellation", err)
+	}
 }
 
 func TestProviderDiscoveryBindsIssuer(t *testing.T) {
@@ -205,6 +328,7 @@ func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
 	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		discoveryRequests.Add(1)
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache")
 		_ = json.NewEncoder(w).Encode(&OIDCProviderMetadata{
 			Issuer:                           svr.URL,
 			JWKSURI:                          svr.URL + "/jwks",
@@ -222,12 +346,10 @@ func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, svr.Client())
-	p, err := DiscoverOIDCProvider(ctx, svr.URL, WithVerificationKeys(keys))
+	p, err := DiscoverOIDCProvider(ctx, svr.URL, DiscoveryConfig{VerificationKeys: keys})
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.CacheDuration = -1 // Force metadata refreshes during verification.
-
 	now := time.Now()
 	compact, err := local.SignClaims(map[string]any{
 		"iss": svr.URL,
@@ -278,12 +400,6 @@ func TestDiscoveredProviderUsesVerificationKeyOverride(t *testing.T) {
 	}
 	if !bytes.Equal(second, want) {
 		t.Fatal("mutating returned JWKS changed provider result")
-	}
-}
-
-func TestWithVerificationKeysRejectsNil(t *testing.T) {
-	if _, err := DiscoverOIDCProvider(t.Context(), "https://issuer.example", WithVerificationKeys(nil)); err == nil {
-		t.Fatal("expected nil verification key source error")
 	}
 }
 
@@ -373,4 +489,10 @@ func newMockDiscoveryServer(t *testing.T) (*httptest.Server, *jwttest.Signer) {
 	svr.Config.Handler = mux
 
 	return svr, testSigner
+}
+
+type roundTripper func(*http.Request) *http.Response
+
+func (f roundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r), nil
 }

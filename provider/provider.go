@@ -11,35 +11,40 @@ import (
 
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/internal"
+	"lds.li/oauth2ext/internal/httprevalidate"
 	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/jwt/remotejwks"
 )
 
-const DefaultCacheDuration = 10 * time.Minute
+const DefaultRefreshInterval = 10 * time.Minute
 
 type Provider struct {
 	// Metadata is the discovery metadata for the provider. It will be of type
 	// [*OIDCProviderMetadata].
-	Metadata      Metadata
-	HTTPClient    *http.Client
-	CacheDuration time.Duration
-	// VerificationKeys overrides keys advertised by discovery. Callers keep
-	// this stable handle and call its Replace method when their own refresh
-	// routine reloads; do not assign a new pointer concurrently with use.
+	Metadata Metadata
+	// VerificationKeys overrides keys advertised by discovery. Set it before
+	// first use. Keep the handle stable and call Replace when a refresh routine
+	// reloads keys; do not assign a new pointer concurrently with use.
 	VerificationKeys *jwt.VerificationKeySet
 
-	refreshMu        sync.Mutex
-	cacheMu          sync.RWMutex
-	cacheLastFetched time.Time
-	keys             *jwt.VerificationKeySet
-	keyRefresher     *remotejwks.Source
+	// refreshMu serializes replacement of keyRefresher after a jwks_uri change.
+	refreshMu sync.Mutex
+	// metadataMu protects replacement of discovery metadata.
+	metadataMu              sync.RWMutex
+	keys                    *jwt.VerificationKeySet
+	keyRefresher            *remotejwks.Source
+	keyRefresherURL         string
+	metadataResource        *httprevalidate.Resource
+	httpClient              *http.Client
+	fallbackRefreshInterval time.Duration
+	requestTimeout          time.Duration
 
 	oidcDiscoveryURL string
 	discoveryIssuer  string
 }
 
 func (p *Provider) Issuer() string {
-	md, _ := p.snapshot()
+	md := p.snapshot()
 	if md == nil {
 		return ""
 	}
@@ -48,7 +53,7 @@ func (p *Provider) Issuer() string {
 
 // Endpoint returns the OAuth2 endpoint configuration for this provider.
 func (p *Provider) Endpoint() oauth2.Endpoint {
-	md, _ := p.snapshot()
+	md := p.snapshot()
 	if md == nil {
 		return oauth2.Endpoint{}
 	}
@@ -62,7 +67,7 @@ func (p *Provider) Endpoint() oauth2.Endpoint {
 // supported by this provider. If PKCE is not supported, an empty slice is
 // returned.
 func (p *Provider) CodeChallengeMethodsSupported() []CodeChallengeMethod {
-	md, _ := p.snapshot()
+	md := p.snapshot()
 	if md == nil {
 		return nil
 	}
@@ -72,14 +77,14 @@ func (p *Provider) CodeChallengeMethodsSupported() []CodeChallengeMethod {
 // RegistrationSupported returns true if the provider supports client
 // registration.
 func (p *Provider) RegistrationSupported() bool {
-	md, _ := p.snapshot()
+	md := p.snapshot()
 	return md != nil && md.registrationSupported()
 }
 
 // RegistrationEndpoint returns the registration endpoint for this provider. If
 // registration is not supported, an empty string is returned.
 func (p *Provider) RegistrationEndpoint() string {
-	md, _ := p.snapshot()
+	md := p.snapshot()
 	if md == nil {
 		return ""
 	}
@@ -92,7 +97,7 @@ func (p *Provider) IDTokenSigningAlgorithms(ctx context.Context) ([]jwt.Algorith
 	if err := p.refreshIfNeeded(ctx); err != nil {
 		return nil, err
 	}
-	md, _ := p.snapshot()
+	md := p.snapshot()
 	if md == nil {
 		return nil, fmt.Errorf("provider metadata is required")
 	}
@@ -104,7 +109,7 @@ func (p *Provider) JWKS(ctx context.Context) ([]byte, error) {
 	if err := p.refreshIfNeeded(ctx); err != nil {
 		return nil, err
 	}
-	_, keys := p.snapshot()
+	keys := p.keySet()
 	if keys == nil {
 		return nil, fmt.Errorf("provider has no verification keys")
 	}
@@ -124,13 +129,33 @@ func (p *Provider) Verifier(ctx context.Context, policy jwt.ValidationPolicy) (*
 	if err := p.refreshIfNeeded(ctx); err != nil {
 		return nil, err
 	}
-	md, keys := p.snapshot()
+	md, keys := p.snapshot(), p.keySet()
 	if md == nil || keys == nil {
 		return nil, fmt.Errorf("provider has no verification keys")
 	}
 	policy.ExpectedIssuer = md.issuer()
 	policy.IgnoreIssuer = false
 	return jwt.NewVerifier(keys, policy)
+}
+
+// Refresh always conditionally revalidates discovery metadata and the current
+// remote JWKS. Callers can use it after an out-of-band key rotation signal.
+func (p *Provider) Refresh(ctx context.Context) error {
+	return p.refresh(ctx, true)
+}
+
+// Run actively refreshes discovery metadata and the current remote JWKS. It
+// stops at the first refresh error or when ctx is cancelled; callers own retry
+// policy and lifecycle supervision.
+func (p *Provider) Run(ctx context.Context) error {
+	for {
+		if err := p.refresh(ctx, false); err != nil {
+			return err
+		}
+		if err := httprevalidate.Wait(ctx, p.refreshAfter()); err != nil {
+			return err
+		}
+	}
 }
 
 func algorithmsFromMetadata(algs []string) []jwt.Algorithm {
@@ -148,28 +173,46 @@ func algorithmsFromMetadata(algs []string) []jwt.Algorithm {
 	return out
 }
 
-func (p *Provider) snapshot() (Metadata, *jwt.VerificationKeySet) {
-	p.cacheMu.RLock()
-	defer p.cacheMu.RUnlock()
-	return p.Metadata, p.keySetLocked()
+func (p *Provider) snapshot() Metadata {
+	p.metadataMu.RLock()
+	defer p.metadataMu.RUnlock()
+	return p.Metadata
 }
 
-func (p *Provider) keySetLocked() *jwt.VerificationKeySet {
+func (p *Provider) keySet() *jwt.VerificationKeySet {
 	if p.VerificationKeys != nil {
 		return p.VerificationKeys
 	}
 	return p.keys
 }
 
+func (p *Provider) refreshAfter() time.Duration {
+	var delay time.Duration
+	haveDelay := false
+	if p.metadataResource != nil {
+		delay = p.metadataResource.RefreshIn()
+		haveDelay = true
+	}
+	p.refreshMu.Lock()
+	if p.keyRefresher != nil {
+		keyDelay := p.keyRefresher.RefreshIn()
+		if !haveDelay || keyDelay < delay {
+			delay = keyDelay
+		}
+	}
+	p.refreshMu.Unlock()
+	return delay
+}
+
 // Userinfo will use the token source to query the userinfo endpoint of the
 // provider. It will unmarshal the response in to the provided into.
 func (p *Provider) Userinfo(ctx context.Context, tokenSource oauth2.TokenSource, into any) error {
-	md, _ := p.snapshot()
+	md := p.snapshot()
 	if md == nil || md.userinfoEndpoint() == "" {
 		return fmt.Errorf("provider does not support userinfo endpoint")
 	}
 
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, internal.HTTPClientFromContext(ctx, p.HTTPClient))
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, internal.HTTPClientFromContext(ctx, p.httpClient))
 
 	client := oauth2.NewClient(ctx, tokenSource)
 	res, err := client.Get(md.userinfoEndpoint())
@@ -187,7 +230,7 @@ func (p *Provider) Userinfo(ctx context.Context, tokenSource oauth2.TokenSource,
 		return fmt.Errorf("userinfo response has unexpected content type: %s", res.Header.Get("Content-Type"))
 	}
 
-	body, err := readBounded(res.Body, maxProviderResponseBytes)
+	body, err := httprevalidate.ReadBounded(res.Body, maxProviderResponseBytes)
 	if err != nil {
 		return fmt.Errorf("reading userinfo response: %w", err)
 	}
