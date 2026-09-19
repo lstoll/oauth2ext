@@ -384,6 +384,7 @@ func (s *sqlStorage) commitOnce(ctx context.Context, commit storageCommit) error
 }
 
 type sqlStateError interface {
+	error
 	SQLState() string
 }
 
@@ -397,7 +398,7 @@ func uniqueViolation(err error) bool {
 
 func retryableSQLError(err error) bool {
 	var state sqlStateError
-	if errors.As(err, &state) {
+	if errors.As(err, &state) { //nolint:modernize // AsType cannot target a capability interface on Go 1.27.
 		switch state.SQLState() {
 		case "40001", "40P01":
 			return true
