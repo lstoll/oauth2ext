@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"lds.li/oauth2ext/jwt"
-	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/provider"
 )
 
 const (
@@ -43,7 +43,7 @@ type OIDCConfigurationHandler struct {
 // tokens signed by them have expired, including any accepted clock skew. An
 // ETag cannot revoke a still-fresh cached response.
 type ConfigurationHandlerConfig struct {
-	Metadata         *oidc.ProviderMetadata
+	Metadata         *provider.OIDCProviderMetadata
 	VerificationKeys *jwt.VerificationKeySet
 	MetadataMaxAge   time.Duration
 	JWKSMaxAge       time.Duration
@@ -59,8 +59,8 @@ type representation struct {
 // DefaultCoreMetadata returns a ProviderMetadata instance with defaults
 // suitable for the core package in this module. Most endpoints will need to be
 // added to this.
-func DefaultCoreMetadata(issuer string) *oidc.ProviderMetadata {
-	return &oidc.ProviderMetadata{
+func DefaultCoreMetadata(issuer string) *provider.OIDCProviderMetadata {
+	return &provider.OIDCProviderMetadata{
 		Issuer: issuer,
 		ResponseTypesSupported: []string{
 			"code",
@@ -70,7 +70,7 @@ func DefaultCoreMetadata(issuer string) *oidc.ProviderMetadata {
 		SubjectTypesSupported:            []string{"public"},
 		IDTokenSigningAlgValuesSupported: []string{"ES256"},
 		GrantTypesSupported:              []string{"authorization_code"},
-		CodeChallengeMethodsSupported:    []oidc.CodeChallengeMethod{oidc.CodeChallengeMethodS256},
+		CodeChallengeMethodsSupported:    []provider.CodeChallengeMethod{provider.CodeChallengeMethodS256},
 		TokenEndpointAuthMethodsSupported: []string{
 			"client_secret_basic",
 			"client_secret_post",
@@ -137,7 +137,7 @@ func NewOIDCConfigurationHandler(config ConfigurationHandlerConfig) (*OIDCConfig
 		return nil, err
 	}
 
-	metadataBytes, err := json.Marshal(metadata)
+	metadataBytes, err := jsonv2.Marshal(metadata)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling provider metadata: %w", err)
 	}
@@ -191,19 +191,19 @@ func serveRepresentation(w http.ResponseWriter, req *http.Request, rep represent
 	http.ServeContent(w, req, "", time.Time{}, bytes.NewReader(rep.body))
 }
 
-func cloneMetadata(metadata *oidc.ProviderMetadata) (*oidc.ProviderMetadata, error) {
-	encoded, err := json.Marshal(metadata)
+func cloneMetadata(metadata *provider.OIDCProviderMetadata) (*provider.OIDCProviderMetadata, error) {
+	encoded, err := jsonv2.Marshal(metadata)
 	if err != nil {
 		return nil, fmt.Errorf("cloning provider metadata: %w", err)
 	}
-	var clone oidc.ProviderMetadata
-	if err := json.Unmarshal(encoded, &clone); err != nil {
+	var clone provider.OIDCProviderMetadata
+	if err := jsonv2.Unmarshal(encoded, &clone); err != nil {
 		return nil, fmt.Errorf("cloning provider metadata: %w", err)
 	}
 	return &clone, nil
 }
 
-func validateMetadata(p *oidc.ProviderMetadata) error {
+func validateMetadata(p *provider.OIDCProviderMetadata) error {
 	var errs []string
 
 	aestr := func(val, e string) {

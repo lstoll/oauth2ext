@@ -2,9 +2,11 @@ package provider
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -85,18 +87,20 @@ func (p *Provider) refreshIfNeeded(ctx context.Context) error {
 }
 
 func (p *Provider) refresh(ctx context.Context, force bool) error {
+	p.refreshMu.Lock()
+	defer p.refreshMu.Unlock()
+	var discovered *OIDCProviderMetadata
 	if p.metadataResource != nil {
 		apply := func(body []byte) error {
-			var discovered OIDCProviderMetadata
-			if err := jsonv2.Unmarshal(body, &discovered); err != nil {
+			var candidate OIDCProviderMetadata
+			if err := unmarshalMetadata(body, &candidate); err != nil {
 				return fmt.Errorf("error decoding discovery metadata response: %w", err)
 			}
-			if discovered.Issuer != p.discoveryIssuer {
-				return fmt.Errorf("discovery issuer %q does not match requested issuer %q", discovered.Issuer, p.discoveryIssuer)
+			if candidate.Issuer != p.discoveryIssuer {
+				return fmt.Errorf("discovery issuer %q does not match requested issuer %q", candidate.Issuer, p.discoveryIssuer)
 			}
-			p.metadataMu.Lock()
-			p.Metadata = &discovered
-			p.metadataMu.Unlock()
+			discovered = candidate.Clone()
+			p.pendingMetadata = candidate.Clone()
 			return nil
 		}
 		var err error
@@ -110,9 +114,10 @@ func (p *Provider) refresh(ctx context.Context, force bool) error {
 		}
 	}
 
-	p.refreshMu.Lock()
-	defer p.refreshMu.Unlock()
-	md := p.snapshot()
+	md := p.pendingMetadata
+	if md == nil {
+		md = p.MetadataSnapshot()
+	}
 	if md == nil {
 		return fmt.Errorf("provider metadata is required")
 	}
@@ -120,6 +125,12 @@ func (p *Provider) refresh(ctx context.Context, force bool) error {
 	refresher := p.keyRefresher
 	currentKeys := p.keys
 	if override != nil {
+		if discovered != nil || p.pendingMetadata != nil {
+			p.metadataMu.Lock()
+			p.metadata = md.Clone()
+			p.metadataMu.Unlock()
+			p.pendingMetadata = nil
+		}
 		return nil
 	}
 
@@ -152,7 +163,45 @@ func (p *Provider) refresh(ctx context.Context, force bool) error {
 	}
 	p.keyRefresher = refresher
 	p.keyRefresherURL = jwksURI
+	if discovered != nil || p.pendingMetadata != nil {
+		p.metadataMu.Lock()
+		p.metadata = md.Clone()
+		p.metadataMu.Unlock()
+		p.pendingMetadata = nil
+	}
 	return nil
+}
+
+// unmarshalMetadata preserves extension members while rejecting case variants
+// of known names. Such variants could otherwise be mistaken for extensions by
+// this implementation and for protocol fields by another implementation.
+func unmarshalMetadata(body []byte, into *OIDCProviderMetadata) error {
+	var members map[string]jsontext.Value
+	if err := jsonv2.Unmarshal(body, &members); err != nil {
+		return err
+	}
+	var known []string
+	exactNames := make(map[string]struct{})
+	typ := reflect.TypeFor[OIDCProviderMetadata]()
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name := strings.Split(field.Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" {
+			known = append(known, name)
+			exactNames[name] = struct{}{}
+		}
+	}
+	for name := range members {
+		if _, exact := exactNames[name]; exact {
+			continue
+		}
+		for _, fieldName := range known {
+			if strings.EqualFold(name, fieldName) {
+				return fmt.Errorf("ambiguous discovery metadata member %q", name)
+			}
+		}
+	}
+	return jsonv2.Unmarshal(body, into)
 }
 
 func refreshSource(ctx context.Context, source *remotejwks.Source, force bool) error {

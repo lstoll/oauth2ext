@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -102,11 +103,114 @@ func TestProviderRefreshForcesDiscoveryAndJWKSRevalidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Refresh(ctx); err != nil {
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 20 {
+				metadata := p.MetadataSnapshot()
+				if metadata == nil || metadata.Issuer != server.URL {
+					t.Errorf("invalid metadata snapshot: %#v", metadata)
+					return
+				}
+				metadata.Issuer = "https://mutated.invalid"
+			}
+		}()
+	}
+	for range 8 {
+		if err := p.Refresh(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wg.Wait()
+	if discoveryHits.Load() != 9 || jwksHits.Load() != 9 {
+		t.Fatalf("hits: discovery=%d jwks=%d, want 9 each", discoveryHits.Load(), jwksHits.Load())
+	}
+}
+
+func TestProviderKeepsLastGoodMetadataWhenRefreshJWKSFails(t *testing.T) {
+	signer := jwttest.NewSigner(t)
+	server := httptest.NewTLSServer(nil)
+	t.Cleanup(server.Close)
+	var updated atomic.Bool
+	var makeJWKSUnavailable atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "max-age=60")
+		metadata := OIDCProviderMetadata{Issuer: server.URL, JWKSURI: server.URL + "/jwks"}
+		if updated.Load() {
+			metadata.UserinfoEndpoint = server.URL + "/userinfo-v2"
+			metadata.JWKSURI = server.URL + "/jwks-v2"
+		}
+		_ = json.NewEncoder(w).Encode(metadata)
+	})
+	for _, path := range []string{"/jwks", "/jwks-v2"} {
+		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/jwks-v2" && makeJWKSUnavailable.Load() {
+				http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/jwk-set+json")
+			_, _ = w.Write(signer.JWKS())
+		})
+	}
+	server.Config.Handler = mux
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, server.Client())
+	p, err := DiscoverOIDCProvider(ctx, server.URL)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if discoveryHits.Load() != 2 || jwksHits.Load() != 2 {
-		t.Fatalf("hits: discovery=%d jwks=%d, want 2 each", discoveryHits.Load(), jwksHits.Load())
+
+	updated.Store(true)
+	makeJWKSUnavailable.Store(true)
+	if err := p.Refresh(ctx); err == nil {
+		t.Fatal("Refresh succeeded while the new JWKS endpoint was unavailable")
+	}
+	if got := p.MetadataSnapshot().UserinfoEndpoint; got != "" {
+		t.Fatalf("failed refresh published new metadata: userinfo endpoint = %q", got)
+	}
+
+	makeJWKSUnavailable.Store(false)
+	if err := p.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh after recovery: %v", err)
+	}
+	if got := p.MetadataSnapshot().UserinfoEndpoint; got != server.URL+"/userinfo-v2" {
+		t.Fatalf("successful refresh metadata endpoint = %q", got)
+	}
+}
+
+func TestProviderRefreshRejectsIssuerMismatchWithoutPublishing(t *testing.T) {
+	signer := jwttest.NewSigner(t)
+	server := httptest.NewTLSServer(nil)
+	t.Cleanup(server.Close)
+	var mismatch atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		metadata := OIDCProviderMetadata{Issuer: server.URL, JWKSURI: server.URL + "/jwks"}
+		if mismatch.Load() {
+			metadata.Issuer = "https://attacker.example"
+		}
+		_ = json.NewEncoder(w).Encode(metadata)
+	})
+	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/jwk-set+json")
+		_, _ = w.Write(signer.JWKS())
+	})
+	server.Config.Handler = mux
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, server.Client())
+	p, err := DiscoverOIDCProvider(ctx, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatch.Store(true)
+	if err := p.Refresh(ctx); err == nil || !strings.Contains(err.Error(), "does not match requested issuer") {
+		t.Fatalf("Refresh error = %v, want issuer mismatch", err)
+	}
+	if got := p.MetadataSnapshot().Issuer; got != server.URL {
+		t.Fatalf("issuer after rejected refresh = %q, want %q", got, server.URL)
 	}
 }
 
@@ -135,6 +239,25 @@ func TestProviderRunRefreshesDiscoveryAndJWKSWhenDue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	readCtx, stopReaders := context.WithCancel(requestCtx)
+	defer stopReaders()
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-readCtx.Done():
+				return
+			default:
+			}
+			metadata := p.MetadataSnapshot()
+			if metadata == nil || metadata.Issuer != server.URL {
+				t.Errorf("invalid metadata snapshot during Run: %#v", metadata)
+				return
+			}
+			metadata.Issuer = "https://mutated.invalid"
+		}
+	}()
 	runCtx, cancel := context.WithCancel(requestCtx)
 	errCh := make(chan error, 1)
 	go func() { errCh <- p.Run(runCtx) }()
@@ -148,6 +271,8 @@ func TestProviderRunRefreshesDiscoveryAndJWKSWhenDue(t *testing.T) {
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error = %v, want context cancellation", err)
 	}
+	stopReaders()
+	<-readerDone
 }
 
 func TestProviderDiscoveryBindsIssuer(t *testing.T) {
@@ -423,7 +548,7 @@ func TestUserinfo(t *testing.T) {
 	t.Cleanup(svr.Close)
 
 	p := &Provider{
-		Metadata: &OIDCProviderMetadata{
+		metadata: &OIDCProviderMetadata{
 			UserinfoEndpoint: svr.URL,
 		},
 	}
@@ -448,7 +573,7 @@ func TestUserinfoRejectsDuplicateClaims(t *testing.T) {
 	}))
 	t.Cleanup(svr.Close)
 
-	p := &Provider{Metadata: &OIDCProviderMetadata{UserinfoEndpoint: svr.URL}}
+	p := &Provider{metadata: &OIDCProviderMetadata{UserinfoEndpoint: svr.URL}}
 	var claims map[string]any
 	err := p.Userinfo(context.WithValue(t.Context(), oauth2.HTTPClient, svr.Client()), oauth2.StaticTokenSource(&oauth2.Token{}), &claims)
 	if err == nil {

@@ -4,7 +4,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,7 +15,7 @@ import (
 
 	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2as/discovery"
-	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/provider"
 )
 
 func TestConfigurationHandlerCaching(t *testing.T) {
@@ -40,8 +41,8 @@ func TestConfigurationHandlerCaching(t *testing.T) {
 	if metadataResponse.Header().Get("ETag") == "" || metadataResponse.Header().Get("ETag")[0] != '"' {
 		t.Fatalf("metadata ETag = %q, want quoted", metadataResponse.Header().Get("ETag"))
 	}
-	var served oidc.ProviderMetadata
-	if err := json.Unmarshal(metadataResponse.Body.Bytes(), &served); err != nil {
+	var served provider.OIDCProviderMetadata
+	if err := jsonv2.Unmarshal(metadataResponse.Body.Bytes(), &served); err != nil {
 		t.Fatal(err)
 	}
 	if served.Issuer != "https://issuer.example" || served.ResponseTypesSupported[0] != "code" {
@@ -73,6 +74,23 @@ func TestConfigurationHandlerCaching(t *testing.T) {
 	}
 	if head := request(h, http.MethodHead, "/.well-known/jwks.json", ""); head.Code != http.StatusOK || head.Body.Len() != 0 {
 		t.Fatalf("HEAD status=%d body=%q", head.Code, head.Body.String())
+	}
+}
+
+func TestConfigurationHandlerPreservesMetadataExtensions(t *testing.T) {
+	metadata := testMetadata()
+	metadata.Extensions = map[string]jsontext.Value{"vendor_feature": jsontext.Value(`{"enabled":true}`)}
+	h := newHandler(t, discovery.ConfigurationHandlerConfig{Metadata: metadata, VerificationKeys: testKeys(t, "one")})
+	response := request(h, http.MethodGet, "/.well-known/openid-configuration", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("metadata status = %d", response.Code)
+	}
+	var served provider.OIDCProviderMetadata
+	if err := jsonv2.Unmarshal(response.Body.Bytes(), &served); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(served.Extensions["vendor_feature"]); got != `{"enabled":true}` {
+		t.Fatalf("extension = %s, want original JSON value", got)
 	}
 }
 
@@ -152,8 +170,8 @@ func TestConfigurationHandlerDefaultsAndValidation(t *testing.T) {
 	}
 }
 
-func testMetadata() *oidc.ProviderMetadata {
-	return &oidc.ProviderMetadata{
+func testMetadata() *provider.OIDCProviderMetadata {
+	return &provider.OIDCProviderMetadata{
 		Issuer:                           "https://issuer.example",
 		AuthorizationEndpoint:            "https://issuer.example/authorize",
 		TokenEndpoint:                    "https://issuer.example/token",

@@ -19,9 +19,9 @@ import (
 const DefaultRefreshInterval = 10 * time.Minute
 
 type Provider struct {
-	// Metadata is the discovery metadata for the provider. It will be of type
-	// [*OIDCProviderMetadata].
-	Metadata Metadata
+	// metadata is replaced atomically after a successful discovery and key
+	// refresh. Call MetadataSnapshot to obtain an independent copy.
+	metadata *OIDCProviderMetadata
 	// VerificationKeys overrides keys advertised by discovery. Set it before
 	// first use. Keep the handle stable and call Replace when a refresh routine
 	// reloads keys; do not assign a new pointer concurrently with use.
@@ -31,6 +31,7 @@ type Provider struct {
 	refreshMu sync.Mutex
 	// metadataMu protects replacement of discovery metadata.
 	metadataMu              sync.RWMutex
+	pendingMetadata         *OIDCProviderMetadata
 	keys                    *jwt.VerificationKeySet
 	keyRefresher            *remotejwks.Source
 	keyRefresherURL         string
@@ -41,6 +42,16 @@ type Provider struct {
 
 	oidcDiscoveryURL string
 	discoveryIssuer  string
+}
+
+// New creates a provider with manually supplied metadata. The input is copied.
+func New(metadata *OIDCProviderMetadata) *Provider {
+	return &Provider{metadata: metadata.Clone()}
+}
+
+// MetadataSnapshot returns an independent copy of the current metadata.
+func (p *Provider) MetadataSnapshot() *OIDCProviderMetadata {
+	return p.snapshot()
 }
 
 func (p *Provider) Issuer() string {
@@ -173,10 +184,10 @@ func algorithmsFromMetadata(algs []string) []jwt.Algorithm {
 	return out
 }
 
-func (p *Provider) snapshot() Metadata {
+func (p *Provider) snapshot() *OIDCProviderMetadata {
 	p.metadataMu.RLock()
 	defer p.metadataMu.RUnlock()
-	return p.Metadata
+	return p.metadata.Clone()
 }
 
 func (p *Provider) keySet() *jwt.VerificationKeySet {
