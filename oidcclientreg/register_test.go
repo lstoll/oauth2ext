@@ -99,11 +99,7 @@ func TestRegisterWithProvider(t *testing.T) {
 			defer server.Close()
 
 			// Create provider with test server URL
-			provider := &provider.Provider{
-				Metadata: &provider.OIDCProviderMetadata{
-					RegistrationEndpoint: server.URL,
-				},
-			}
+			provider := provider.New(&provider.OIDCProviderMetadata{RegistrationEndpoint: server.URL})
 
 			// Create context with HTTP client that skips TLS verification for testing
 			ctx := context.WithValue(context.Background(), oauth2.HTTPClient, server.Client())
