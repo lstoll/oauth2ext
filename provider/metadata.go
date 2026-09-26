@@ -1,21 +1,6 @@
 package provider
 
-// Metadata represents the discovery metadata for an OIDC provider or OAuth2
-// Authorization Server.
-type Metadata interface {
-	issuer() string
-	authorizationEndpoint() string
-	tokenEndpoint() string
-	userinfoEndpoint() string
-	jwksuri() string
-
-	registrationSupported() bool
-	registrationEndpoint() string
-	codeChallengeMethodsSupported() []CodeChallengeMethod
-	idTokenSigningAlgValuesSupported() []string
-
-	isMetadata()
-}
+import "encoding/json/jsontext"
 
 // CodeChallengeMethod is https://www.rfc-editor.org/rfc/rfc7636#section-4.3
 type CodeChallengeMethod string
@@ -30,6 +15,9 @@ const (
 //
 // https://openid.net/specs/openid-connect-discovery-1_0.html#OIDCProviderMetadata
 type OIDCProviderMetadata struct {
+	// Extensions contains unrecognized discovery members. Values are copied
+	// when metadata is accepted by a Provider.
+	Extensions map[string]jsontext.Value `json:",embed"`
 	// REQUIRED. URL using the https scheme with no query or fragment component
 	// that the OP asserts as its Issuer Identifier. If Issuer discovery is
 	// supported (see Section 2), this value MUST be identical to the issuer
@@ -212,6 +200,45 @@ type OIDCProviderMetadata struct {
 	CodeChallengeMethodsSupported []CodeChallengeMethod `json:"code_challenge_methods_supported,omitempty"`
 }
 
+// Clone returns an independent copy of the metadata, including slices and
+// extension values.
+func (m *OIDCProviderMetadata) Clone() *OIDCProviderMetadata {
+	if m == nil {
+		return nil
+	}
+	out := *m
+	out.ScopesSupported = append([]string(nil), m.ScopesSupported...)
+	out.ResponseTypesSupported = append([]string(nil), m.ResponseTypesSupported...)
+	out.ResponseModesSupported = append([]string(nil), m.ResponseModesSupported...)
+	out.GrantTypesSupported = append([]string(nil), m.GrantTypesSupported...)
+	out.ACRValuesSupported = append([]string(nil), m.ACRValuesSupported...)
+	out.SubjectTypesSupported = append([]string(nil), m.SubjectTypesSupported...)
+	out.IDTokenSigningAlgValuesSupported = append([]string(nil), m.IDTokenSigningAlgValuesSupported...)
+	out.IDTokenEncryptionAlgValuesSupported = append([]string(nil), m.IDTokenEncryptionAlgValuesSupported...)
+	out.IDTokenEncryptionEncValuesSupported = append([]string(nil), m.IDTokenEncryptionEncValuesSupported...)
+	out.UserinfoSigningAlgValuesSupported = append([]string(nil), m.UserinfoSigningAlgValuesSupported...)
+	out.UserinfoEncryptionAlgValuesSupported = append([]string(nil), m.UserinfoEncryptionAlgValuesSupported...)
+	out.UserinfoEncryptionEncValuesSupported = append([]string(nil), m.UserinfoEncryptionEncValuesSupported...)
+	out.RequestObjectSigningAlgValuesSupported = append([]string(nil), m.RequestObjectSigningAlgValuesSupported...)
+	out.RequestObjectEncryptionAlgValuesSupported = append([]string(nil), m.RequestObjectEncryptionAlgValuesSupported...)
+	out.RequestObjectEncryptionEncValuesSupported = append([]string(nil), m.RequestObjectEncryptionEncValuesSupported...)
+	out.TokenEndpointAuthMethodsSupported = append([]string(nil), m.TokenEndpointAuthMethodsSupported...)
+	out.TokenEndpointAuthSigningAlgValuesSupported = append([]string(nil), m.TokenEndpointAuthSigningAlgValuesSupported...)
+	out.DisplayValuesSupported = append([]string(nil), m.DisplayValuesSupported...)
+	out.ClaimTypesSupported = append([]string(nil), m.ClaimTypesSupported...)
+	out.ClaimsSupported = append([]string(nil), m.ClaimsSupported...)
+	out.ClaimLocalesSupported = append([]string(nil), m.ClaimLocalesSupported...)
+	out.UILocalesSupported = append([]string(nil), m.UILocalesSupported...)
+	out.CodeChallengeMethodsSupported = append([]CodeChallengeMethod(nil), m.CodeChallengeMethodsSupported...)
+	if m.Extensions != nil {
+		out.Extensions = make(map[string]jsontext.Value, len(m.Extensions))
+		for key, value := range m.Extensions {
+			out.Extensions[key] = value.Clone()
+		}
+	}
+	return &out
+}
+
 func (m *OIDCProviderMetadata) issuer() string {
 	return m.Issuer
 }
@@ -231,8 +258,6 @@ func (m *OIDCProviderMetadata) userinfoEndpoint() string {
 func (m *OIDCProviderMetadata) jwksuri() string {
 	return m.JWKSURI
 }
-
-func (m *OIDCProviderMetadata) isMetadata() {}
 
 func (m *OIDCProviderMetadata) codeChallengeMethodsSupported() []CodeChallengeMethod {
 	return m.CodeChallengeMethodsSupported

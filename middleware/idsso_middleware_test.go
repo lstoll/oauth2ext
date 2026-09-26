@@ -110,13 +110,13 @@ func (s *mockOIDCServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *mockOIDCServer) handleDiscovery(w http.ResponseWriter, r *http.Request) {
-	discovery := oidc.ProviderMetadata{
+	discovery := provider.OIDCProviderMetadata{
 		Issuer:                           s.baseURL,
 		AuthorizationEndpoint:            fmt.Sprintf("%s/auth", s.baseURL),
 		TokenEndpoint:                    fmt.Sprintf("%s/token", s.baseURL),
 		JWKSURI:                          fmt.Sprintf("%s/keys", s.baseURL),
 		ResponseTypesSupported:           []string{"code"},
-		CodeChallengeMethodsSupported:    []oidc.CodeChallengeMethod{oidc.CodeChallengeMethodS256},
+		CodeChallengeMethodsSupported:    []provider.CodeChallengeMethod{provider.CodeChallengeMethodS256},
 		IDTokenSigningAlgValuesSupported: []string{"RS256", "ES256"},
 	}
 
@@ -344,7 +344,7 @@ func TestPrepareLoginPublicClientRequiresPKCES256(t *testing.T) {
 	h := &IDSSOHandler[struct{}]{
 		OAuth2Client: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
 		ClientType:   oauth2client.PublicClient,
-		Provider:     &provider.Provider{Metadata: &provider.OIDCProviderMetadata{}},
+		Provider:     provider.New(&provider.OIDCProviderMetadata{}),
 	}
 	if _, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}, ""); err == nil {
 		t.Fatal("public client started without provider PKCE S256 support")
@@ -355,7 +355,7 @@ func TestPrepareLoginConfidentialClientRequiresExplicitPKCEOptOut(t *testing.T) 
 	h := &IDSSOHandler[struct{}]{
 		OAuth2Client: &oauth2.Config{ClientID: "confidential-client", ClientSecret: "secret", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
 		ClientType:   oauth2client.ConfidentialClient,
-		Provider:     &provider.Provider{Metadata: &provider.OIDCProviderMetadata{}},
+		Provider:     provider.New(&provider.OIDCProviderMetadata{}),
 	}
 	if _, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}, ""); err == nil {
 		t.Fatal("confidential client started without provider PKCE S256 support or an explicit opt-out")
