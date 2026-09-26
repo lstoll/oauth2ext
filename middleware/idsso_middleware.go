@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/claims"
+	"lds.li/oauth2ext/oauth2client"
 	"lds.li/oauth2ext/oidc"
 	"lds.li/oauth2ext/provider"
 )
@@ -50,8 +51,12 @@ type IDSSOHandler[IDClaims any] struct {
 	// handler fails closed if S256 is not advertised. For a handler constructed
 	// without discovery, S256 support is assumed unless explicitly disabled.
 	DisablePKCE bool
-	// OAuth2Config are the options used for the oauth2 flow. Required.
-	OAuth2Config *oauth2.Config
+	// OAuth2Client performs authorization code and token refresh operations.
+	// *oauth2.Config and *clientjwt.Config satisfy this interface.
+	OAuth2Client oauth2client.Client
+	// ClientType is explicit because an empty client secret does not identify
+	// the client type (for example, private_key_jwt is confidential).
+	ClientType oauth2client.ClientType
 	// AuthCodeOptions options that can be passed when creating the auth code
 	// URL. This can be used to request ACRs or other items.
 	AuthCodeOptions []oauth2.AuthCodeOption
@@ -92,6 +97,10 @@ func NewIDSSOHandlerFromDiscovery(ctx context.Context, sessStore SessionStore, i
 	if sessStore == nil {
 		sessStore = &Cookiestore{}
 	}
+	clientType := oauth2client.ConfidentialClient
+	if clientSecret == "" {
+		clientType = oauth2client.PublicClient
+	}
 
 	cfg := &oauth2.Config{
 		ClientID:     clientID,
@@ -103,7 +112,8 @@ func NewIDSSOHandlerFromDiscovery(ctx context.Context, sessStore SessionStore, i
 	h := &IDSSOHandler[*claims.VerifiedID]{
 		Verifier:     verifier,
 		Provider:     prov,
-		OAuth2Config: cfg,
+		OAuth2Client: cfg,
+		ClientType:   clientType,
 		SessionStore: sessStore,
 	}
 	return h, nil
@@ -281,7 +291,7 @@ func (h *IDSSOHandler[IDClaims]) authenticateExisting(r *http.Request, session *
 		return nil, zero
 	}
 
-	o2cfg, err := h.getOAuth2Config()
+	o2cfg, err := h.getOAuth2Client()
 	if err != nil {
 		var zero IDClaims
 		return nil, zero
@@ -384,7 +394,7 @@ func (h *IDSSOHandler[IDClaims]) authenticateCallback(r *http.Request, session *
 		opts = append(opts, oauth2.VerifierOption(foundLogin.PKCEChallenge))
 	}
 
-	o2cfg, err := h.getOAuth2Config()
+	o2cfg, err := h.getOAuth2Client()
 	if err != nil {
 		return "", err
 	}
@@ -449,7 +459,7 @@ func (h *IDSSOHandler[IDClaims]) prepareLogin(r *http.Request, session *SessionD
 		Expires:       int(time.Now().Add(loginStateExpiresAfter).Unix()),
 	})
 
-	o2cfg, err := h.getOAuth2Config()
+	o2cfg, err := h.getOAuth2Client()
 	if err != nil {
 		return "", err
 	}
@@ -457,7 +467,10 @@ func (h *IDSSOHandler[IDClaims]) prepareLogin(r *http.Request, session *SessionD
 }
 
 func (h *IDSSOHandler[IDClaims]) pkceEnabled() (bool, error) {
-	publicClient := h.OAuth2Config != nil && h.OAuth2Config.ClientSecret == ""
+	if !h.ClientType.Valid() {
+		return false, fmt.Errorf("client type must be explicitly set to public or confidential")
+	}
+	publicClient := h.ClientType == oauth2client.PublicClient
 	if h.DisablePKCE {
 		if publicClient {
 			return false, fmt.Errorf("PKCE cannot be disabled for a public client")
@@ -473,11 +486,14 @@ func (h *IDSSOHandler[IDClaims]) pkceEnabled() (bool, error) {
 	return false, fmt.Errorf("provider does not advertise PKCE S256 support; set DisablePKCE only for a confidential client")
 }
 
-func (h *IDSSOHandler[IDClaims]) getOAuth2Config() (oauth2.Config, error) {
-	if h.OAuth2Config == nil {
-		return oauth2.Config{}, fmt.Errorf("no OAuth2Config provided")
+func (h *IDSSOHandler[IDClaims]) getOAuth2Client() (oauth2client.Client, error) {
+	if h.OAuth2Client == nil {
+		return nil, fmt.Errorf("no OAuth2Client provided")
 	}
-	return *h.OAuth2Config, nil
+	if !h.ClientType.Valid() {
+		return nil, fmt.Errorf("client type must be explicitly set to public or confidential")
+	}
+	return h.OAuth2Client, nil
 }
 
 func isAJAXRequest(r *http.Request) bool {
