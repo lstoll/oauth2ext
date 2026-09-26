@@ -21,6 +21,7 @@ import (
 	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/claims"
 	"lds.li/oauth2ext/jwttest"
+	"lds.li/oauth2ext/oauth2client"
 	"lds.li/oauth2ext/oidc"
 	"lds.li/oauth2ext/provider"
 )
@@ -319,9 +320,10 @@ func TestAuthenticateExistingDoesNotRetryVerificationFailure(t *testing.T) {
 	verifier := new(rejectingIDTokenVerifier)
 	h := &IDSSOHandler[struct{}]{
 		Verifier: verifier,
-		OAuth2Config: &oauth2.Config{
+		OAuth2Client: &oauth2.Config{
 			ClientID: "client-id",
 		},
+		ClientType: oauth2client.PublicClient,
 	}
 	session := &SessionData{Token: &oidc.TokenWithID{Token: &oauth2.Token{
 		AccessToken:  "access-token",
@@ -340,7 +342,8 @@ func TestAuthenticateExistingDoesNotRetryVerificationFailure(t *testing.T) {
 
 func TestPrepareLoginPublicClientRequiresPKCES256(t *testing.T) {
 	h := &IDSSOHandler[struct{}]{
-		OAuth2Config: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		OAuth2Client: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		ClientType:   oauth2client.PublicClient,
 		Provider:     &provider.Provider{Metadata: &provider.OIDCProviderMetadata{}},
 	}
 	if _, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}, ""); err == nil {
@@ -350,7 +353,8 @@ func TestPrepareLoginPublicClientRequiresPKCES256(t *testing.T) {
 
 func TestPrepareLoginConfidentialClientRequiresExplicitPKCEOptOut(t *testing.T) {
 	h := &IDSSOHandler[struct{}]{
-		OAuth2Config: &oauth2.Config{ClientID: "confidential-client", ClientSecret: "secret", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		OAuth2Client: &oauth2.Config{ClientID: "confidential-client", ClientSecret: "secret", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		ClientType:   oauth2client.ConfidentialClient,
 		Provider:     &provider.Provider{Metadata: &provider.OIDCProviderMetadata{}},
 	}
 	if _, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}, ""); err == nil {
@@ -364,7 +368,8 @@ func TestPrepareLoginConfidentialClientRequiresExplicitPKCEOptOut(t *testing.T) 
 
 func TestPrepareLoginUsesPKCEWithoutDiscovery(t *testing.T) {
 	h := &IDSSOHandler[struct{}]{
-		OAuth2Config: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		OAuth2Client: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		ClientType:   oauth2client.PublicClient,
 	}
 	session := &SessionData{}
 	authURL, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), session, "")
@@ -385,7 +390,8 @@ func TestPrepareLoginUsesPKCEWithoutDiscovery(t *testing.T) {
 
 func TestPrepareLoginCannotDisablePKCEForPublicClient(t *testing.T) {
 	h := &IDSSOHandler[struct{}]{
-		OAuth2Config: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		OAuth2Client: &oauth2.Config{ClientID: "public-client", Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"}},
+		ClientType:   oauth2client.PublicClient,
 		DisablePKCE:  true,
 	}
 	if _, err := h.prepareLogin(httptest.NewRequest(http.MethodGet, "https://rp.example/", nil), &SessionData{}, ""); err == nil {
@@ -407,7 +413,8 @@ func TestAuthenticateCallbackRejectsAndConsumesExpiredLogin(t *testing.T) {
 
 func TestAuthenticateCallbackPublicClientRejectsMissingPKCE(t *testing.T) {
 	h := &IDSSOHandler[struct{}]{
-		OAuth2Config: &oauth2.Config{ClientID: "public-client"},
+		OAuth2Client: &oauth2.Config{ClientID: "public-client"},
+		ClientType:   oauth2client.PublicClient,
 	}
 	session := &SessionData{Logins: []SessionDataLogin{{
 		State:   "state-without-pkce",

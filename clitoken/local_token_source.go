@@ -6,18 +6,23 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/oauth2client"
 )
 
 // Config configures a CLI local token source. This is used to implement the
 // 3-legged oauth2 flow for local/CLI applications, where the callback is a
 // dynamic server listening on localhost.
 type Config struct {
-	// OAuth2Config is the configuration for the provider. Required.
-	OAuth2Config oauth2.Config
+	// OAuth2Client performs authorization code operations. *oauth2.Config and
+	// *clientjwt.Config satisfy this interface.
+	OAuth2Client oauth2client.AuthorizationCodeClient
+	// ClientType must explicitly identify the public or confidential client.
+	ClientType oauth2client.ClientType
 
 	// Opener is used to launch the users browser in to the auth flow. If not
 	// set, an appropriate opener for the platform will be automatically
@@ -81,18 +86,19 @@ func (c *Config) getPortRange() (low uint16, high uint16) {
 //
 //	ctx := context.TODO()
 //
-//	provider, err := oidc.DiscoverProvider(ctx, issuer)
+//	prov, err := provider.DiscoverOIDCProvider(ctx, issuer)
 //	if err != nil {
 //	    // handle err
 //	}
 //
 //	cfg := Config{
-//	    OAuth2Config: oauth2.Config{
+//	    OAuth2Client: &oauth2.Config{
 //	        ClientID:       clientID,
 //	        ClientSecret:   clientSecret,
-//	        Endpoint:       provider.Endpoint(),
+//	        Endpoint:       prov.Endpoint(),
 //	        Scopes:         []string{oidc.ScopeOpenID},
-//	    }
+//	    },
+//	    ClientType: oauth2client.ConfidentialClient,
 //	}
 //
 //	ts, err := cfg.TokenSource(ctx)
@@ -107,7 +113,26 @@ func (c *Config) getPortRange() (low uint16, high uint16) {
 //
 //	// use token
 func (c *Config) TokenSource(ctx context.Context) (oauth2.TokenSource, error) {
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
 	return &cliTokenSource{ctx: ctx, cfg: c}, nil
+}
+
+func (c *Config) validate() error {
+	if c == nil {
+		return fmt.Errorf("config is required")
+	}
+	if c.OAuth2Client == nil {
+		return fmt.Errorf("OAuth2Client is required")
+	}
+	if !c.ClientType.Valid() {
+		return fmt.Errorf("client type must be explicitly set to public or confidential")
+	}
+	if c.SkipPKCE && c.ClientType != oauth2client.ConfidentialClient {
+		return fmt.Errorf("PKCE can only be disabled for a confidential client")
+	}
+	return nil
 }
 
 type cliTokenSource struct {
@@ -122,8 +147,9 @@ func (c *cliTokenSource) Token() (*oauth2.Token, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// shallow clone, as we mutate it
-	o2cfg := c.cfg.OAuth2Config
+	if err := c.cfg.validate(); err != nil {
+		return nil, err
+	}
 
 	state := rand.Text()
 
@@ -196,19 +222,18 @@ func (c *cliTokenSource) Token() (*oauth2.Token, error) {
 	go func() { _ = httpSrv.Serve(ln) }()
 	defer func() { _ = httpSrv.Shutdown(c.ctx) }()
 
-	var (
-		verifier string
-		acopts   []oauth2.AuthCodeOption
-	)
+	var verifier string
+	acopts := slices.Clone(c.cfg.AuthCodeOptions)
 	if !c.cfg.SkipPKCE {
 		verifier = oauth2.GenerateVerifier()
-		acopts = append(c.cfg.AuthCodeOptions, oauth2.S256ChallengeOption(verifier))
+		acopts = append(acopts, oauth2.S256ChallengeOption(verifier))
 	}
 
-	// we need to update this each invocation
-	o2cfg.RedirectURL = fmt.Sprintf("http://127.0.0.1:%d/callback", tcpAddr.Port)
+	// Bind this flow's callback without mutating shared client configuration.
+	redirectURL := fmt.Sprintf("http://127.0.0.1:%d/callback", tcpAddr.Port)
+	acopts = append(acopts, oauth2.SetAuthURLParam("redirect_uri", redirectURL))
 
-	authURL := o2cfg.AuthCodeURL(state, acopts...)
+	authURL := c.cfg.OAuth2Client.AuthCodeURL(state, acopts...)
 
 	if err := c.cfg.getOpener().Open(c.ctx, authURL); err != nil {
 		return nil, fmt.Errorf("failed to open URL: %w", err)
@@ -227,10 +252,11 @@ func (c *cliTokenSource) Token() (*oauth2.Token, error) {
 	}
 
 	var exchopts []oauth2.AuthCodeOption
+	exchopts = append(exchopts, oauth2.SetAuthURLParam("redirect_uri", redirectURL))
 	if verifier != "" {
 		exchopts = append(exchopts, oauth2.VerifierOption(verifier))
 	}
-	return o2cfg.Exchange(c.ctx, res.code, exchopts...)
+	return c.cfg.OAuth2Client.Exchange(c.ctx, res.code, exchopts...)
 }
 
 func newLocalTCPListenerInRange(portLow uint16, portHigh uint16) (net.Listener, error) {
