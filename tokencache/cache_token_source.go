@@ -228,6 +228,19 @@ func (s *TokenSource) Client(base *http.Client) *http.Client {
 type transport struct {
 	source *TokenSource
 	base   http.RoundTripper
+
+	// dpop is reused while the key is unchanged, so it remembers server nonces.
+	mu   sync.Mutex
+	dpop *dpop.Transport
+}
+
+func (t *transport) dpopTransport(signer *jwt.SigningIdentity, base http.RoundTripper) *dpop.Transport {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dpop == nil || t.dpop.Signer != signer {
+		t.dpop = &dpop.Transport{Signer: signer, Base: base}
+	}
+	return t.dpop
 }
 
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -249,5 +262,5 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return base.RoundTrip(req)
 	}
 	req.Header.Set("Authorization", "DPoP "+tok.AccessToken)
-	return (&dpop.Transport{Signer: signer, Base: base}).RoundTrip(req)
+	return t.dpopTransport(signer, base).RoundTrip(req)
 }
