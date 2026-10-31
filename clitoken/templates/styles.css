@@ -1,212 +1,114 @@
 :root {
-    --primary-color: #2ecc71;
-    --error-color: #e63946;
-    --text-color: #1d3557;
-    --bg-color: #f8f9fa;
-    --card-bg: #ffffff;
-    --border-color: #dee2e6;
-    --shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --bg: #f5f5f4;
+    --card: #ffffff;
+    --text: #1c1917;
+    --muted: #57534e;
+    --border: #e7e5e4;
+    --detail-bg: #fafaf9;
+    --success: #15803d;
+    --success-tint: #dcfce7;
+    --error: #b91c1c;
+    --error-tint: #fee2e2;
 }
 
 @media (prefers-color-scheme: dark) {
     :root {
-        --primary-color: #27ae60;
-        --error-color: #ff6b6b;
-        --text-color: #f8f9fa;
-        --bg-color: #1a1a1a;
-        --card-bg: #2d2d2d;
-        --border-color: #404040;
-        --shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        --bg: #0c0a09;
+        --card: #1c1917;
+        --text: #f5f5f4;
+        --muted: #a8a29e;
+        --border: #292524;
+        --detail-bg: #0c0a09;
+        --success: #4ade80;
+        --success-tint: #14532d;
+        --error: #f87171;
+        --error-tint: #450a0a;
     }
 }
 
 * {
-    margin: 0;
-    padding: 0;
     box-sizing: border-box;
+    margin: 0;
 }
 
 body {
-    font-family: var(--font-family);
-    background-color: var(--bg-color);
-    color: var(--text-color);
-    line-height: 1.6;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     min-height: 100vh;
-    padding: 20px;
+    display: grid;
+    place-items: center;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
 }
 
-.container {
-    background-color: var(--card-bg);
-    border-radius: 12px;
-    padding: 40px;
-    box-shadow: var(--shadow);
-    border: 1px solid var(--border-color);
-    max-width: 500px;
+.card {
     width: 100%;
+    max-width: 400px;
+    padding: 40px 32px 32px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 8px 24px rgb(0 0 0 / 0.06);
     text-align: center;
-    animation: slideIn 0.3s ease-out;
-}
-
-@keyframes slideIn {
-    from {
-        opacity: 0;
-        transform: translateY(20px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
+    animation: enter 0.25s ease-out;
 }
 
 .icon {
-    width: 64px;
-    height: 64px;
-    margin: 0 auto 24px;
-    background-color: var(--error-color);
+    width: 48px;
+    height: 48px;
+    padding: 12px;
+    margin-bottom: 20px;
     border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    animation: pulse 2s infinite;
+    fill: none;
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
 }
 
-@keyframes pulse {
-    0%, 100% {
-        transform: scale(1);
-    }
-    50% {
-        transform: scale(1.05);
-    }
+.success .icon {
+    background: var(--success-tint);
+    stroke: var(--success);
 }
 
-.icon::before {
-    content: "✕";
-    color: white;
-    font-size: 32px;
-    font-weight: bold;
-}
-
-.checkmark {
-    width: 80px;
-    height: 80px;
-    margin: 0 auto 24px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background-color: var(--primary-color);
-    animation: checkmarkAppear 0.6s ease-out 0.3s both;
-}
-
-@keyframes checkmarkAppear {
-    0% {
-        transform: scale(0);
-        opacity: 0;
-    }
-    50% {
-        transform: scale(1.2);
-    }
-    100% {
-        transform: scale(1);
-        opacity: 1;
-    }
-}
-
-.checkmark::before {
-    content: "✓";
-    color: white;
-    font-size: 40px;
-    font-weight: bold;
-    animation: checkmarkDraw 0.4s ease-out 0.9s both;
-}
-
-@keyframes checkmarkDraw {
-    0% {
-        opacity: 0;
-        transform: scale(0.5);
-    }
-    100% {
-        opacity: 1;
-        transform: scale(1);
-    }
+.error .icon {
+    background: var(--error-tint);
+    stroke: var(--error);
 }
 
 h1 {
-    font-size: 28px;
+    font-size: 20px;
     font-weight: 600;
-    margin-bottom: 16px;
-    animation: fadeIn 0.6s ease-out 0.6s both;
+    letter-spacing: -0.01em;
+    margin-bottom: 8px;
 }
 
-h1.success {
-    color: var(--primary-color);
+p {
+    color: var(--muted);
 }
 
-h1.error {
-    color: var(--error-color);
+.detail {
+    margin: 16px 0;
+    padding: 12px 14px;
+    background: var(--detail-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-align: left;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
-@keyframes fadeIn {
+@keyframes enter {
     from {
         opacity: 0;
-        transform: translateY(10px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
+        transform: translateY(4px);
     }
 }
 
-.message {
-    font-size: 16px;
-    color: var(--text-color);
-    margin-bottom: 24px;
-    word-wrap: break-word;
-    animation: fadeIn 0.6s ease-out 0.8s both;
-}
-
-.instruction {
-    font-size: 14px;
-    color: #6c757d;
-    padding: 16px;
-    background-color: var(--bg-color);
-    border-radius: 8px;
-    border-left: 4px solid var(--primary-color);
-    animation: fadeIn 0.6s ease-out 0.8s both;
-}
-
-.instruction.error {
-    border-left-color: var(--error-color);
-}
-
-@media (max-width: 480px) {
-    .container {
-        padding: 24px;
-    }
-
-    h1 {
-        font-size: 24px;
-    }
-
-    .icon {
-        width: 48px;
-        height: 48px;
-    }
-
-    .icon::before {
-        font-size: 24px;
-    }
-
-    .checkmark {
-        width: 64px;
-        height: 64px;
-    }
-
-    .checkmark::before {
-        font-size: 32px;
+@media (prefers-reduced-motion: reduce) {
+    .card {
+        animation: none;
     }
 }
