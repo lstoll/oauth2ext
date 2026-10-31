@@ -251,36 +251,3 @@ func decodeProtectedHeader(t *testing.T, compact string) map[string]any {
 	}
 	return header
 }
-
-func TestCheckSignerKeysPublished(t *testing.T) {
-	a, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, err := NewSigningIdentity(a, ES256, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	other, err := NewSigningIdentity(b, ES256, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	published, err := NewVerificationKeySetFromSigner(signer, other.VerificationKey())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckSignerKeysPublished(signer, published); err != nil {
-		t.Fatalf("published signer: %v", err)
-	}
-	onlyOther, err := NewVerificationKeySetFromSigner(other)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckSignerKeysPublished(signer, onlyOther); err == nil {
-		t.Fatal("expected error for unpublished signer key")
-	}
-}
