@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -38,6 +39,10 @@ type Config struct {
 	// scopes, and any other authentication context used to obtain the token.
 	// Helper methods are provided to calculate this. It is required explicitly;
 	// it is never inferred from a concrete OAuth client configuration.
+	//
+	// An entry records whether it is DPoP-bound, and an entry that doesn't
+	// match the DPoPKeys setting is replaced by a new token. To cache DPoP and
+	// bearer tokens for the same client side by side, reflect that in the key.
 	CacheKey string
 	// WrappedSource is the oauth2.TokenSource we retrieve tokens to cache from.
 	// It must implement DPoPTokenSource if DPoPKeys is set.
@@ -53,6 +58,10 @@ type Config struct {
 	// is usually the same platform Store as Cache, as key handles are only
 	// usable with the store that created them.
 	DPoPKeys DPoPKeyStore
+	// Logger receives debug logs about cache entries that could not be used,
+	// such as failed refreshes and DPoP keys that could not be loaded. If nil,
+	// nothing is logged.
+	Logger *slog.Logger
 	// EarlyExpiry is the amount of time before the tokens expiration we will
 	// consider it expired, and refresh it. Defaults to DefaultEarlyExpiry, set
 	// to a negative value to disable.
@@ -102,8 +111,12 @@ func (c *Config) TokenSource(ctx context.Context) (*TokenSource, error) {
 
 // Token checks the cache for a token, and if it exists and is valid returns it.
 // Otherwise, it will call the upstream Token source and cache the result,
-// before returning it. When DPoP is enabled, use DPoPToken or Client to also
-// obtain the key the token is bound to.
+// before returning it.
+//
+// When DPoP is enabled, the access token is only usable with its key. Don't
+// wrap this source with oauth2.NewClient, as that sends the token without a
+// DPoP proof; use Client, or DPoPToken to obtain the key. Token remains useful
+// for reading the ID token.
 func (s *TokenSource) Token() (*oauth2.Token, error) {
 	tok, _, err := s.DPoPToken()
 	return tok, err
@@ -115,6 +128,11 @@ func (s *TokenSource) DPoPToken() (*oauth2.Token, *jwt.SigningIdentity, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	log := s.cfg.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+
 	cred, err := s.cfg.Cache.Get(s.cfg.Issuer, s.cfg.CacheKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cache get: %v", err)
@@ -122,6 +140,7 @@ func (s *TokenSource) DPoPToken() (*oauth2.Token, *jwt.SigningIdentity, error) {
 	// A credential whose binding does not match the configuration can be
 	// neither returned nor refreshed, so treat it as a miss.
 	if cred != nil && (cred.Token == nil || (s.cfg.DPoPKeys != nil) != (cred.DPoPKey != nil)) {
+		log.Debug("ignoring cached credential with mismatched DPoP binding", "issuer", s.cfg.Issuer, "key", s.cfg.CacheKey)
 		cred = nil
 	}
 
@@ -138,6 +157,7 @@ func (s *TokenSource) DPoPToken() (*oauth2.Token, *jwt.SigningIdentity, error) {
 		// means a new login with a new key.
 		var loadErr error
 		if signer, loadErr = s.loadKey(cred.DPoPKey); loadErr != nil {
+			log.Debug("ignoring cached credential whose DPoP key could not be loaded", "issuer", s.cfg.Issuer, "key", s.cfg.CacheKey, "error", loadErr)
 			cred, signer = nil, nil
 		}
 	}
@@ -154,9 +174,11 @@ func (s *TokenSource) DPoPToken() (*oauth2.Token, *jwt.SigningIdentity, error) {
 		if signer != nil {
 			ctx = dpop.OAuth2Context(ctx, signer)
 		}
-		// ignore errors here, just let it fail to a new token
+		// on error, fall back to a new token
 		if t, err := s.cfg.TokenSourceProvider.TokenSource(ctx, cred.Token).Token(); err == nil {
 			newCred = &Credential{Token: t, DPoPKey: cred.DPoPKey}
+		} else {
+			log.Debug("refreshing cached token failed, fetching a new one", "issuer", s.cfg.Issuer, "key", s.cfg.CacheKey, "error", err)
 		}
 	}
 

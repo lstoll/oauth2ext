@@ -13,8 +13,16 @@ import (
 // * macOS, using Keychain and the Secure Enclave: `import _ "lds.li/oauth2ext/keychainsecrets/auto`
 // * Windows/Linux, using TPM: `import _ "lds.li/oauth2ext/tpmsecrets/auto`
 func BestStore() tokencache.Store {
-	if s := platformsecrets.Best(); s != nil {
+	if s := PlatformStore(); s != nil {
 		return s
 	}
 	return &MemCredentialCache{}
+}
+
+// PlatformStore returns the most preferred available platform store, or nil
+// if none is available. Unlike BestStore, it never falls back to memory, so
+// callers that require hardware-bound DPoP keys and persistent caching can
+// detect their absence.
+func PlatformStore() tokencache.Store {
+	return platformsecrets.Best()
 }
