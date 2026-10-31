@@ -372,36 +372,3 @@ func publicKeysEqual(a, b crypto.PublicKey) bool {
 	equal, ok := a.(interface{ Equal(crypto.PublicKey) bool })
 	return ok && equal.Equal(b)
 }
-
-// CheckSignerKeysPublished returns an error unless keys contains each of
-// signer's active public keys with the same kid and a compatible alg. Call it
-// at startup to catch a signer whose tokens relying parties cannot verify. It
-// checks one moment in time; rotation still has to publish keys first.
-func CheckSignerKeysPublished(signer Signer, keys *VerificationKeySet) error {
-	if signer == nil || keys == nil {
-		return fmt.Errorf("jwt: signer and verification keys are required")
-	}
-	state := keys.state.Load()
-	if state == nil {
-		return fmt.Errorf("jwt: invalid key set")
-	}
-	for _, active := range signer.verificationKeys() {
-		found := false
-		for _, published := range state.jwks.Keys {
-			if published.KeyID != active.KeyID {
-				continue
-			}
-			if published.Algorithm != "" && published.Algorithm != string(active.Algorithm) {
-				continue
-			}
-			if publicKeysEqual(published.Key, active.Key) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("jwt: signing key %q (%s) is not in the verification key set", active.KeyID, active.Algorithm)
-		}
-	}
-	return nil
-}
