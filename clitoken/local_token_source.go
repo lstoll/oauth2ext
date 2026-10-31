@@ -82,8 +82,8 @@ func (c *Config) getPortRange() (low uint16, high uint16) {
 // that are required.
 //
 // This will trigger the auth flow each time, in practice the result should be
-// cached. The resulting tokens are not verified, and the caller should verify
-// if desired.
+// cached, e.g. with tokencache. The resulting tokens are not verified, and the
+// caller should verify if desired.
 //
 // Example:
 //
@@ -115,11 +115,11 @@ func (c *Config) getPortRange() (low uint16, high uint16) {
 //	}
 //
 //	// use token
-func (c *Config) TokenSource(ctx context.Context) (oauth2.TokenSource, error) {
+func (c *Config) TokenSource(ctx context.Context) (*TokenSource, error) {
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
-	return &cliTokenSource{ctx: ctx, cfg: c}, nil
+	return &TokenSource{ctx: ctx, cfg: c}, nil
 }
 
 func (c *Config) validate() error {
@@ -138,31 +138,37 @@ func (c *Config) validate() error {
 	return nil
 }
 
-type cliTokenSource struct {
+// TokenSource runs the CLI authorization code flow, created by
+// Config.TokenSource. It implements oauth2.TokenSource, and
+// tokencache.DPoPTokenSource so tokencache can bind its tokens to DPoP keys.
+type TokenSource struct {
 	mu  sync.Mutex
 	ctx context.Context
 	cfg *Config
 }
 
-var _ tokencache.DPoPTokenSource = (*cliTokenSource)(nil)
+var (
+	_ oauth2.TokenSource         = (*TokenSource)(nil)
+	_ tokencache.DPoPTokenSource = (*TokenSource)(nil)
+)
 
 // Token attempts to a fetch a token. The user will be required to open a URL
 // in their browser and authenticate to the upstream IdP.
-func (c *cliTokenSource) Token() (*oauth2.Token, error) {
+func (c *TokenSource) Token() (*oauth2.Token, error) {
 	return c.token(nil)
 }
 
 // DPoPToken fetches a token as Token does, binding it to signer. The
 // authorization request carries the key's thumbprint as dpop_jkt, and the code
 // exchange carries a DPoP proof.
-func (c *cliTokenSource) DPoPToken(signer *jwt.SigningIdentity) (*oauth2.Token, error) {
+func (c *TokenSource) DPoPToken(signer *jwt.SigningIdentity) (*oauth2.Token, error) {
 	if signer == nil {
 		return nil, fmt.Errorf("DPoP signer is required")
 	}
 	return c.token(signer)
 }
 
-func (c *cliTokenSource) token(signer *jwt.SigningIdentity) (*oauth2.Token, error) {
+func (c *TokenSource) token(signer *jwt.SigningIdentity) (*oauth2.Token, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

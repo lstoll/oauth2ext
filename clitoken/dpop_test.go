@@ -16,7 +16,6 @@ import (
 	"lds.li/oauth2ext/dpop"
 	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2client"
-	"lds.li/oauth2ext/tokencache"
 )
 
 func TestLocalTokenSourceDPoP(t *testing.T) {
@@ -64,10 +63,7 @@ func TestLocalTokenSourceDPoP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dts, ok := ts.(tokencache.DPoPTokenSource)
-	if !ok {
-		t.Fatal("token source does not implement tokencache.DPoPTokenSource")
-	}
+	dts := ts
 
 	type result struct {
 		tok *oauth2.Token

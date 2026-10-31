@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -265,4 +266,51 @@ func mustValidator(t *testing.T, opts *dpop.ValidatorOpts) *dpop.Validator {
 		t.Fatal(err)
 	}
 	return v
+}
+
+func TestSwitchingDPoPModeReplacesEntry(t *testing.T) {
+	store := newTestStore()
+	source := &fakeDPoPSource{tokenType: "DPoP"}
+	dpopCfg := &Config{Issuer: "iss", CacheKey: "k", WrappedSource: source, Cache: store, DPoPKeys: store}
+	bearerCfg := &Config{Issuer: "iss", CacheKey: "k", WrappedSource: source, Cache: store}
+
+	for _, cfg := range []*Config{dpopCfg, bearerCfg, dpopCfg, bearerCfg} {
+		ts, err := cfg.TokenSource(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ts.Token(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(source.signers) != 2 || source.bearer != 2 {
+		t.Fatalf("got %d DPoP fetches and %d bearer fetches, want each mode switch to fetch a new token", len(source.signers), source.bearer)
+	}
+}
+
+func TestRefreshFailureIsLogged(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	store := newTestStore()
+	store.creds["iss;k"] = &Credential{Token: &oauth2.Token{AccessToken: "old", RefreshToken: "r", Expiry: time.Now().Add(-time.Minute)}}
+	var logs strings.Builder
+	ts, err := (&Config{
+		Issuer: "iss", CacheKey: "k", WrappedSource: &fakeDPoPSource{}, Cache: store,
+		TokenSourceProvider: &oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: server.URL}},
+		Logger:              slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}).TokenSource(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok, err := ts.Token(); err != nil || tok.AccessToken != "bearer" {
+		t.Fatalf("want fallback token, got %+v, %v", tok, err)
+	}
+	if !strings.Contains(logs.String(), "refreshing cached token failed") || !strings.Contains(logs.String(), "invalid_grant") {
+		t.Fatalf("refresh failure not logged: %s", logs.String())
+	}
 }
