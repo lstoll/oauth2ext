@@ -186,14 +186,28 @@ func (c *TokenSource) token(signer *jwt.SigningIdentity) (*oauth2.Token, error) 
 
 	mux := http.NewServeMux()
 
-	var calls atomic.Uint32
+	// Only a callback carrying this flow's state completes it. Others, such as
+	// stale or forged callbacks, are rejected without affecting the login.
+	var completed atomic.Bool
 	mux.HandleFunc("GET /callback", func(w http.ResponseWriter, r *http.Request) {
+		renderError := func(msg string) {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, msg)
+		}
+
+		if gotState := r.FormValue("state"); gotState == "" || gotState != state {
+			renderError("bad state")
+			return
+		}
+		if !completed.CompareAndSwap(false, true) {
+			renderError("callback invoked multiple times")
+			return
+		}
+
 		if errMsg := r.FormValue("error"); errMsg != "" {
 			err := fmt.Errorf("%s: %s", errMsg, r.FormValue("error_description"))
 			resultCh <- result{err: err}
-
-			w.WriteHeader(http.StatusBadRequest)
-			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, err.Error())
+			renderError(err.Error())
 			return
 		}
 
@@ -201,27 +215,7 @@ func (c *TokenSource) token(signer *jwt.SigningIdentity) (*oauth2.Token, error) 
 		if code == "" {
 			err := fmt.Errorf("no code in request")
 			resultCh <- result{err: err}
-
-			w.WriteHeader(http.StatusBadRequest)
-			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, err.Error())
-			return
-		}
-
-		gotState := r.FormValue("state")
-		if gotState == "" || gotState != state {
-			err := fmt.Errorf("bad state")
-			resultCh <- result{err: err}
-
-			w.WriteHeader(http.StatusBadRequest)
-			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, err.Error())
-			return
-		}
-
-		if calls.Add(1) > 1 {
-			// Callback has been invoked multiple times, which should not happen.
-			// Bomb out to avoid a blocking channel write and to float this as a bug.
-			w.WriteHeader(http.StatusBadRequest)
-			_ = c.cfg.getRenderer().RenderLocalTokenSourceError(w, "callback invoked multiple times")
+			renderError(err.Error())
 			return
 		}
 
