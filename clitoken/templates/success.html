@@ -1,20 +1,4 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authentication Successful</title>
-    <style>
-        {{.CSS}}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="checkmark"></div>
-        <h1 class="success">Authentication Successful</h1>
-        <div class="instruction">
-            You can now return to your terminal to continue.
-        </div>
-    </div>
-</body>
-</html>
+{{define "kind"}}success{{end}}
+{{define "title"}}You're signed in{{end}}
+{{define "icon"}}<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>{{end}}
+{{define "body"}}<p>You can close this tab and return to your terminal.</p>{{end}}

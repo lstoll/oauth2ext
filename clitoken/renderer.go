@@ -23,8 +23,8 @@ func init() {
 
 // Templates
 var (
-	tmplError       = template.Must(template.ParseFS(templateFS, "templates/error.html"))
-	tmplTokenIssued = template.Must(template.ParseFS(templateFS, "templates/success.html"))
+	tmplError       = template.Must(template.ParseFS(templateFS, "templates/layout.html", "templates/error.html"))
+	tmplTokenIssued = template.Must(template.ParseFS(templateFS, "templates/layout.html", "templates/success.html"))
 )
 
 type Renderer interface {
@@ -41,7 +41,7 @@ func (r *renderer) RenderLocalTokenSourceTokenIssued(w io.Writer) error {
 	}{
 		CSS: template.CSS(cssContent),
 	}
-	return tmplTokenIssued.Execute(w, data)
+	return tmplTokenIssued.ExecuteTemplate(w, "layout", data)
 }
 
 // RenderLocalTokenSourceError renders an unrecoverable error.
@@ -53,5 +53,5 @@ func (r *renderer) RenderLocalTokenSourceError(w io.Writer, message string) erro
 		CSS:     template.CSS(cssContent),
 		Message: message,
 	}
-	return tmplError.Execute(w, data)
+	return tmplError.ExecuteTemplate(w, "layout", data)
 }

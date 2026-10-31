@@ -3,6 +3,7 @@ package clitoken
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -205,7 +206,10 @@ func (c *TokenSource) token(signer *jwt.SigningIdentity) (*oauth2.Token, error) 
 		}
 
 		if errMsg := r.FormValue("error"); errMsg != "" {
-			err := fmt.Errorf("%s: %s", errMsg, r.FormValue("error_description"))
+			err := errors.New(errMsg)
+			if desc := r.FormValue("error_description"); desc != "" {
+				err = fmt.Errorf("%s: %s", errMsg, desc)
+			}
 			resultCh <- result{err: err}
 			renderError(err.Error())
 			return

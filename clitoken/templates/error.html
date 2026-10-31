@@ -1,21 +1,5 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authentication Error</title>
-    <style>
-        {{.CSS}}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="icon"></div>
-        <h1 class="error">Authentication Error</h1>
-        <div class="message">{{.Message}}</div>
-        <div class="instruction error">
-            Please return to your terminal to try again.
-        </div>
-    </div>
-</body>
-</html>
+{{define "kind"}}error{{end}}
+{{define "title"}}Sign-in failed{{end}}
+{{define "icon"}}<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>{{end}}
+{{define "body"}}{{with .Message}}<pre class="detail">{{.}}</pre>{{end}}
+<p>Return to your terminal to try again.</p>{{end}}
