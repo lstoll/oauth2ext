@@ -12,6 +12,7 @@ import (
 const (
 	issuer1         = "https://issuer1.test"
 	issuer1ClientID = "clientID"
+	testService     = "oauth2ext-keychainsecrets-test"
 )
 
 func TestKeychainCredentialCache(t *testing.T) {
@@ -20,13 +21,28 @@ func TestKeychainCredentialCache(t *testing.T) {
 		return
 	}
 
-	cache := &KeychainCredentialCache{}
+	// Entries are left in place for TestKeychainCredentialCacheExisting and
+	// TestKeychainCredentialCacheOtherBinary, run later by CI.
+	cache := &KeychainCredentialCache{Service: testService}
 
 	if !cache.Available() {
 		t.Fatal("cache is not available")
 	}
 
 	platformsecrets.TestCache(t, cache)
+}
+
+func TestKeychainCredentialCacheDPoPKeys(t *testing.T) {
+	// Secure Enclave keys need hardware, which CI VMs lack.
+	if os.Getenv("TEST_KEYCHAIN") == "" || os.Getenv("TEST_SECURE_ENCLAVE") == "" {
+		t.Skip("TEST_KEYCHAIN and TEST_SECURE_ENCLAVE not set")
+		return
+	}
+
+	cache := &KeychainCredentialCache{Service: testService + "-dpop"}
+	t.Cleanup(func() { _ = cache.DeleteAll() })
+
+	platformsecrets.TestStore(t, cache)
 }
 
 func TestKeychainCredentialCacheExisting(t *testing.T) {
@@ -37,13 +53,30 @@ func TestKeychainCredentialCacheExisting(t *testing.T) {
 		return
 	}
 
-	cache := &KeychainCredentialCache{}
+	cache := &KeychainCredentialCache{Service: testService}
 
 	if !cache.Available() {
 		t.Fatal("cache is not available")
 	}
 
-	if tok, err := cache.Get(issuer1, issuer1ClientID); err != nil || tok == nil {
-		t.Fatalf("failed to get existing value, got tok: %v err: %v", t, err)
+	if cred, err := cache.Get(issuer1, issuer1ClientID); err != nil || cred == nil {
+		t.Fatalf("failed to get existing value, got cred: %v err: %v", cred, err)
+	}
+}
+
+func TestKeychainCredentialCacheOtherBinary(t *testing.T) {
+	// This test requires access to macOS Keychain. It assumes the entry was
+	// written by a different build of this test executable, so the binary
+	// identity doesn't match and the entry must be a miss.
+	if os.Getenv("TEST_KEYCHAIN_CREDENTIAL_CACHE_OTHER_BINARY") == "" {
+		t.Skip("TEST_KEYCHAIN_CREDENTIAL_CACHE_OTHER_BINARY not set")
+		return
+	}
+
+	cache := &KeychainCredentialCache{Service: testService}
+	t.Cleanup(func() { _ = cache.DeleteAll() })
+
+	if cred, err := cache.Get(issuer1, issuer1ClientID); err != nil || cred != nil {
+		t.Fatalf("entry from another binary was not a miss, got cred: %v err: %v", cred, err)
 	}
 }

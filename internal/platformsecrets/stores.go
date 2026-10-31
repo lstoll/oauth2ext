@@ -1,51 +1,25 @@
 package platformsecrets
 
 import (
-	"crypto"
-
 	"lds.li/oauth2ext/tokencache"
 )
 
-var (
-	platformCaches  = []tokencache.CredentialCache{}
-	platformSigners = []func() (crypto.Signer, error){}
-)
+var platformStores = []tokencache.Store{}
 
-// RegisterCredentialCache registers a credential cache. This is intended to be
+// Register registers a platform credential store. This is intended to be
 // called by platform specific packages (e.g. tpmsecrets) in their init
-// functions.
-func RegisterCredentialCache(c tokencache.CredentialCache) {
-	platformCaches = append([]tokencache.CredentialCache{c}, platformCaches...)
+// functions. Later registrations are preferred.
+func Register(s tokencache.Store) {
+	platformStores = append([]tokencache.Store{s}, platformStores...)
 }
 
-// BestCredentialCache returns the most preferred available credential client
-// for the platform and environment.
-func BestCredentialCache() tokencache.CredentialCache {
-	for _, c := range platformCaches {
-		if c.Available() {
-			return c
+// Best returns the most preferred available store for the platform and
+// environment, or nil if none are available.
+func Best() tokencache.Store {
+	for _, s := range platformStores {
+		if s.Available() {
+			return s
 		}
 	}
-
-	return nil
-}
-
-// RegisterPlatformSigner registers a signer. This is intended to be called by
-// platform specific packages (e.g. tpmsecrets) in their init functions.
-func RegisterPlatformSigner(f func() (crypto.Signer, error)) {
-	platformSigners = append([]func() (crypto.Signer, error){f}, platformSigners...)
-}
-
-// BestPlatformSigner returns the most preferred available signer for the
-// platform and environment, to be used for signing DPoP proofs in CLI tools.
-func BestPlatformSigner() crypto.Signer {
-	for _, s := range platformSigners {
-		signer, err := s()
-		if err != nil {
-			continue
-		}
-		return signer
-	}
-
 	return nil
 }

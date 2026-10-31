@@ -33,16 +33,16 @@ type memCache struct {
 
 var _ CredentialCache = &memCache{}
 
-func (m *memCache) Get(issuer, key string) (*oauth2.Token, error) {
+func (m *memCache) Get(issuer, key string) (*Credential, error) {
 	v, ok := m.cache[issuer+key]
 	if ok {
-		return &v, nil
+		return &Credential{Token: &v}, nil
 	}
 	return nil, nil
 }
 
-func (m *memCache) Set(issuer, key string, token *oauth2.Token) error {
-	m.cache[issuer+key] = *token
+func (m *memCache) Set(issuer, key string, cred *Credential) error {
+	m.cache[issuer+key] = *cred.Token
 	return nil
 }
 

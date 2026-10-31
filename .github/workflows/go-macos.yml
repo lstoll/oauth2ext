@@ -44,7 +44,6 @@ jobs:
       env:
         CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
         TEST_KEYCHAIN: 1
-        TEST_CTK_IDENTITY: 1
 
     - name: Build & Test (tpmsecrets)
       working-directory: ./tpmsecrets
@@ -62,7 +61,6 @@ jobs:
       env:
         CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
         TEST_KEYCHAIN: 1
-        TEST_CTK_IDENTITY: 1
 
 
     # The goal here is to test against the keychain. We expect the same binary
@@ -84,7 +82,6 @@ jobs:
         CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
         TEST_KEYCHAIN: 1
         TEST_KEYCHAIN_CREDENTIAL_CACHE: 1
-        TEST_KEYCHAIN_CLI_CREDENTIAL_CACHE: 1
 
     - name: Test CLI Token with existing entry
       working-directory: ./keychainsecrets
@@ -120,5 +117,4 @@ jobs:
       run: ./keychainsecrets.test -test.v -test.timeout=15s
       env:
         CGO_ENABLED: ${{ matrix.envs.CGO_ENABLED }}
-        TEST_KEYCHAIN_CREDENTIAL_CACHE: 1
-        TEST_KEYCHAIN_CLI_CREDENTIAL_CACHE: 1
+        TEST_KEYCHAIN_CREDENTIAL_CACHE_OTHER_BINARY: 1

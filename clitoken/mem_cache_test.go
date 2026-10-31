@@ -13,5 +13,5 @@ func TestMemoryWriteThroughCredentialCache(t *testing.T) {
 		t.Fatal("cache is not available")
 	}
 
-	platformsecrets.TestCache(t, cache)
+	platformsecrets.TestStore(t, cache)
 }

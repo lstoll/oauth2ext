@@ -5,17 +5,19 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
-	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/oidc"
+	"lds.li/oauth2ext/tokencache"
 )
 
-// TPMCredentialCache implements tokencache.CredentialCache using a TPM-sealed
-// data key and AES-256-GCM envelope encryption.
+// TPMCredentialCache implements tokencache.Store using a TPM-sealed data key and
+// AES-256-GCM envelope encryption. DPoP keys are per-credential TPM keys whose
+// wrapped blobs are stored in the cache next to the token.
 type TPMCredentialCache struct {
 	Dir string
 
@@ -38,63 +40,58 @@ func (c *TPMCredentialCache) Available() bool {
 	return false
 }
 
-func (c *TPMCredentialCache) Get(issuer, key string) (*oauth2.Token, error) {
-	dataPath := filepath.Join(c.Dir, cacheDataFile)
-	encData, err := readCredentialCache(dataPath)
+type cacheEntry struct {
+	Token   *oidc.TokenWithID `json:"token"`
+	DPoPKey []byte            `json:"dpop_key,omitzero"`
+}
+
+var _ tokencache.Store = (*TPMCredentialCache)(nil)
+
+// Get returns the credential for the issuer and key. It does not take the
+// lock, as the cache file is replaced atomically.
+func (c *TPMCredentialCache) Get(issuer, key string) (*tokencache.Credential, error) {
+	entries, err := c.load()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-
-	plaintext, err := decryptCredentialCache(c.keySealer(), encData)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt failed: %w", err)
+	e, ok := entries[c.cacheKey(issuer, key)]
+	if !ok || e == nil || e.Token == nil {
+		return nil, nil
 	}
-	defer clear(plaintext)
-
-	// Parse
-	var tokens map[string]*oidc.TokenWithID
-	if err := json.Unmarshal(plaintext, &tokens); err != nil {
-		return nil, fmt.Errorf("json unmarshal: %w", err)
-	}
-
-	cacheKey := c.cacheKey(issuer, key)
-	if t, ok := tokens[cacheKey]; ok {
-		return t.Token, nil
-	}
-
-	return nil, nil
+	return &tokencache.Credential{Token: e.Token.Token, DPoPKey: e.DPoPKey}, nil
 }
 
-func (c *TPMCredentialCache) Set(issuer, key string, token *oauth2.Token) error {
-	// Read existing data to merge
-	var tokens map[string]*oidc.TokenWithID
-	dataPath := filepath.Join(c.Dir, cacheDataFile)
-	encData, err := readCredentialCache(dataPath)
+func (c *TPMCredentialCache) Set(issuer, key string, cred *tokencache.Credential) error {
+	if cred == nil || cred.Token == nil {
+		return errors.New("credential must have a token")
+	}
+	if err := os.MkdirAll(c.Dir, 0700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(filepath.Join(c.Dir, cacheLockFile), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("opening cache lock: %w", err)
+	}
+	defer lock.Close()
+	unlock, err := lockFile(lock)
+	if err != nil {
+		return fmt.Errorf("locking cache: %w", err)
+	}
+	defer unlock()
+
+	entries, err := c.load()
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reading existing credential cache: %w", err)
 	}
-	if err == nil {
-		plaintext, err := decryptCredentialCache(c.keySealer(), encData)
-		if err != nil {
-			return fmt.Errorf("decrypting existing credential cache: %w", err)
-		}
-		decodeErr := json.Unmarshal(plaintext, &tokens)
-		clear(plaintext)
-		if decodeErr != nil {
-			return fmt.Errorf("decoding existing credential cache: %w", decodeErr)
-		}
+	if entries == nil {
+		entries = make(map[string]*cacheEntry)
 	}
-	if tokens == nil {
-		tokens = make(map[string]*oidc.TokenWithID)
-	}
+	entries[c.cacheKey(issuer, key)] = &cacheEntry{Token: &oidc.TokenWithID{Token: cred.Token}, DPoPKey: cred.DPoPKey}
 
-	// Update
-	tokens[c.cacheKey(issuer, key)] = &oidc.TokenWithID{Token: token}
-
-	newData, err := json.Marshal(tokens)
+	newData, err := json.Marshal(entries)
 	if err != nil {
 		return err
 	}
@@ -104,8 +101,55 @@ func (c *TPMCredentialCache) Set(issuer, key string, token *oauth2.Token) error 
 	if err != nil {
 		return err
 	}
+	return writeFileAtomic(filepath.Join(c.Dir, cacheDataFile), ciphertext)
+}
 
-	return writeBlob(dataPath, ciphertext)
+// load reads and decrypts the cache file. A missing file returns an error
+// satisfying os.IsNotExist.
+func (c *TPMCredentialCache) load() (map[string]*cacheEntry, error) {
+	encData, err := readCredentialCache(filepath.Join(c.Dir, cacheDataFile))
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := decryptCredentialCache(c.keySealer(), encData)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting credential cache: %w", err)
+	}
+	defer clear(plaintext)
+	var entries map[string]*cacheEntry
+	if err := json.Unmarshal(plaintext, &entries); err != nil {
+		return nil, fmt.Errorf("decoding credential cache: %w", err)
+	}
+	return entries, nil
+}
+
+// writeFileAtomic writes data to a temp file in the same directory, then
+// renames it over path.
+func writeFileAtomic(path string, data []byte) (err error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if _, err = tmp.Write(data); err != nil {
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 func (c *TPMCredentialCache) cacheKey(issuer, key string) string {

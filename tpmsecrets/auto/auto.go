@@ -1,8 +1,6 @@
 package auto
 
 import (
-	"crypto"
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -20,13 +18,5 @@ func init() {
 	}
 	tpmDir := filepath.Join(cacheDir, "lds-oauth2ext-tpm")
 
-	platformsecrets.RegisterPlatformSigner(func() (crypto.Signer, error) {
-		s := &tpmsecrets.TPMSigner{Dir: tpmDir}
-		if !tpmsecrets.IsTPMAvailable() {
-			return nil, fmt.Errorf("TPM not available")
-		}
-		return s, nil
-	})
-
-	platformsecrets.RegisterCredentialCache(&tpmsecrets.TPMCredentialCache{Dir: tpmDir})
+	platformsecrets.Register(&tpmsecrets.TPMCredentialCache{Dir: tpmDir})
 }

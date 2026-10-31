@@ -11,7 +11,10 @@ import (
 	"sync/atomic"
 
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/dpop"
+	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oauth2client"
+	"lds.li/oauth2ext/tokencache"
 )
 
 // Config configures a CLI local token source. This is used to implement the
@@ -141,9 +144,25 @@ type cliTokenSource struct {
 	cfg *Config
 }
 
+var _ tokencache.DPoPTokenSource = (*cliTokenSource)(nil)
+
 // Token attempts to a fetch a token. The user will be required to open a URL
 // in their browser and authenticate to the upstream IdP.
 func (c *cliTokenSource) Token() (*oauth2.Token, error) {
+	return c.token(nil)
+}
+
+// DPoPToken fetches a token as Token does, binding it to signer. The
+// authorization request carries the key's thumbprint as dpop_jkt, and the code
+// exchange carries a DPoP proof.
+func (c *cliTokenSource) DPoPToken(signer *jwt.SigningIdentity) (*oauth2.Token, error) {
+	if signer == nil {
+		return nil, fmt.Errorf("DPoP signer is required")
+	}
+	return c.token(signer)
+}
+
+func (c *cliTokenSource) token(signer *jwt.SigningIdentity) (*oauth2.Token, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -232,6 +251,9 @@ func (c *cliTokenSource) Token() (*oauth2.Token, error) {
 	// Bind this flow's callback without mutating shared client configuration.
 	redirectURL := fmt.Sprintf("http://127.0.0.1:%d/callback", tcpAddr.Port)
 	acopts = append(acopts, oauth2.SetAuthURLParam("redirect_uri", redirectURL))
+	if signer != nil {
+		acopts = append(acopts, oauth2.SetAuthURLParam("dpop_jkt", signer.Thumbprint()))
+	}
 
 	authURL := c.cfg.OAuth2Client.AuthCodeURL(state, acopts...)
 
@@ -256,7 +278,11 @@ func (c *cliTokenSource) Token() (*oauth2.Token, error) {
 	if verifier != "" {
 		exchopts = append(exchopts, oauth2.VerifierOption(verifier))
 	}
-	return c.cfg.OAuth2Client.Exchange(c.ctx, res.code, exchopts...)
+	exchctx := c.ctx
+	if signer != nil {
+		exchctx = dpop.OAuth2Context(exchctx, signer)
+	}
+	return c.cfg.OAuth2Client.Exchange(exchctx, res.code, exchopts...)
 }
 
 func newLocalTCPListenerInRange(portLow uint16, portHigh uint16) (net.Listener, error) {
