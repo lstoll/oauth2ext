@@ -5,166 +5,36 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"encoding/asn1"
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"math/big"
-	"path/filepath"
-	"sync"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
 )
 
-type TPMSigner struct {
-	Dir string
+// dpopHandleVersion is the first byte of a DPoP key handle. The handle is:
+//
+//	version (1 byte) | uint32 BE length | TPM2B_PUBLIC | uint32 BE length | TPM2B_PRIVATE
+//
+// where the parts are the marshaled TPM structures, wrapped by the SRK.
+const dpopHandleVersion = 1
 
-	mu        sync.Mutex
-	publicKey crypto.PublicKey
-}
-
-func (s *TPMSigner) Public() crypto.PublicKey {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.publicKey != nil {
-		return s.publicKey
-	}
-
+// NewDPoPKey creates a new P-256 signing key under the SRK. The returned
+// handle is the wrapped key, and is only usable on this TPM. Nothing is
+// persisted by this call.
+func (c *TPMCredentialCache) NewDPoPKey() ([]byte, crypto.Signer, error) {
 	rwc, err := openTPM()
 	if err != nil {
-		return nil
+		return nil, nil, err
 	}
 	defer closeTPM(rwc)
 
-	keyHandle, err := s.loadKey(rwc)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			keyHandle, err = s.generateKey(rwc)
-			if err != nil {
-				return nil
-			}
-		} else {
-			return nil
-		}
-	}
-	defer flushHandle(rwc, keyHandle.Handle)
-
-	pub, err := getKeyPublic(rwc, keyHandle.Handle)
-	if err != nil {
-		return nil
-	}
-	s.publicKey = pub
-	return pub
-}
-
-func (s *TPMSigner) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	rwc, err := openTPM()
-	if err != nil {
-		return nil, err
-	}
-	defer closeTPM(rwc)
-
-	keyHandle, err := s.loadKey(rwc)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			keyHandle, err = s.generateKey(rwc)
-			if err != nil {
-				return nil, fmt.Errorf("generating key: %w", err)
-			}
-		} else {
-			return nil, fmt.Errorf("loading key: %w", err)
-		}
-	}
-	defer flushHandle(rwc, keyHandle.Handle)
-
-	// Sign
-	sign := tpm2.Sign{
-		KeyHandle: *keyHandle,
-		Digest: tpm2.TPM2BDigest{
-			Buffer: digest,
-		},
-		InScheme: tpm2.TPMTSigScheme{
-			Scheme: tpm2.TPMAlgECDSA,
-			Details: tpm2.NewTPMUSigScheme(tpm2.TPMAlgECDSA, &tpm2.TPMSSchemeHash{
-				HashAlg: tpm2.TPMAlgSHA256,
-			}),
-		},
-		Validation: tpm2.TPMTTKHashCheck{
-			Tag: tpm2.TPMSTHashCheck,
-		},
-	}
-
-	rsp, err := sign.Execute(rwc)
-	if err != nil {
-		return nil, fmt.Errorf("tpm sign: %w", err)
-	}
-
-	eccSig, err := rsp.Signature.Signature.ECDSA()
-	if err != nil {
-		return nil, fmt.Errorf("getting ecdsa signature: %w", err)
-	}
-
-	r := big.NewInt(0).SetBytes(eccSig.SignatureR.Buffer)
-	sVal := big.NewInt(0).SetBytes(eccSig.SignatureS.Buffer)
-
-	return asn1.Marshal(struct{ R, S *big.Int }{r, sVal})
-}
-
-// loadKey loads the key from disk and into the TPM. Returns handle.
-func (s *TPMSigner) loadKey(rwc transport.TPM) (*tpm2.AuthHandle, error) {
-	path := filepath.Join(s.Dir, signerKeyFile)
-	data, err := readBlob(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var blob struct {
-		Private []byte
-		Public  []byte
-	}
-	if err := json.Unmarshal(data, &blob); err != nil {
-		return nil, fmt.Errorf("unmarshal key: %w", err)
-	}
-
 	srk, err := getSRK(rwc)
 	if err != nil {
-		return nil, err
-	}
-	defer flushHandle(rwc, srk.Handle)
-
-	pub, err := tpm2.Unmarshal[tpm2.TPM2BPublic](blob.Public)
-	if err != nil {
-		return nil, fmt.Errorf("unmarshal public: %w", err)
-	}
-
-	load := tpm2.Load{
-		ParentHandle: *srk,
-		InPrivate:    tpm2.TPM2BPrivate{Buffer: blob.Private},
-		InPublic:     *pub,
-	}
-
-	loadRsp, err := load.Execute(rwc)
-	if err != nil {
-		return nil, fmt.Errorf("tpm load: %w", err)
-	}
-
-	return &tpm2.AuthHandle{
-		Handle: loadRsp.ObjectHandle,
-		Name:   loadRsp.Name,
-		Auth:   tpm2.PasswordAuth(nil),
-	}, nil
-}
-
-func (s *TPMSigner) generateKey(rwc transport.TPM) (*tpm2.AuthHandle, error) {
-	srk, err := getSRK(rwc)
-	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer flushHandle(rwc, srk.Handle)
 
@@ -208,35 +78,171 @@ func (s *TPMSigner) generateKey(rwc transport.TPM) (*tpm2.AuthHandle, error) {
 
 	rsp, err := create.Execute(rwc)
 	if err != nil {
-		return nil, fmt.Errorf("tpm create: %w", err)
+		return nil, nil, fmt.Errorf("tpm create: %w", err)
 	}
 
-	pubBytes := tpm2.Marshal(rsp.OutPublic)
+	pubBlob := tpm2.Marshal(rsp.OutPublic)
+	handle, err := encodeDPoPHandle(pubBlob, rsp.OutPrivate.Buffer)
+	if err != nil {
+		return nil, nil, err
+	}
+	signer, err := newTPMSigner(pubBlob, rsp.OutPrivate.Buffer)
+	if err != nil {
+		return nil, nil, err
+	}
+	return handle, signer, nil
+}
 
-	blob := struct {
-		Private []byte
-		Public  []byte
-	}{
-		Private: rsp.OutPrivate.Buffer,
-		Public:  pubBytes,
+// LoadDPoPKey returns a signer for a handle returned by NewDPoPKey.
+func (c *TPMCredentialCache) LoadDPoPKey(handle []byte) (crypto.Signer, error) {
+	pub, priv, err := decodeDPoPHandle(handle)
+	if err != nil {
+		return nil, err
+	}
+	return newTPMSigner(pub, priv)
+}
+
+func encodeDPoPHandle(pub, priv []byte) ([]byte, error) {
+	if len(pub) == 0 || len(pub) > maxTPMSealedPartSize || len(priv) == 0 || len(priv) > maxTPMSealedPartSize {
+		return nil, errors.New("invalid TPM key blob size")
+	}
+	out := make([]byte, 0, 1+8+len(pub)+len(priv))
+	out = append(out, dpopHandleVersion)
+	out = binary.BigEndian.AppendUint32(out, uint32(len(pub)))
+	out = append(out, pub...)
+	out = binary.BigEndian.AppendUint32(out, uint32(len(priv)))
+	out = append(out, priv...)
+	return out, nil
+}
+
+func decodeDPoPHandle(handle []byte) (pub, priv []byte, err error) {
+	bad := func(msg string) error { return fmt.Errorf("invalid TPM DPoP key handle: %s", msg) }
+	if len(handle) < 1 {
+		return nil, nil, bad("empty")
+	}
+	if handle[0] != dpopHandleVersion {
+		return nil, nil, bad(fmt.Sprintf("unsupported version %d", handle[0]))
+	}
+	rest := handle[1:]
+	part := func(name string) ([]byte, error) {
+		if len(rest) < 4 {
+			return nil, bad("truncated " + name + " length")
+		}
+		n := binary.BigEndian.Uint32(rest[:4])
+		rest = rest[4:]
+		if n == 0 || n > maxTPMSealedPartSize {
+			return nil, bad("invalid " + name + " size")
+		}
+		if uint64(len(rest)) < uint64(n) {
+			return nil, bad("truncated " + name)
+		}
+		p := rest[:n:n]
+		rest = rest[n:]
+		return p, nil
+	}
+	if pub, err = part("public"); err != nil {
+		return nil, nil, err
+	}
+	if priv, err = part("private"); err != nil {
+		return nil, nil, err
+	}
+	if len(rest) != 0 {
+		return nil, nil, bad("trailing data")
+	}
+	return pub, priv, nil
+}
+
+type tpmSigner struct {
+	public  *ecdsa.PublicKey
+	pubBlob []byte
+	private []byte
+}
+
+func newTPMSigner(pubBlob, priv []byte) (*tpmSigner, error) {
+	pub, err := tpm2.Unmarshal[tpm2.TPM2BPublic](pubBlob)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal public: %w", err)
+	}
+	key, err := eccPublicKey(pub)
+	if err != nil {
+		return nil, err
+	}
+	return &tpmSigner{public: key, pubBlob: pubBlob, private: priv}, nil
+}
+
+func (s *tpmSigner) Public() crypto.PublicKey { return s.public }
+
+func (s *tpmSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	if opts == nil || opts.HashFunc() != crypto.SHA256 || len(digest) != crypto.SHA256.Size() {
+		return nil, errors.New("tpm signer requires a SHA-256 digest")
+	}
+
+	rwc, err := openTPM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeTPM(rwc)
+
+	keyHandle, err := s.load(rwc)
+	if err != nil {
+		return nil, err
+	}
+	defer flushHandle(rwc, keyHandle.Handle)
+
+	sign := tpm2.Sign{
+		KeyHandle: *keyHandle,
+		Digest: tpm2.TPM2BDigest{
+			Buffer: digest,
+		},
+		InScheme: tpm2.TPMTSigScheme{
+			Scheme: tpm2.TPMAlgECDSA,
+			Details: tpm2.NewTPMUSigScheme(tpm2.TPMAlgECDSA, &tpm2.TPMSSchemeHash{
+				HashAlg: tpm2.TPMAlgSHA256,
+			}),
+		},
+		Validation: tpm2.TPMTTKHashCheck{
+			Tag: tpm2.TPMSTHashCheck,
+		},
+	}
+
+	rsp, err := sign.Execute(rwc)
+	if err != nil {
+		return nil, fmt.Errorf("tpm sign: %w", err)
+	}
+
+	eccSig, err := rsp.Signature.Signature.ECDSA()
+	if err != nil {
+		return nil, fmt.Errorf("getting ecdsa signature: %w", err)
+	}
+
+	r := big.NewInt(0).SetBytes(eccSig.SignatureR.Buffer)
+	sVal := big.NewInt(0).SetBytes(eccSig.SignatureS.Buffer)
+
+	return asn1.Marshal(struct{ R, S *big.Int }{r, sVal})
+}
+
+// load loads the wrapped key into the TPM under a fresh SRK.
+func (s *tpmSigner) load(rwc transport.TPM) (*tpm2.AuthHandle, error) {
+	srk, err := getSRK(rwc)
+	if err != nil {
+		return nil, err
+	}
+	defer flushHandle(rwc, srk.Handle)
+
+	pub, err := tpm2.Unmarshal[tpm2.TPM2BPublic](s.pubBlob)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal public: %w", err)
 	}
 
 	load := tpm2.Load{
 		ParentHandle: *srk,
-		InPrivate:    rsp.OutPrivate,
-		InPublic:     rsp.OutPublic,
+		InPrivate:    tpm2.TPM2BPrivate{Buffer: s.private},
+		InPublic:     *pub,
 	}
-
 	loadRsp, err := load.Execute(rwc)
 	if err != nil {
-		return nil, fmt.Errorf("tpm load after create: %w", err)
+		return nil, fmt.Errorf("tpm load: %w", err)
 	}
-
-	jsonBytes, _ := json.Marshal(blob)
-	if err := writeBlob(filepath.Join(s.Dir, signerKeyFile), jsonBytes); err != nil {
-		return nil, err
-	}
-
 	return &tpm2.AuthHandle{
 		Handle: loadRsp.ObjectHandle,
 		Name:   loadRsp.Name,
@@ -244,27 +250,26 @@ func (s *TPMSigner) generateKey(rwc transport.TPM) (*tpm2.AuthHandle, error) {
 	}, nil
 }
 
-func getKeyPublic(rwc transport.TPM, handle tpm2.TPMHandle) (crypto.PublicKey, error) {
-	rp := tpm2.ReadPublic{ObjectHandle: handle}
-	rsp, err := rp.Execute(rwc)
+// eccPublicKey converts a TPM public area for a P-256 ECDSA signing key to an
+// ecdsa.PublicKey.
+func eccPublicKey(p *tpm2.TPM2BPublic) (*ecdsa.PublicKey, error) {
+	pub, err := p.Contents()
 	if err != nil {
 		return nil, err
 	}
-
-	pub, err := rsp.OutPublic.Contents()
-	if err != nil {
-		return nil, err
+	if pub.Type != tpm2.TPMAlgECC {
+		return nil, fmt.Errorf("unsupported key type: %v", pub.Type)
 	}
-
+	if !pub.ObjectAttributes.SignEncrypt || pub.ObjectAttributes.Restricted {
+		return nil, errors.New("key is not a signing key")
+	}
 	ecc, err := pub.Parameters.ECCDetail()
 	if err != nil {
 		return nil, err
 	}
-
 	if ecc.CurveID != tpm2.TPMECCNistP256 {
 		return nil, fmt.Errorf("unsupported curve: %v", ecc.CurveID)
 	}
-
 	unique, err := pub.Unique.ECC()
 	if err != nil {
 		return nil, err

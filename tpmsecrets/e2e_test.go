@@ -1,7 +1,6 @@
 package tpmsecrets
 
 import (
-	"crypto/rand"
 	"fmt"
 	"net"
 	"os"
@@ -12,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/internal/platformsecrets"
+	"lds.li/oauth2ext/tokencache"
 )
 
 func TestE2E(t *testing.T) {
@@ -76,31 +77,12 @@ func TestE2E(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Run Tests
-	t.Run("Signer", func(t *testing.T) {
-		signerDir := filepath.Join(tmpDir, "signer")
-		if err := os.Mkdir(signerDir, 0700); err != nil {
+	t.Run("Store", func(t *testing.T) {
+		dir := filepath.Join(tmpDir, "store")
+		if err := os.Mkdir(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-
-		s := &TPMSigner{Dir: signerDir}
-
-		// 1. Generate (implicitly via Public)
-		pub := s.Public()
-		if pub == nil {
-			t.Fatal("Public() returned nil")
-		}
-
-		// 2. Sign
-		hash := []byte("01234567890123456789012345678901") // 32 bytes
-		sig, err := s.Sign(rand.Reader, hash, nil)
-		if err != nil {
-			t.Fatalf("Sign failed: %v", err)
-		}
-		if len(sig) == 0 {
-			t.Fatal("Signature empty")
-		}
-
-		// 3. Verify? We trust the signer for now.
+		platformsecrets.TestStore(t, &TPMCredentialCache{Dir: dir})
 	})
 
 	t.Run("Cache", func(t *testing.T) {
@@ -121,7 +103,7 @@ func TestE2E(t *testing.T) {
 		}
 
 		// Set
-		if err := c.Set("https://issuer.com", "client-id", token); err != nil {
+		if err := c.Set("https://issuer.com", "client-id", &tokencache.Credential{Token: token}); err != nil {
 			t.Fatalf("Set failed: %v", err)
 		}
 
@@ -133,8 +115,8 @@ func TestE2E(t *testing.T) {
 		if got == nil {
 			t.Fatal("Get returned nil")
 		}
-		if got.AccessToken != "test-access-token" {
-			t.Errorf("Got token %q, want %q", got.AccessToken, "test-access-token")
+		if got.Token.AccessToken != "test-access-token" {
+			t.Errorf("Got token %q, want %q", got.Token.AccessToken, "test-access-token")
 		}
 
 		// Verify persistence by recreating cache
@@ -146,8 +128,8 @@ func TestE2E(t *testing.T) {
 		if got2 == nil {
 			t.Fatal("Get2 returned nil")
 		}
-		if got2.AccessToken != "test-access-token" {
-			t.Errorf("Got2 token %q, want %q", got2.AccessToken, "test-access-token")
+		if got2.Token.AccessToken != "test-access-token" {
+			t.Errorf("Got2 token %q, want %q", got2.Token.AccessToken, "test-access-token")
 		}
 	})
 }

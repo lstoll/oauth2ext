@@ -5,20 +5,24 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
 )
 
 const (
-	signerKeyFile = "tpm_signer_key.blob"
 	cacheDataFile = "tpm_cache_data.enc"
+	cacheLockFile = "tpm_cache.lock"
 )
 
+// IsTPMAvailable reports whether a TPM can be opened.
 func IsTPMAvailable() bool {
-	_, err := openTPM()
-	return err == nil
+	rwc, err := openTPM()
+	if err != nil {
+		return false
+	}
+	closeTPM(rwc)
+	return true
 }
 
 func openTPM() (transport.TPM, error) {
@@ -94,22 +98,4 @@ func getSRK(rwc transport.TPM) (*tpm2.AuthHandle, error) {
 // flushHandle is a helper to flush a handle and ignore errors (defer usage)
 func flushHandle(rwc transport.TPM, handle tpm2.TPMHandle) {
 	_, _ = tpm2.FlushContext{FlushHandle: handle}.Execute(rwc)
-}
-
-// readBlob reads a file into a byte slice.
-func readBlob(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(f)
-}
-
-// writeBlob writes a byte slice to a file.
-func writeBlob(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0600)
 }

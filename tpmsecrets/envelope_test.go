@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/tokencache"
 )
 
 type memoryKeySealer struct {
@@ -117,14 +121,19 @@ func TestTPMCredentialCacheWithMemorySealer(t *testing.T) {
 	sealer := memoryKeySealer{marker: []byte("test-sealed-key")}
 	cache := &TPMCredentialCache{Dir: t.TempDir(), sealer: sealer}
 	want := &oauth2.Token{AccessToken: "access-token", RefreshToken: "refresh-token", TokenType: "Bearer"}
+	wantKey := []byte("wrapped-key")
 
-	if err := cache.Set("https://issuer.example", "client", want); err != nil {
+	if err := cache.Set("https://issuer.example", "client", &tokencache.Credential{Token: want, DPoPKey: wantKey}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := cache.Get("https://issuer.example", "client")
+	cred, err := cache.Get("https://issuer.example", "client")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cred == nil || !bytes.Equal(cred.DPoPKey, wantKey) {
+		t.Fatalf("unexpected credential: %#v", cred)
+	}
+	got := cred.Token
 	if got == nil || got.AccessToken != want.AccessToken || got.RefreshToken != want.RefreshToken || got.TokenType != want.TokenType {
 		t.Fatalf("unexpected cached token: %#v", got)
 	}
@@ -137,7 +146,7 @@ func TestTPMCredentialCacheWithMemorySealer(t *testing.T) {
 	if err := os.WriteFile(cachePath, []byte("legacy-or-corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := cache.Set("https://issuer.example", "client", want); err == nil {
+	if err := cache.Set("https://issuer.example", "client", &tokencache.Credential{Token: want}); err == nil {
 		t.Fatal("Set silently replaced an unreadable existing cache")
 	}
 	contents, err := os.ReadFile(cachePath)
@@ -153,5 +162,94 @@ func TestTPMCredentialCacheKeyIsUnambiguous(t *testing.T) {
 	cache := new(TPMCredentialCache)
 	if cache.cacheKey("a;b", "c") == cache.cacheKey("a", "b;c") {
 		t.Fatal("distinct issuer/key pairs produced the same cache key")
+	}
+}
+
+func TestTPMCredentialCacheConcurrentSet(t *testing.T) {
+	cache := &TPMCredentialCache{Dir: t.TempDir(), sealer: memoryKeySealer{marker: []byte("m")}}
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := range n {
+		wg.Go(func() {
+			// Separate instances, as separate processes would have. flock is
+			// per open file description, so this excludes across them.
+			c := &TPMCredentialCache{Dir: cache.Dir, sealer: cache.sealer}
+			errs <- c.Set("https://issuer.example", fmt.Sprintf("client-%d", i), &tokencache.Credential{Token: &oauth2.Token{AccessToken: fmt.Sprintf("tok-%d", i)}})
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range n {
+		cred, err := cache.Get("https://issuer.example", fmt.Sprintf("client-%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cred == nil || cred.Token.AccessToken != fmt.Sprintf("tok-%d", i) {
+			t.Fatalf("entry %d lost: %#v", i, cred)
+		}
+	}
+}
+
+func TestTPMCredentialCacheFailedWriteLeavesNoTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	// A directory at the target path makes the final rename fail.
+	if err := os.Mkdir(filepath.Join(dir, cacheDataFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(filepath.Join(dir, cacheDataFile), []byte("data")); err == nil {
+		t.Fatal("expected write failure")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Fatalf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestDecodeDPoPHandle(t *testing.T) {
+	good, err := encodeDPoPHandle([]byte("pub"), []byte("priv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, priv, err := decodeDPoPHandle(good)
+	if err != nil || string(pub) != "pub" || string(priv) != "priv" {
+		t.Fatalf("round trip failed: %q %q %v", pub, priv, err)
+	}
+
+	huge := binary.BigEndian.AppendUint32([]byte{dpopHandleVersion}, maxTPMSealedPartSize+1)
+	zero := binary.BigEndian.AppendUint32([]byte{dpopHandleVersion}, 0)
+	for name, h := range map[string][]byte{
+		"nil":             nil,
+		"bad version":     append([]byte{9}, good[1:]...),
+		"version only":    {dpopHandleVersion},
+		"truncated len":   good[:3],
+		"truncated pub":   good[:6],
+		"truncated priv":  good[:len(good)-1],
+		"trailing":        append(bytes.Clone(good), 0),
+		"oversized":       huge,
+		"zero length":     zero,
+		"missing private": good[:1+4+3],
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := decodeDPoPHandle(h); err == nil {
+				t.Fatal("malformed handle accepted")
+			}
+		})
+	}
+
+	// Well-framed but garbage TPM structures must fail in LoadDPoPKey.
+	c := new(TPMCredentialCache)
+	if _, err := c.LoadDPoPKey(good); err == nil {
+		t.Fatal("garbage TPM public accepted")
 	}
 }
