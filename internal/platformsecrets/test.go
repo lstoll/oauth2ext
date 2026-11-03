@@ -1,10 +1,7 @@
 package platformsecrets
 
 import (
-	"crypto"
-	"crypto/ecdsa"
-	"crypto/rand"
-	"crypto/sha256"
+	"context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -24,7 +21,7 @@ const (
 func TestStore(t *testing.T, store tokencache.Store) {
 	TestCache(t, store)
 
-	handle, key, err := store.NewDPoPKey()
+	handle, key, err := store.NewDPoPKey(tokencache.DefaultDPoPAlgorithms)
 	if err != nil {
 		t.Fatalf("NewDPoPKey: %v", err)
 	}
@@ -56,17 +53,32 @@ func TestStore(t *testing.T, store tokencache.Store) {
 	if created.Thumbprint() != reloaded.Thumbprint() {
 		t.Fatal("loaded DPoP key differs from the created key")
 	}
-	pub, ok := key.Public().(*ecdsa.PublicKey)
-	if !ok {
-		t.Fatalf("DPoP key is %T, want ECDSA", key.Public())
-	}
-	digest := sha256.Sum256([]byte("test"))
-	sig, err := loaded.Sign(rand.Reader, digest[:], crypto.SHA256)
+	// A message signed by the reloaded key must verify against the created
+	// key's public key.
+	token, err := reloaded.Sign(context.Background(), map[string]any{"test": true}, jwt.SignOptions{})
 	if err != nil {
 		t.Fatalf("signing with loaded key: %v", err)
 	}
-	if !ecdsa.VerifyASN1(pub, digest[:], sig) {
-		t.Fatal("signature from loaded key did not verify")
+	keys, err := jwt.NewVerificationKeySet(created.VerificationKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := jwt.NewVerifier(keys, jwt.ValidationPolicy{
+		IgnoreIssuer:           true,
+		IgnoreAudiences:        true,
+		AllowedAlgorithms:      []jwt.Algorithm{created.Algorithm()},
+		Type:                   jwt.TypeAny,
+		AllowMissingExpiration: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(token); err != nil {
+		t.Fatalf("signature from loaded key did not verify: %v", err)
+	}
+
+	if _, _, err := store.NewDPoPKey([]jwt.Algorithm{"none-supported"}); err == nil {
+		t.Fatal("NewDPoPKey with only unsupported algorithms did not return an error")
 	}
 }
 

@@ -2,8 +2,10 @@ package tokencache
 
 import (
 	"crypto"
+	"slices"
 
 	"golang.org/x/oauth2"
+	"lds.li/oauth2ext/jwt"
 )
 
 // Credential is a cached token, and the DPoP key it is bound to.
@@ -43,7 +45,16 @@ type CredentialCache interface {
 // handle a device-bound wrapped key.
 type DPoPKeyStore interface {
 	// NewDPoPKey creates a new key, returning its handle and a signer for it.
-	NewDPoPKey() (handle []byte, signer crypto.Signer, err error)
+	// algs is never empty and is ordered most preferred first: the store
+	// creates a key for the first algorithm it can, moving on when one is
+	// unsupported or unavailable (e.g. hardware without ML-DSA), and returns
+	// an error if it can create none of them.
+	//
+	// The signer is assumed to support every algorithm its key type allows
+	// (an RSA key: both RS* and PS*). A signer that can do less, such as a
+	// hardware RSA key limited to one padding, should implement
+	// jwt.AlgorithmSigner, both here and from LoadDPoPKey.
+	NewDPoPKey(algs []jwt.Algorithm) (handle []byte, signer crypto.Signer, err error)
 	// LoadDPoPKey returns a signer for a handle returned by NewDPoPKey.
 	LoadDPoPKey(handle []byte) (crypto.Signer, error)
 }
@@ -54,4 +65,34 @@ type DPoPKeyStore interface {
 type Store interface {
 	CredentialCache
 	DPoPKeyStore
+}
+
+// DefaultDPoPAlgorithms is used when the server's accepted DPoP algorithms are
+// not known. ES256 is the most widely supported.
+var DefaultDPoPAlgorithms = []jwt.Algorithm{jwt.ES256}
+
+// DefaultDPoPPreference orders the DPoP algorithms used when
+// Config.DPoPPreference is nil, most preferred first. ES256 comes first as the
+// most widely deployed, then the other classical algorithms. ML-DSA (RFC 9964)
+// is permitted by RFC 9449 as an asymmetric JWS algorithm but is not yet widely
+// deployed for DPoP, and its proofs are much larger, so it is only used when the
+// server accepts nothing else. This order may change as DPoP specifications and
+// deployments evolve.
+var DefaultDPoPPreference = []jwt.Algorithm{
+	jwt.ES256, jwt.EdDSA, jwt.ES384, jwt.ES512,
+	jwt.PS256, jwt.PS384, jwt.PS512,
+	jwt.RS256, jwt.RS384, jwt.RS512,
+	jwt.MLDSA65, jwt.MLDSA87, jwt.MLDSA44,
+}
+
+// orderDPoPAlgorithms returns the members of preference that are also in
+// accepted, in preference order.
+func orderDPoPAlgorithms(accepted, preference []jwt.Algorithm) []jwt.Algorithm {
+	var out []jwt.Algorithm
+	for _, alg := range preference {
+		if slices.Contains(accepted, alg) && !slices.Contains(out, alg) {
+			out = append(out, alg)
+		}
+	}
+	return out
 }

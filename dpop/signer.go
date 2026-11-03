@@ -35,6 +35,7 @@ var dpopAlgorithms = []jwt.Algorithm{
 	jwt.PS256, jwt.PS384, jwt.PS512,
 	jwt.ES256, jwt.ES384, jwt.ES512,
 	jwt.EdDSA,
+	jwt.MLDSA44, jwt.MLDSA65, jwt.MLDSA87,
 }
 
 // Sign creates a compact DPoP proof using signer. The proof uses typ

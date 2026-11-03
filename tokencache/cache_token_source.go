@@ -58,6 +58,20 @@ type Config struct {
 	// is usually the same platform Store as Cache, as key handles are only
 	// usable with the store that created them.
 	DPoPKeys DPoPKeyStore
+	// DPoPAlgorithms are the DPoP proof algorithms the server accepts, usually
+	// its dpop_signing_alg_values_supported metadata (see
+	// provider.OIDCProviderMetadata.DPoPAlgorithms). New keys use one of them,
+	// and cached keys using any other algorithm are replaced by a new login.
+	// If nil, DefaultDPoPAlgorithms is used. A non-nil empty list is rejected
+	// when DPoP is enabled.
+	DPoPAlgorithms []jwt.Algorithm
+	// DPoPPreference orders the DPoP algorithms this client is willing to use,
+	// most preferred first. Algorithms the server does not accept are skipped,
+	// and a key uses the most preferred remaining algorithm that the store can
+	// create. If nil, DefaultDPoPPreference is used. A non-nil empty list, or
+	// one sharing no algorithm with DPoPAlgorithms, is rejected when DPoP is
+	// enabled.
+	DPoPPreference []jwt.Algorithm
 	// Logger receives debug logs about cache entries that could not be used,
 	// such as failed refreshes and DPoP keys that could not be loaded. If nil,
 	// nothing is logged.
@@ -102,6 +116,16 @@ func (c *Config) TokenSource(ctx context.Context) (*TokenSource, error) {
 	}
 	if c.Cache == nil {
 		validErr = errors.Join(validErr, fmt.Errorf("a cache must be provided"))
+	}
+	if c.DPoPKeys != nil {
+		switch {
+		case c.DPoPAlgorithms != nil && len(c.DPoPAlgorithms) == 0:
+			validErr = errors.Join(validErr, fmt.Errorf("no supported DPoP algorithms"))
+		case c.DPoPPreference != nil && len(c.DPoPPreference) == 0:
+			validErr = errors.Join(validErr, fmt.Errorf("DPoPPreference is empty"))
+		case len(c.dpopAlgorithms()) == 0:
+			validErr = errors.Join(validErr, fmt.Errorf("none of the preferred DPoP algorithms %v are accepted by the server (%v)", c.dpopPreference(), c.dpopAccepted()))
+		}
 	}
 	if validErr != nil {
 		return nil, fmt.Errorf("invalid config: %w", validErr)
@@ -153,8 +177,9 @@ func (s *TokenSource) DPoPToken() (*oauth2.Token, *jwt.SigningIdentity, error) {
 
 	var signer *jwt.SigningIdentity
 	if cred != nil && s.cfg.DPoPKeys != nil {
-		// A key that can no longer be loaded, e.g. after a hardware reset,
-		// means a new login with a new key.
+		// A key that can no longer be loaded, e.g. after a hardware reset, or
+		// whose algorithm the server no longer accepts, means a new login with
+		// a new key.
 		var loadErr error
 		if signer, loadErr = s.loadKey(cred.DPoPKey); loadErr != nil {
 			log.Debug("ignoring cached credential whose DPoP key could not be loaded", "issuer", s.cfg.Issuer, "key", s.cfg.CacheKey, "error", loadErr)
@@ -187,13 +212,14 @@ func (s *TokenSource) DPoPToken() (*oauth2.Token, *jwt.SigningIdentity, error) {
 		newCred = &Credential{}
 		var fetchErr error
 		if s.cfg.DPoPKeys != nil {
-			handle, key, err := s.cfg.DPoPKeys.NewDPoPKey()
+			handle, key, err := s.cfg.DPoPKeys.NewDPoPKey(s.cfg.dpopAlgorithms())
 			if err != nil {
 				return nil, nil, fmt.Errorf("creating DPoP key: %w", err)
 			}
 			if signer, err = s.setKey(handle, key); err != nil {
 				return nil, nil, err
 			}
+
 			newCred.DPoPKey = handle
 			newCred.Token, fetchErr = s.cfg.WrappedSource.(DPoPTokenSource).DPoPToken(signer)
 		} else {
@@ -226,13 +252,43 @@ func (s *TokenSource) loadKey(handle []byte) (*jwt.SigningIdentity, error) {
 	return s.setKey(handle, key)
 }
 
-func (s *TokenSource) setKey(handle []byte, key crypto.Signer) (*jwt.SigningIdentity, error) {
-	signer, err := jwt.NewSigningIdentity(key, "", "")
-	if err != nil {
-		return nil, fmt.Errorf("creating DPoP signing identity: %w", err)
+func (c *Config) dpopAccepted() []jwt.Algorithm {
+	if c.DPoPAlgorithms != nil {
+		return c.DPoPAlgorithms
 	}
-	s.keyHandle, s.keySigner = bytes.Clone(handle), signer
-	return signer, nil
+	return DefaultDPoPAlgorithms
+}
+
+func (c *Config) dpopPreference() []jwt.Algorithm {
+	if c.DPoPPreference != nil {
+		return c.DPoPPreference
+	}
+	return DefaultDPoPPreference
+}
+
+// dpopAlgorithms returns the algorithms DPoP keys may use, most preferred
+// first.
+func (c *Config) dpopAlgorithms() []jwt.Algorithm {
+	return orderDPoPAlgorithms(c.dpopAccepted(), c.dpopPreference())
+}
+
+// setKey binds key to the most preferred allowed algorithm it supports. The
+// algorithm comes from the configuration rather than the key type, so an RSA
+// key can be used for PS256 as well as RS256.
+func (s *TokenSource) setKey(handle []byte, key crypto.Signer) (*jwt.SigningIdentity, error) {
+	algs := s.cfg.dpopAlgorithms()
+	for _, alg := range algs {
+		if !jwt.SignerSupportsAlgorithm(key, alg) {
+			continue
+		}
+		signer, err := jwt.NewSigningIdentity(key, alg, "")
+		if err != nil {
+			return nil, fmt.Errorf("creating DPoP signing identity: %w", err)
+		}
+		s.keyHandle, s.keySigner = bytes.Clone(handle), signer
+		return signer, nil
+	}
+	return nil, fmt.Errorf("DPoP key of type %T cannot be used with any of the allowed algorithms %v", key.Public(), algs)
 }
 
 // Client returns an HTTP client that authorizes requests with this source's

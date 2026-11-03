@@ -3,12 +3,14 @@ package jwt
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -257,5 +259,82 @@ func TestParseVerificationJWKSToleratesRemoteQuirks(t *testing.T) {
 	}
 	if keys, err := set.matchingKeys("ES384", "k2"); err == nil && len(keys) != 0 {
 		t.Fatal("alg-mismatched key should have been ignored")
+	}
+}
+
+// mldsaJWKMap returns the public AKP JWK for an ML-DSA key as a generic map.
+func mldsaJWKMap(t *testing.T, params mldsa.Parameters, alg Algorithm) map[string]any {
+	t.Helper()
+	identity, err := NewSigningIdentity(newMLDSAKey(t, params), alg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := NewVerificationKeySetFromSigner(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Keys) != 1 {
+		t.Fatalf("keys: %d", len(doc.Keys))
+	}
+	return doc.Keys[0]
+}
+
+func jwksDoc(t *testing.T, keys ...map[string]any) []byte {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{"keys": keys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestParseJWKSetRejectsAKPPrivateMaterial(t *testing.T) {
+	jwk := mldsaJWKMap(t, mldsa.MLDSA44(), MLDSA44)
+	jwk["priv"] = "AAAA"
+	if _, err := ParseVerificationJWKS(jwksDoc(t, jwk)); !errors.Is(err, ErrKey) || !strings.Contains(err.Error(), "private") {
+		t.Fatalf("error: got %v, want ErrKey about private material", err)
+	}
+}
+
+func TestParseJWKSetAKPRequiresAlg(t *testing.T) {
+	jwk := mldsaJWKMap(t, mldsa.MLDSA44(), MLDSA44)
+	delete(jwk, "alg")
+	if _, err := ParseVerificationJWKS(jwksDoc(t, jwk)); !errors.Is(err, ErrKey) {
+		t.Fatalf("error: got %v, want ErrKey", err)
+	}
+}
+
+func TestParseJWKSetSkipsAKPWithNonMLDSAAlg(t *testing.T) {
+	skipped := mldsaJWKMap(t, mldsa.MLDSA44(), MLDSA44)
+	skipped["alg"] = "SLH-DSA-SHA2-128s"
+	good := mldsaJWKMap(t, mldsa.MLDSA65(), MLDSA65)
+	keys, err := ParseVerificationJWKS(jwksDoc(t, skipped, good))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := keys.state.Load().jwks.Keys
+	if len(got) != 1 || got[0].Algorithm != string(MLDSA65) {
+		t.Fatalf("keys: got %+v, want only the ML-DSA-65 key", got)
+	}
+}
+
+func TestClonePublicKeyMLDSA(t *testing.T) {
+	pub := newMLDSAKey(t, mldsa.MLDSA44()).PublicKey()
+	got, ok := clonePublicKey(pub).(*mldsa.PublicKey)
+	if !ok || got == nil || got == pub || !got.Equal(pub) {
+		t.Fatalf("clone: got %p, original %p", got, pub)
+	}
+	if got, ok := clonePublicKey(new(mldsa.PublicKey)).(*mldsa.PublicKey); !ok || got != nil {
+		t.Fatalf("zero key clone: %v", got)
 	}
 }

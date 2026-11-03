@@ -4,12 +4,16 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,10 +23,17 @@ import (
 	"lds.li/oauth2ext/jwt"
 )
 
-// testStore is an in-memory Store with software DPoP keys.
+// testStore is an in-memory Store with software DPoP keys. It creates the
+// first of the offered algorithms it supports (ES256, ML-DSA-65, PS256).
+// Setting makes forces the algorithm regardless of what is offered.
 type testStore struct {
 	creds   map[string]*Credential
 	created int
+	offered []jwt.Algorithm
+	makes   jwt.Algorithm
+	// restrict, if set, wraps returned signers so they report only these
+	// algorithms, like a hardware key limited to one RSA padding.
+	restrict []jwt.Algorithm
 }
 
 func newTestStore() *testStore { return &testStore{creds: map[string]*Credential{}} }
@@ -36,8 +47,30 @@ func (s *testStore) Set(issuer, key string, cred *Credential) error {
 
 func (s *testStore) Available() bool { return true }
 
-func (s *testStore) NewDPoPKey() ([]byte, crypto.Signer, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+func (s *testStore) NewDPoPKey(algs []jwt.Algorithm) ([]byte, crypto.Signer, error) {
+	s.offered = algs
+	candidates := algs
+	if s.makes != "" {
+		candidates = []jwt.Algorithm{s.makes}
+	}
+	var key crypto.Signer
+	var err error
+	for _, alg := range candidates {
+		switch alg {
+		case jwt.ES256:
+			key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		case jwt.MLDSA65:
+			key, err = mldsa.GenerateKey(mldsa.MLDSA65())
+		case jwt.PS256:
+			key, err = rsa.GenerateKey(rand.Reader, 2048)
+		default:
+			continue
+		}
+		break
+	}
+	if key == nil && err == nil {
+		return nil, nil, fmt.Errorf("no supported algorithm in %v", algs)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -46,7 +79,21 @@ func (s *testStore) NewDPoPKey() ([]byte, crypto.Signer, error) {
 		return nil, nil, err
 	}
 	s.created++
-	return handle, key, nil
+	return handle, s.wrap(key), nil
+}
+
+type restrictedSigner struct {
+	crypto.Signer
+	algs []jwt.Algorithm
+}
+
+func (r restrictedSigner) SupportedAlgorithms() []jwt.Algorithm { return r.algs }
+
+func (s *testStore) wrap(key crypto.Signer) crypto.Signer {
+	if s.restrict == nil {
+		return key
+	}
+	return restrictedSigner{key, s.restrict}
 }
 
 func (s *testStore) LoadDPoPKey(handle []byte) (crypto.Signer, error) {
@@ -54,7 +101,7 @@ func (s *testStore) LoadDPoPKey(handle []byte) (crypto.Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return key.(crypto.Signer), nil
+	return s.wrap(key.(crypto.Signer)), nil
 }
 
 func (s *testStore) thumbprint(t *testing.T, handle []byte) string {
@@ -171,7 +218,7 @@ func TestDPoPIgnoresMismatchedEntries(t *testing.T) {
 
 func TestDPoPRefreshUsesStoredKey(t *testing.T) {
 	store := newTestStore()
-	handle, _, err := store.NewDPoPKey()
+	handle, _, err := store.NewDPoPKey(DefaultDPoPAlgorithms)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,5 +359,135 @@ func TestRefreshFailureIsLogged(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "refreshing cached token failed") || !strings.Contains(logs.String(), "invalid_grant") {
 		t.Fatalf("refresh failure not logged: %s", logs.String())
+	}
+}
+
+func TestDPoPAlgorithmsOfferedToStore(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		accepted   []jwt.Algorithm
+		preference []jwt.Algorithm
+		offered    []jwt.Algorithm
+		wantAlg    jwt.Algorithm
+	}{
+		{"defaults", nil, nil, []jwt.Algorithm{jwt.ES256}, jwt.ES256},
+		{"default preference orders server list", []jwt.Algorithm{jwt.MLDSA65, jwt.PS256, jwt.ES256}, nil, []jwt.Algorithm{jwt.ES256, jwt.PS256, jwt.MLDSA65}, jwt.ES256},
+		{"ML-DSA only when nothing else", []jwt.Algorithm{jwt.MLDSA65}, nil, []jwt.Algorithm{jwt.MLDSA65}, jwt.MLDSA65},
+		{"custom preference", []jwt.Algorithm{jwt.ES256, jwt.MLDSA65}, []jwt.Algorithm{jwt.MLDSA65, jwt.ES256}, []jwt.Algorithm{jwt.MLDSA65, jwt.ES256}, jwt.MLDSA65},
+		{"RSA key bound to PS256", []jwt.Algorithm{jwt.PS256}, nil, []jwt.Algorithm{jwt.PS256}, jwt.PS256},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore()
+			source := &fakeDPoPSource{tokenType: "DPoP"}
+			cfg := &Config{Issuer: "iss", CacheKey: "k", WrappedSource: source, Cache: store, DPoPKeys: store, DPoPAlgorithms: tc.accepted, DPoPPreference: tc.preference}
+			ts, err := cfg.TokenSource(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, signer, err := ts.DPoPToken()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(store.offered, tc.offered) || signer.Algorithm() != tc.wantAlg {
+				t.Fatalf("offered %v, got %s key; want offered %v, %s key", store.offered, signer.Algorithm(), tc.offered, tc.wantAlg)
+			}
+			// A reloaded key keeps the same algorithm.
+			ts, err = cfg.TokenSource(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, reloaded, err := ts.DPoPToken(); err != nil || reloaded.Algorithm() != tc.wantAlg {
+				t.Fatalf("reloaded key: %v, %v", reloaded, err)
+			}
+		})
+	}
+}
+
+func TestDPoPRespectsSignerSupportedAlgorithms(t *testing.T) {
+	store := newTestStore()
+	store.makes = jwt.PS256
+	store.restrict = []jwt.Algorithm{jwt.RS256}
+	cfg := &Config{Issuer: "iss", CacheKey: "k", WrappedSource: &fakeDPoPSource{tokenType: "DPoP"}, Cache: store, DPoPKeys: store, DPoPAlgorithms: []jwt.Algorithm{jwt.RS256, jwt.PS256}}
+	for range 2 { // create, then reload
+		ts, err := cfg.TokenSource(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, signer, err := ts.DPoPToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if signer.Algorithm() != jwt.RS256 {
+			t.Fatalf("got %s, want RS256 for a signer that only supports RS256", signer.Algorithm())
+		}
+	}
+	if store.created != 1 {
+		t.Fatalf("created %d keys, want 1", store.created)
+	}
+}
+
+func TestDPoPConfigRejectsUnusablePreference(t *testing.T) {
+	store := newTestStore()
+	for _, cfg := range []*Config{
+		{DPoPAlgorithms: []jwt.Algorithm{}},
+		{DPoPPreference: []jwt.Algorithm{}},
+		{DPoPAlgorithms: []jwt.Algorithm{jwt.MLDSA65}, DPoPPreference: []jwt.Algorithm{jwt.ES256}},
+	} {
+		cfg.Issuer, cfg.CacheKey, cfg.WrappedSource, cfg.Cache, cfg.DPoPKeys = "iss", "k", &fakeDPoPSource{tokenType: "DPoP"}, store, store
+		if _, err := cfg.TokenSource(t.Context()); err == nil {
+			t.Errorf("config with DPoPAlgorithms %v and DPoPPreference %v accepted", cfg.DPoPAlgorithms, cfg.DPoPPreference)
+		}
+	}
+}
+
+func TestDPoPRejectsKeyOutsideAcceptedAlgorithms(t *testing.T) {
+	store := newTestStore()
+	store.makes = jwt.ES256
+	source := &fakeDPoPSource{tokenType: "DPoP"}
+	ts, err := (&Config{Issuer: "iss", CacheKey: "k", WrappedSource: source, Cache: store, DPoPKeys: store, DPoPAlgorithms: []jwt.Algorithm{jwt.MLDSA65}}).TokenSource(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.Token(); err == nil || !strings.Contains(err.Error(), "cannot be used") {
+		t.Fatalf("want error about the unusable key, got %v", err)
+	}
+	if len(source.signers) != 0 {
+		t.Fatal("token fetched with a key the server does not accept")
+	}
+}
+
+func TestDPoPRejectsEmptyAcceptedAlgorithms(t *testing.T) {
+	store := newTestStore()
+	source := &fakeDPoPSource{tokenType: "DPoP"}
+	_, err := (&Config{Issuer: "iss", CacheKey: "k", WrappedSource: source, Cache: store, DPoPKeys: store, DPoPAlgorithms: []jwt.Algorithm{}}).TokenSource(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "no supported DPoP algorithms") {
+		t.Fatalf("want error about no supported algorithms, got %v", err)
+	}
+	if store.created != 0 || len(source.signers) != 0 {
+		t.Fatal("key created or token fetched without accepted algorithms")
+	}
+}
+
+func TestDPoPCachedKeyWithDroppedAlgorithmIsReplaced(t *testing.T) {
+	store := newTestStore()
+	handle, _, err := store.NewDPoPKey(DefaultDPoPAlgorithms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.creds["iss;k"] = &Credential{
+		Token:   &oauth2.Token{AccessToken: "cached", TokenType: "DPoP", Expiry: time.Now().Add(time.Hour)},
+		DPoPKey: handle,
+	}
+	source := &fakeDPoPSource{tokenType: "DPoP"}
+	ts, err := (&Config{Issuer: "iss", CacheKey: "k", WrappedSource: source, Cache: store, DPoPKeys: store, DPoPAlgorithms: []jwt.Algorithm{jwt.MLDSA65}}).TokenSource(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, signer, err := ts.DPoPToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.AccessToken != "new" || signer.Algorithm() != jwt.MLDSA65 {
+		t.Fatalf("got token %q with %s key, want a new token with an ML-DSA-65 key", tok.AccessToken, signer.Algorithm())
 	}
 }

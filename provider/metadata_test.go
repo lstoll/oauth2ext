@@ -3,7 +3,10 @@ package provider
 import (
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
+	"slices"
 	"testing"
+
+	"lds.li/oauth2ext/jwt"
 )
 
 func TestMetadataExtensionsRoundTrip(t *testing.T) {
@@ -62,5 +65,35 @@ func TestProviderMetadataSnapshotsAreIndependent(t *testing.T) {
 	}
 	if got := string(p.MetadataSnapshot().Extensions["vendor"]); got != `{"enabled":true}` {
 		t.Fatalf("extension mutation changed provider metadata: %s", got)
+	}
+}
+
+func TestMetadataDPoPAlgorithms(t *testing.T) {
+	var metadata OIDCProviderMetadata
+	if err := unmarshalMetadata([]byte(`{"issuer":"https://issuer.example","dpop_signing_alg_values_supported":["HS256","ES256","ML-DSA-65"]}`), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if got := metadata.Clone().DPoPAlgorithms(); !slices.Equal(got, []jwt.Algorithm{jwt.ES256, jwt.MLDSA65}) {
+		t.Fatalf("DPoPAlgorithms = %v, want [ES256 ML-DSA-65]", got)
+	}
+	for _, tc := range []struct {
+		name     string
+		metadata string
+		wantNil  bool
+	}{
+		{"absent", `{"issuer":"https://issuer.example"}`, true},
+		{"empty", `{"issuer":"https://issuer.example","dpop_signing_alg_values_supported":[]}`, false},
+		{"unsupported", `{"issuer":"https://issuer.example","dpop_signing_alg_values_supported":["unsupported-alg"]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var md OIDCProviderMetadata
+			if err := unmarshalMetadata([]byte(tc.metadata), &md); err != nil {
+				t.Fatal(err)
+			}
+			got := md.Clone().DPoPAlgorithms()
+			if len(got) != 0 || (got == nil) != tc.wantNil {
+				t.Fatalf("DPoPAlgorithms = %#v, want empty with nil=%v", got, tc.wantNil)
+			}
+		})
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"lds.li/keychain"
+	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/oidc"
 	"lds.li/oauth2ext/tokencache"
 )
@@ -33,8 +34,9 @@ type keychainCredentialValue struct {
 // short/ephemeral caching, entries created via different executables will be
 // removed rather than requiring the executable to be signed, or user input.
 //
-// DPoP keys are Secure Enclave keys created per login. The device-bound key
-// blob is stored in the keychain entry alongside the token.
+// DPoP keys are Secure Enclave keys created per login, using P-256, or
+// ML-DSA-65 or ML-DSA-87 where preferred and the OS supports them. The
+// device-bound key blob is stored in the keychain entry alongside the token.
 type KeychainCredentialCache struct {
 	// Service is the name of the service we use to store keychain items.
 	// If not set, defaults to clitoken.<binary-name>
@@ -186,14 +188,34 @@ func (k *KeychainCredentialCache) Available() bool {
 	return runtime.GOOS == "darwin"
 }
 
-// NewDPoPKey creates a Secure Enclave P-256 key. The handle is the key's
-// device-bound data representation.
-func (k *KeychainCredentialCache) NewDPoPKey() ([]byte, crypto.Signer, error) {
-	key, err := keychain.CreateSecureEnclaveKey(keychain.SecureEnclaveKeyOptions{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("creating Secure Enclave key: %w", err)
+// secureEnclaveAlgorithms maps the DPoP algorithms this store can create to
+// their Secure Enclave algorithm.
+var secureEnclaveAlgorithms = map[jwt.Algorithm]keychain.SecureEnclaveAlgorithm{
+	jwt.ES256:   keychain.SecureEnclaveP256,
+	jwt.MLDSA65: keychain.SecureEnclaveMLDSA65,
+	jwt.MLDSA87: keychain.SecureEnclaveMLDSA87,
+}
+
+// NewDPoPKey creates a Secure Enclave key for the first of algs that the store
+// supports (ES256, ML-DSA-65 or ML-DSA-87) and the OS and hardware can create.
+// The handle is the key's device-bound data representation.
+func (k *KeychainCredentialCache) NewDPoPKey(algs []jwt.Algorithm) ([]byte, crypto.Signer, error) {
+	for _, alg := range algs {
+		se, ok := secureEnclaveAlgorithms[alg]
+		if !ok {
+			continue
+		}
+		// No AllowFallback: we fall back ourselves, in the caller's order.
+		key, err := keychain.CreateSecureEnclaveKey(keychain.SecureEnclaveKeyOptions{Algorithm: se})
+		if errors.Is(err, keychain.ErrUnsupportedAlgorithm) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("creating Secure Enclave %s key: %w", alg, err)
+		}
+		return key.DataRepresentation(), key, nil
 	}
-	return key.DataRepresentation(), key, nil
+	return nil, nil, fmt.Errorf("no DPoP algorithm among %v can be created in the Secure Enclave on this system", algs)
 }
 
 // LoadDPoPKey loads a key from a handle returned by NewDPoPKey.
@@ -202,10 +224,12 @@ func (k *KeychainCredentialCache) LoadDPoPKey(handle []byte) (crypto.Signer, err
 	if err != nil {
 		return nil, fmt.Errorf("loading Secure Enclave key: %w", err)
 	}
-	if key.Algorithm() != keychain.SecureEnclaveP256 {
+	switch key.Algorithm() {
+	case keychain.SecureEnclaveP256, keychain.SecureEnclaveMLDSA65, keychain.SecureEnclaveMLDSA87:
+		return key, nil
+	default:
 		return nil, fmt.Errorf("unsupported Secure Enclave key algorithm %s", key.Algorithm())
 	}
-	return key, nil
 }
 
 func (k *KeychainCredentialCache) serviceName() (string, error) {

@@ -78,14 +78,14 @@ func NewSigningIdentity(key crypto.Signer, algorithm Algorithm, kid string, cert
 	}
 	public = clonePublicKey(public)
 	if algorithm == "" {
-		inferred, err := jwtint.InferAlgorithm(public)
+		inferred, err := inferSignerAlgorithm(key)
 		if err != nil {
 			return nil, fmt.Errorf("jwt: %w", err)
 		}
-		algorithm = Algorithm(inferred)
+		algorithm = inferred
 	}
-	if !jwtint.SignerSupportsAlgorithm(key, string(algorithm)) {
-		return nil, fmt.Errorf("jwt: algorithm %s is incompatible with key type %T", algorithm, public)
+	if !SignerSupportsAlgorithm(key, algorithm) {
+		return nil, fmt.Errorf("jwt: algorithm %s is incompatible with signer for key type %T", algorithm, public)
 	}
 	jwk, inferredKID, err := jwtint.PublicJWK(public)
 	if err != nil {

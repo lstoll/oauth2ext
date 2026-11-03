@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"lds.li/oauth2ext/internal/platformsecrets"
+	"lds.li/oauth2ext/jwt"
 )
 
 const (
@@ -78,5 +79,44 @@ func TestKeychainCredentialCacheOtherBinary(t *testing.T) {
 
 	if cred, err := cache.Get(issuer1, issuer1ClientID); err != nil || cred != nil {
 		t.Fatalf("entry from another binary was not a miss, got cred: %v err: %v", cred, err)
+	}
+}
+
+func TestKeychainCredentialCacheAlgorithmSelection(t *testing.T) {
+	if os.Getenv("TEST_KEYCHAIN") == "" || os.Getenv("TEST_SECURE_ENCLAVE") == "" {
+		t.Skip("TEST_KEYCHAIN and TEST_SECURE_ENCLAVE not set")
+		return
+	}
+
+	cache := &KeychainCredentialCache{Service: testService + "-alg"}
+
+	handle, key, err := cache.NewDPoPKey([]jwt.Algorithm{jwt.MLDSA65, jwt.ES256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := jwt.NewSigningIdentity(key, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ML-DSA-65 where the OS supports it, otherwise the ES256 fallback.
+	if alg := id.Algorithm(); alg != jwt.MLDSA65 && alg != jwt.ES256 {
+		t.Fatalf("unexpected algorithm %s", alg)
+	}
+	t.Logf("selected %s", id.Algorithm())
+
+	loaded, err := cache.LoadDPoPKey(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedID, err := jwt.NewSigningIdentity(loaded, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedID.Algorithm() != id.Algorithm() {
+		t.Fatalf("reloaded algorithm %s, want %s", loadedID.Algorithm(), id.Algorithm())
+	}
+
+	if _, _, err := cache.NewDPoPKey([]jwt.Algorithm{jwt.RS256}); err == nil {
+		t.Fatal("expected error when no offered algorithm is supported")
 	}
 }

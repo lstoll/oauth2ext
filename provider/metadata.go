@@ -1,6 +1,11 @@
 package provider
 
-import "encoding/json/jsontext"
+import (
+	"encoding/json/jsontext"
+	"slices"
+
+	"lds.li/oauth2ext/jwt"
+)
 
 // CodeChallengeMethod is https://www.rfc-editor.org/rfc/rfc7636#section-4.3
 type CodeChallengeMethod string
@@ -133,6 +138,9 @@ type OIDCProviderMetadata struct {
 	// private_key_jwt and client_secret_jwt authentication methods. Servers
 	// SHOULD support RS256. The value none MUST NOT be used.
 	TokenEndpointAuthSigningAlgValuesSupported []string `json:"token_endpoint_auth_signing_alg_values_supported,omitempty"`
+	// OPTIONAL. JSON array containing a list of the JWS alg values supported
+	// by the authorization server for DPoP proof JWTs (RFC 9449 section 5.1).
+	DPoPSigningAlgValuesSupported []string `json:"dpop_signing_alg_values_supported,omitempty"`
 	// OPTIONAL. JSON array containing a list of the display parameter values
 	// that the OpenID Provider supports. These values are described in Section
 	// 3.1.2.1 of OpenID Connect Core 1.0 [OpenID.Core].
@@ -214,6 +222,7 @@ func (m *OIDCProviderMetadata) Clone() *OIDCProviderMetadata {
 	out.ACRValuesSupported = append([]string(nil), m.ACRValuesSupported...)
 	out.SubjectTypesSupported = append([]string(nil), m.SubjectTypesSupported...)
 	out.IDTokenSigningAlgValuesSupported = append([]string(nil), m.IDTokenSigningAlgValuesSupported...)
+	out.DPoPSigningAlgValuesSupported = slices.Clone(m.DPoPSigningAlgValuesSupported)
 	out.IDTokenEncryptionAlgValuesSupported = append([]string(nil), m.IDTokenEncryptionAlgValuesSupported...)
 	out.IDTokenEncryptionEncValuesSupported = append([]string(nil), m.IDTokenEncryptionEncValuesSupported...)
 	out.UserinfoSigningAlgValuesSupported = append([]string(nil), m.UserinfoSigningAlgValuesSupported...)
@@ -273,4 +282,15 @@ func (m *OIDCProviderMetadata) registrationSupported() bool {
 
 func (m *OIDCProviderMetadata) registrationEndpoint() string {
 	return m.RegistrationEndpoint
+}
+
+// DPoPAlgorithms returns the server's dpop_signing_alg_values_supported that
+// this module can sign with, for tokencache.Config.DPoPAlgorithms. It is nil
+// when the server does not publish them, and non-nil but empty when none of
+// the published algorithms are supported.
+func (m *OIDCProviderMetadata) DPoPAlgorithms() []jwt.Algorithm {
+	if m == nil || m.DPoPSigningAlgValuesSupported == nil {
+		return nil
+	}
+	return algorithmsFromMetadata(m.DPoPSigningAlgValuesSupported)
 }

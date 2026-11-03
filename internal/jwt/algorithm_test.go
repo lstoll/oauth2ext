@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"testing"
@@ -66,5 +67,64 @@ func TestSignerSupportsAlgorithm(t *testing.T) {
 	}
 	if SignerSupportsAlgorithm(rsaKey, "ES256") {
 		t.Fatal("RSA key should not support ES256")
+	}
+}
+
+func mldsaParams() map[string]mldsa.Parameters {
+	return map[string]mldsa.Parameters{
+		"ML-DSA-44": mldsa.MLDSA44(),
+		"ML-DSA-65": mldsa.MLDSA65(),
+		"ML-DSA-87": mldsa.MLDSA87(),
+	}
+}
+
+func TestInferAlgorithmMLDSA(t *testing.T) {
+	for want, params := range mldsaParams() {
+		t.Run(want, func(t *testing.T) {
+			key, err := mldsa.GenerateKey(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := InferAlgorithm(key.PublicKey())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Fatalf("algorithm: got %q, want %q", got, want)
+			}
+			if err := ValidatePublicKey(key.PublicKey()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPublicKeySupportsAlgorithmMLDSA(t *testing.T) {
+	algs := []string{"ML-DSA-44", "ML-DSA-65", "ML-DSA-87", "EdDSA", "ES256", "RS256"}
+	for keyAlg, params := range mldsaParams() {
+		key, err := mldsa.GenerateKey(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, alg := range algs {
+			if got, want := PublicKeySupportsAlgorithm(key.PublicKey(), alg), alg == keyAlg; got != want {
+				t.Errorf("%s key supports %s: got %v, want %v", keyAlg, alg, got, want)
+			}
+		}
+	}
+}
+
+func TestValidatePublicKeyRejectsInvalidMLDSA(t *testing.T) {
+	if err := ValidatePublicKey((*mldsa.PublicKey)(nil)); err == nil {
+		t.Fatal("nil ML-DSA key accepted")
+	}
+	if err := ValidatePublicKey(new(mldsa.PublicKey)); err == nil {
+		t.Fatal("zero ML-DSA key accepted")
+	}
+	if _, err := InferAlgorithm(new(mldsa.PublicKey)); err == nil {
+		t.Fatal("InferAlgorithm accepted zero ML-DSA key")
+	}
+	if PublicKeySupportsAlgorithm(new(mldsa.PublicKey), "ML-DSA-44") {
+		t.Fatal("zero ML-DSA key supports ML-DSA-44")
 	}
 }

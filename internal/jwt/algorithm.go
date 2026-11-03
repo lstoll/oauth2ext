@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rsa"
 	"fmt"
 	"slices"
@@ -17,8 +18,8 @@ import (
 //
 // go-jose's cryptosigner.Opaque.Algs lists every compatible algorithm (RSA
 // yields RS* and PS*), so callers that need a single choice still have to
-// pick. This uses ES256/384/512 from the curve, RS256 for RSA, and EdDSA
-// for Ed25519.
+// pick. This uses ES256/384/512 from the curve, RS256 for RSA, EdDSA for
+// Ed25519, and ML-DSA-44/65/87 from the ML-DSA parameter set.
 func InferAlgorithm(pub crypto.PublicKey) (string, error) {
 	if err := ValidatePublicKey(pub); err != nil {
 		return "", err
@@ -30,6 +31,8 @@ func InferAlgorithm(pub crypto.PublicKey) (string, error) {
 		return "RS256", nil
 	case ed25519.PublicKey:
 		return "EdDSA", nil
+	case *mldsa.PublicKey:
+		return mldsaAlgorithm(key)
 	default:
 		return "", fmt.Errorf("unsupported public key type: %T", pub)
 	}
@@ -49,6 +52,9 @@ func ValidatePublicKey(pub crypto.PublicKey) error {
 			return fmt.Errorf("invalid Ed25519 public key")
 		}
 		return nil
+	case *mldsa.PublicKey:
+		_, err := mldsaAlgorithm(key)
+		return err
 	default:
 		return fmt.Errorf("unsupported public key type: %T", pub)
 	}
@@ -65,7 +71,8 @@ func SignerSupportsAlgorithm(signer crypto.Signer, alg string) bool {
 
 // PublicKeySupportsAlgorithm reports whether pub is suitable for alg. It is
 // intentionally stricter than merely accepting a key family: EC algorithms
-// are bound to their named curve and EdDSA is bound to Ed25519.
+// are bound to their named curve, EdDSA is bound to Ed25519, and ML-DSA
+// algorithms are bound to their parameter set.
 func PublicKeySupportsAlgorithm(pub crypto.PublicKey, alg string) bool {
 	if err := ValidatePublicKey(pub); err != nil {
 		return false
@@ -81,8 +88,27 @@ func PublicKeySupportsAlgorithm(pub crypto.PublicKey, alg string) bool {
 		return err == nil && alg == want
 	case ed25519.PublicKey:
 		return alg == "EdDSA"
+	case *mldsa.PublicKey:
+		want, err := mldsaAlgorithm(key)
+		return err == nil && alg == want
 	}
 	return false
+}
+
+func mldsaAlgorithm(key *mldsa.PublicKey) (string, error) {
+	if key == nil || *key == (mldsa.PublicKey{}) {
+		return "", fmt.Errorf("invalid ML-DSA public key")
+	}
+	switch key.Parameters() {
+	case mldsa.MLDSA44():
+		return "ML-DSA-44", nil
+	case mldsa.MLDSA65():
+		return "ML-DSA-65", nil
+	case mldsa.MLDSA87():
+		return "ML-DSA-87", nil
+	default:
+		return "", fmt.Errorf("unsupported ML-DSA parameter set")
+	}
 }
 
 func validateRSA(key *rsa.PublicKey) error {

@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"slices"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
+	"lds.li/oauth2ext/jwt"
 )
 
 // dpopHandleVersion is the first byte of a DPoP key handle. The handle is:
@@ -22,10 +24,14 @@ import (
 // where the parts are the marshaled TPM structures, wrapped by the SRK.
 const dpopHandleVersion = 1
 
-// NewDPoPKey creates a new P-256 signing key under the SRK. The returned
-// handle is the wrapped key, and is only usable on this TPM. Nothing is
-// persisted by this call.
-func (c *TPMCredentialCache) NewDPoPKey() ([]byte, crypto.Signer, error) {
+// NewDPoPKey creates a new P-256 signing key under the SRK. The TPM only
+// supports ES256, so an error is returned if algs does not include it. The
+// returned handle is the wrapped key, and is only usable on this TPM. Nothing
+// is persisted by this call.
+func (c *TPMCredentialCache) NewDPoPKey(algs []jwt.Algorithm) ([]byte, crypto.Signer, error) {
+	if !slices.Contains(algs, jwt.ES256) {
+		return nil, nil, fmt.Errorf("TPM keys only support %s, which is not among the accepted algorithms %v", jwt.ES256, algs)
+	}
 	rwc, err := openTPM()
 	if err != nil {
 		return nil, nil, err

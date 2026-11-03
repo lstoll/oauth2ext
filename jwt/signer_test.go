@@ -1,8 +1,10 @@
 package jwt
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -250,4 +252,96 @@ func decodeProtectedHeader(t *testing.T, compact string) map[string]any {
 		t.Fatal(err)
 	}
 	return header
+}
+
+type mldsaCase struct {
+	alg    Algorithm
+	params mldsa.Parameters
+}
+
+func mldsaCases() []mldsaCase {
+	return []mldsaCase{
+		{MLDSA44, mldsa.MLDSA44()},
+		{MLDSA65, mldsa.MLDSA65()},
+		{MLDSA87, mldsa.MLDSA87()},
+	}
+}
+
+func newMLDSAKey(t testing.TB, params mldsa.Parameters) *mldsa.PrivateKey {
+	t.Helper()
+	key, err := mldsa.GenerateKey(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// TestMLDSARoundTripThroughJWKS checks our ML-DSA wiring: algorithm inference,
+// key/algorithm binding, and publishing then parsing an AKP JWKS.
+func TestMLDSARoundTripThroughJWKS(t *testing.T) {
+	for _, tc := range mldsaCases() {
+		t.Run(string(tc.alg), func(t *testing.T) {
+			key := newMLDSAKey(t, tc.params)
+			wrong := MLDSA65
+			if tc.alg == MLDSA65 {
+				wrong = MLDSA44
+			}
+			if _, err := NewSigningIdentity(key, wrong, ""); err == nil {
+				t.Fatalf("%s key accepted with algorithm %s", tc.alg, wrong)
+			}
+			identity, err := NewSigningIdentity(key, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if identity.Algorithm() != tc.alg {
+				t.Fatalf("algorithm: got %q, want %q", identity.Algorithm(), tc.alg)
+			}
+			compact, err := identity.Sign(t.Context(), map[string]any{"sub": "alice"}, SignOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys, err := NewVerificationKeySetFromSigner(identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			jwks, err := json.Marshal(keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := ParseVerificationJWKS(jwks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy := ValidationPolicy{IgnoreIssuer: true, IgnoreAudiences: true, AllowedAlgorithms: []Algorithm{tc.alg}, Type: TypeAny, AllowMissingExpiration: true}
+			if _, err := verifyJWT(t, parsed, compact, policy); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+type restrictedSigner struct {
+	crypto.Signer
+	algs []Algorithm
+}
+
+func (r restrictedSigner) SupportedAlgorithms() []Algorithm { return r.algs }
+
+func TestSignerRespectsSupportedAlgorithms(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs1Only := restrictedSigner{key, []Algorithm{RS256}}
+	if _, err := NewSigningIdentity(pkcs1Only, PS256, ""); err == nil {
+		t.Error("PS256 accepted for a signer that only supports RS256")
+	}
+	pssOnly := restrictedSigner{key, []Algorithm{PS256}}
+	identity, err := NewSigningIdentity(pssOnly, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Algorithm() != PS256 {
+		t.Errorf("inferred %s, want PS256 for a signer that only supports PS256", identity.Algorithm())
+	}
 }

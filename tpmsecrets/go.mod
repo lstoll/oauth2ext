@@ -12,6 +12,6 @@ require (
 )
 
 require (
-	github.com/go-jose/go-jose/v4 v4.1.7 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.8 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 )
