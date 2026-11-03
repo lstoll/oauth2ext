@@ -186,7 +186,8 @@ func algorithmsFromMetadata(algs []string) []jwt.Algorithm {
 		case jwt.RS256, jwt.RS384, jwt.RS512,
 			jwt.PS256, jwt.PS384, jwt.PS512,
 			jwt.ES256, jwt.ES384, jwt.ES512,
-			jwt.EdDSA:
+			jwt.EdDSA,
+			jwt.MLDSA44, jwt.MLDSA65, jwt.MLDSA87:
 			out = append(out, alg)
 		}
 	}

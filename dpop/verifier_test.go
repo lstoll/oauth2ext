@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -151,6 +152,16 @@ func TestSign_AllowsSupportedAsymmetricAlgorithms(t *testing.T) {
 	}
 }
 
+func mldsaKey(params mldsa.Parameters) func(t *testing.T) crypto.Signer {
+	return func(t *testing.T) crypto.Signer {
+		key, err := mldsa.GenerateKey(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return key
+	}
+}
+
 func TestDPoP_SignVerify_AllSupportedAlgorithms(t *testing.T) {
 	tests := []struct {
 		name string
@@ -221,6 +232,10 @@ func TestDPoP_SignVerify_AllSupportedAlgorithms(t *testing.T) {
 			}
 			return key
 		}},
+		{name: "ML-DSA-44", alg: jwt.MLDSA44, key: mldsaKey(mldsa.MLDSA44())},
+		{name: "ML-DSA-65", alg: jwt.MLDSA65, key: mldsaKey(mldsa.MLDSA65())},
+		// ML-DSA-87 is the largest proof this package signs; it must fit maxProofBytes.
+		{name: "ML-DSA-87", alg: jwt.MLDSA87, key: mldsaKey(mldsa.MLDSA87())},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

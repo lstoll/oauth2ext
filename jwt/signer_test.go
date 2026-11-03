@@ -3,6 +3,7 @@ package jwt
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -250,4 +251,70 @@ func decodeProtectedHeader(t *testing.T, compact string) map[string]any {
 		t.Fatal(err)
 	}
 	return header
+}
+
+type mldsaCase struct {
+	alg    Algorithm
+	params mldsa.Parameters
+}
+
+func mldsaCases() []mldsaCase {
+	return []mldsaCase{
+		{MLDSA44, mldsa.MLDSA44()},
+		{MLDSA65, mldsa.MLDSA65()},
+		{MLDSA87, mldsa.MLDSA87()},
+	}
+}
+
+func newMLDSAKey(t testing.TB, params mldsa.Parameters) *mldsa.PrivateKey {
+	t.Helper()
+	key, err := mldsa.GenerateKey(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// TestMLDSARoundTripThroughJWKS checks our ML-DSA wiring: algorithm inference,
+// key/algorithm binding, and publishing then parsing an AKP JWKS.
+func TestMLDSARoundTripThroughJWKS(t *testing.T) {
+	for _, tc := range mldsaCases() {
+		t.Run(string(tc.alg), func(t *testing.T) {
+			key := newMLDSAKey(t, tc.params)
+			wrong := MLDSA65
+			if tc.alg == MLDSA65 {
+				wrong = MLDSA44
+			}
+			if _, err := NewSigningIdentity(key, wrong, ""); err == nil {
+				t.Fatalf("%s key accepted with algorithm %s", tc.alg, wrong)
+			}
+			identity, err := NewSigningIdentity(key, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if identity.Algorithm() != tc.alg {
+				t.Fatalf("algorithm: got %q, want %q", identity.Algorithm(), tc.alg)
+			}
+			compact, err := identity.Sign(t.Context(), map[string]any{"sub": "alice"}, SignOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys, err := NewVerificationKeySetFromSigner(identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			jwks, err := json.Marshal(keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := ParseVerificationJWKS(jwks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy := ValidationPolicy{IgnoreIssuer: true, IgnoreAudiences: true, AllowedAlgorithms: []Algorithm{tc.alg}, Type: TypeAny, AllowMissingExpiration: true}
+			if _, err := verifyJWT(t, parsed, compact, policy); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }

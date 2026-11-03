@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -54,8 +55,9 @@ func TestProviderVerifier(t *testing.T) {
 }
 
 func TestAlgorithmsFromMetadataIgnoresUnsupportedAlgorithms(t *testing.T) {
-	got := algorithmsFromMetadata([]string{"HS256", "ES256", "unknown"})
-	if len(got) != 1 || got[0] != jwt.ES256 {
-		t.Fatalf("algorithms: got %v, want [ES256]", got)
+	got := algorithmsFromMetadata([]string{"HS256", "ES256", "ML-DSA-44", "ml-dsa-65", "ML-DSA-87", "unknown"})
+	want := []jwt.Algorithm{jwt.ES256, jwt.MLDSA44, jwt.MLDSA87}
+	if !slices.Equal(got, want) {
+		t.Fatalf("algorithms: got %v, want %v", got, want)
 	}
 }

@@ -10,16 +10,19 @@ import (
 type Algorithm string
 
 const (
-	RS256 Algorithm = "RS256"
-	RS384 Algorithm = "RS384"
-	RS512 Algorithm = "RS512"
-	PS256 Algorithm = "PS256"
-	PS384 Algorithm = "PS384"
-	PS512 Algorithm = "PS512"
-	ES256 Algorithm = "ES256"
-	ES384 Algorithm = "ES384"
-	ES512 Algorithm = "ES512"
-	EdDSA Algorithm = "EdDSA"
+	RS256   Algorithm = "RS256"
+	RS384   Algorithm = "RS384"
+	RS512   Algorithm = "RS512"
+	PS256   Algorithm = "PS256"
+	PS384   Algorithm = "PS384"
+	PS512   Algorithm = "PS512"
+	ES256   Algorithm = "ES256"
+	ES384   Algorithm = "ES384"
+	ES512   Algorithm = "ES512"
+	EdDSA   Algorithm = "EdDSA"
+	MLDSA44 Algorithm = "ML-DSA-44"
+	MLDSA65 Algorithm = "ML-DSA-65"
+	MLDSA87 Algorithm = "ML-DSA-87"
 )
 
 func (a Algorithm) jose() (jose.SignatureAlgorithm, error) {
@@ -44,6 +47,12 @@ func (a Algorithm) jose() (jose.SignatureAlgorithm, error) {
 		return jose.ES512, nil
 	case EdDSA:
 		return jose.EdDSA, nil
+	case MLDSA44:
+		return jose.MLDSA44, nil
+	case MLDSA65:
+		return jose.MLDSA65, nil
+	case MLDSA87:
+		return jose.MLDSA87, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported AllowedAlgorithms value %q", ErrPolicy, a)
 	}

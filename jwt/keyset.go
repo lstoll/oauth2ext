@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/mldsa"
 	"crypto/rsa"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
@@ -39,6 +40,15 @@ func clonePublicKey(key crypto.PublicKey) crypto.PublicKey {
 		return out
 	case ed25519.PublicKey:
 		return append(ed25519.PublicKey(nil), k...)
+	case *mldsa.PublicKey:
+		if k == nil || *k == (mldsa.PublicKey{}) {
+			return (*mldsa.PublicKey)(nil)
+		}
+		out, err := mldsa.NewPublicKey(k.Parameters(), k.Bytes())
+		if err != nil {
+			return (*mldsa.PublicKey)(nil)
+		}
+		return out
 	default:
 		return nil
 	}
@@ -181,7 +191,8 @@ func (k *VerificationKeySet) UnmarshalJSON(data []byte) error {
 		if meta == nil {
 			return fmt.Errorf("%w: jwk %d must be an object", ErrKey, i)
 		}
-		for _, private := range []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k"} {
+		// "priv" is the RFC 9964 AKP (ML-DSA) private seed.
+		for _, private := range []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k", "priv"} {
 			if _, exists := meta[private]; exists {
 				return fmt.Errorf("%w: jwk %d contains private key material", ErrKey, i)
 			}
@@ -219,9 +230,22 @@ func (k *VerificationKeySet) UnmarshalJSON(data []byte) error {
 			}
 		}
 		switch eligibility.Kty {
-		case "RSA", "EC", "OKP":
+		case "RSA", "EC", "OKP", "AKP":
 		default:
 			continue
+		}
+		if eligibility.Kty == "AKP" {
+			// RFC 9964 requires alg on AKP keys: it is the only member that
+			// names the parameter set. AKP also covers algorithms other than
+			// ML-DSA, which are skipped like other unsupported keys.
+			if eligibility.Alg == "" {
+				return fmt.Errorf("%w: jwk %d requires alg", ErrKey, i)
+			}
+			switch Algorithm(eligibility.Alg) {
+			case MLDSA44, MLDSA65, MLDSA87:
+			default:
+				continue
+			}
 		}
 		if eligibility.Alg != "" {
 			if _, err := Algorithm(eligibility.Alg).jose(); err != nil {
